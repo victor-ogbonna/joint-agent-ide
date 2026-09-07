@@ -1,0 +1,6 @@
+{
+  "name": "AI Microcontroller Web3 IDE",
+  "description": "A browser-based AI IDE for microcontrollers (ESP32/Arduino) with visual schematic generation, terminal simulation, Web Serial flashing, and MetaMask Web3 authentication.",
+  "requestFramePermissions": ["serial", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

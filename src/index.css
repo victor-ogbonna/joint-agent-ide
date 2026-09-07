@@ -1,0 +1,717 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap');
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-display: "Space Grotesk", sans-serif;
+}
+
+/* ============================================
+   Dark Theme (Default) — Deep Space Palette
+   ============================================ */
+:root {
+  --bg-root: #08090d;
+  --bg-panel: #111318;
+  --bg-surface: #1a1d25;
+  --bg-hover: #252830;
+  --border-main: #1e2230;
+  --border-light: #2a2f3d;
+  --text-main: #e2e4ea;
+  --text-muted: #6b7394;
+  --text-subtle: #4a5070;
+  --accent-primary: #f97316;
+  --accent-primary-soft: rgba(249, 115, 22, 0.12);
+  --accent-secondary: #3b82f6;
+  --accent-secondary-soft: rgba(59, 130, 246, 0.12);
+  --term-success: #34d399;
+  --term-error: #f87171;
+  --term-input: #60a5fa;
+  --term-serial: #fbbf24;
+  --bg-schematic: #0f1117;
+  --glow-primary: rgba(249, 115, 22, 0.15);
+  --glow-secondary: rgba(59, 130, 246, 0.15);
+  --gradient-hero: linear-gradient(135deg, #f97316 0%, #ef4444 50%, #ec4899 100%);
+  --gradient-accent: linear-gradient(135deg, #f97316 0%, #fb923c 100%);
+  --shadow-panel: 0 1px 3px rgba(0,0,0,0.4), 0 4px 16px rgba(0,0,0,0.2);
+  --shadow-glow: 0 0 20px rgba(249, 115, 22, 0.1);
+}
+
+/* ============================================
+   Light Theme — Clean & Luminous
+   ============================================ */
+:root[data-theme="light"] {
+  --bg-root: #f8f9fc;
+  --bg-panel: #ffffff;
+  --bg-surface: #eef0f5;
+  --bg-hover: #e2e5ec;
+  --border-main: #dde0e8;
+  --border-light: #c8ccd8;
+  --text-main: #1a1d2e;
+  --text-muted: #6b728e;
+  --text-subtle: #9ba2b8;
+  --accent-primary: #ea580c;
+  --accent-primary-soft: rgba(234, 88, 12, 0.08);
+  --accent-secondary: #2563eb;
+  --accent-secondary-soft: rgba(37, 99, 235, 0.08);
+  --term-success: #16a34a;
+  --term-error: #dc2626;
+  --term-input: #2563eb;
+  --term-serial: #b45309;
+  --bg-schematic: #f0f2f7;
+  --glow-primary: rgba(234, 88, 12, 0.08);
+  --glow-secondary: rgba(37, 99, 235, 0.08);
+  --gradient-hero: linear-gradient(135deg, #ea580c 0%, #dc2626 50%, #db2777 100%);
+  --gradient-accent: linear-gradient(135deg, #ea580c 0%, #f97316 100%);
+  --shadow-panel: 0 1px 3px rgba(0,0,0,0.06), 0 4px 16px rgba(0,0,0,0.04);
+  --shadow-glow: 0 0 20px rgba(234, 88, 12, 0.05);
+}
+
+/* ============================================
+   Global Base Styles
+   ============================================ */
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background-color: var(--bg-root);
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Selection color */
+::selection {
+  background: var(--accent-primary);
+  color: white;
+}
+
+/* Keyboard focus visibility — a clear ring for keyboard navigation,
+   invisible for mouse/touch clicks (focus-visible), across every
+   interactive element. This was entirely missing before. */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ============================================
+   Custom Scrollbars
+   ============================================ */
+.terminal-scrollbar::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+.terminal-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.terminal-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--border-light);
+  border-radius: 10px;
+}
+.terminal-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--text-subtle);
+}
+
+/* Firefox scrollbar */
+.terminal-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-light) transparent;
+}
+
+/* ============================================
+   Animations & Micro-Interactions
+   ============================================ */
+
+/* Wire pulse animation */
+@keyframes dash {
+  to { stroke-dashoffset: -20; }
+}
+
+.wire-active {
+  stroke-dasharray: 5, 5;
+  animation: dash 1s linear infinite;
+}
+
+/* Gentle breathing glow */
+@keyframes breathe {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+/* Slide up entrance */
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-slide-up {
+  animation: slideUp 0.3s ease-out forwards;
+}
+
+/* Pulse ring */
+@keyframes pulseRing {
+  0% { box-shadow: 0 0 0 0 var(--accent-primary); opacity: 1; }
+  100% { box-shadow: 0 0 0 8px var(--accent-primary); opacity: 0; }
+}
+
+.pulse-ring::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  animation: pulseRing 2s ease-out infinite;
+}
+
+/* Shimmer loading */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--bg-surface) 25%,
+    var(--bg-hover) 37%,
+    var(--bg-surface) 63%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.8s ease-in-out infinite;
+}
+
+/* Status dot pulse */
+@keyframes statusPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.5); }
+  50% { box-shadow: 0 0 0 4px rgba(34, 197, 94, 0); }
+}
+
+.status-online {
+  animation: statusPulse 2s ease-in-out infinite;
+}
+
+/* Launch screen — mecha-blazing logo, shown briefly while auth resolves */
+/* ---------------------------------------------------------------------------
+   Launch sequence — the power-on the app plays while auth resolves. Reads as
+   instrumentation coming online: reticle rings settle, HUD brackets snap to
+   the core, a scan sweeps the logo, telemetry counts up.
+
+   Everything animates transform/opacity/filter only so it stays on the
+   compositor and doesn't jank on a phone. Reduced-motion is honoured at the
+   bottom of this block — the composition still reads, it just stops moving.
+   --------------------------------------------------------------------------- */
+@keyframes launchSpinCw  { to { transform: rotate(360deg); } }
+@keyframes launchSpinCcw { to { transform: rotate(-360deg); } }
+@keyframes launchGridDrift { to { transform: translate(46px, 46px); } }
+
+/* Core hits slightly hot and overshoots, then settles — a capacitor charging,
+   not a logo politely fading in. */
+@keyframes launchCorePower {
+  0%   { transform: scale(0.72); opacity: 0; filter: brightness(2.6) blur(7px); }
+  38%  { transform: scale(1.07); opacity: 1; filter: brightness(1.55) blur(0); }
+  58%  { transform: scale(0.975); filter: brightness(1.05); }
+  100% { transform: scale(1); opacity: 1; filter: brightness(1); }
+}
+
+@keyframes launchScan {
+  0%   { transform: translateY(-140%); opacity: 0; }
+  14%  { opacity: 1; }
+  86%  { opacity: 1; }
+  100% { transform: translateY(140%); opacity: 0; }
+}
+
+@keyframes launchRingPulse {
+  0%   { transform: scale(0.5); opacity: 0.85; }
+  100% { transform: scale(2); opacity: 0; }
+}
+
+@keyframes launchBracketIn {
+  from { opacity: 0; transform: scale(1.6); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes launchBarFill { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+
+/* Rare, brief dip — reads as a live signal rather than a looping GIF. */
+@keyframes launchFlicker {
+  0%, 91%, 100% { opacity: 1; }
+  93% { opacity: 0.62; }
+  95% { opacity: 1; }
+}
+
+.launch-screen {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 32px;
+  overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 50% 44%, rgba(249, 115, 22, 0.11), transparent 62%),
+    var(--bg-root);
+}
+
+/* Engineering grid, masked to a soft vignette so it fades out at the edges. */
+.launch-screen::before {
+  content: "";
+  position: absolute;
+  inset: -20%;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.15) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.15) 1px, transparent 1px);
+  background-size: 46px 46px;
+  -webkit-mask-image: radial-gradient(circle at 50% 44%, #000 0%, transparent 68%);
+  mask-image: radial-gradient(circle at 50% 44%, #000 0%, transparent 68%);
+  opacity: 0.55;
+  animation: launchGridDrift 12s linear infinite;
+}
+
+.launch-stage {
+  position: relative;
+  width: 190px;
+  height: 190px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.launch-reticle { position: absolute; inset: 0; width: 100%; height: 100%; }
+.launch-ring-outer { transform-origin: 50% 50%; animation: launchSpinCw 7s linear infinite; }
+.launch-ring-mid   { transform-origin: 50% 50%; animation: launchSpinCcw 4.6s linear infinite; }
+
+/* inset:0 + margin:auto centres this explicitly. Without offsets it was
+   relying on the static position of an abspos child inside a centred flex
+   container — Chrome resolves that to the centre, but it's exactly the
+   behaviour that drifts between engines, so mobile could land it off-centre. */
+.launch-pulse {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 148px;
+  height: 148px;
+  border-radius: 9999px;
+  border: 1px solid var(--accent-primary);
+  animation: launchRingPulse 1.5s ease-out infinite;
+}
+/* Offset the second ring by half a cycle so pulses feel continuous. */
+.launch-pulse:nth-of-type(2) { animation-delay: 0.75s; }
+
+.launch-core {
+  position: relative;
+  width: 78px;
+  height: 78px;
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow: 0 0 36px rgba(249, 115, 22, 0.45), inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  /* Power-on lands in 0.8s so the core is settled well before the 1.5s
+     handoff, rather than still moving when the screen swaps out. */
+  animation:
+    launchCorePower 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) both,
+    launchFlicker 3.4s linear infinite 0.8s;
+}
+.launch-core img { display: block; width: 100%; height: 100%; border-radius: inherit; }
+
+.launch-scan {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 34%;
+  background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.5), transparent);
+  mix-blend-mode: overlay;
+  animation: launchScan 1.2s ease-in-out infinite 0.45s;
+}
+
+.launch-bracket {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--accent-primary);
+  opacity: 0;
+  animation: launchBracketIn 0.5s ease-out forwards;
+}
+.launch-bracket.tl { top: 6px;    left: 6px;  border-right: 0; border-bottom: 0; border-radius: 5px 0 0 0; animation-delay: 0.15s; }
+.launch-bracket.tr { top: 6px;    right: 6px; border-left: 0;  border-bottom: 0; border-radius: 0 5px 0 0; animation-delay: 0.25s; }
+.launch-bracket.bl { bottom: 6px; left: 6px;  border-right: 0; border-top: 0;    border-radius: 0 0 0 5px; animation-delay: 0.35s; }
+.launch-bracket.br { bottom: 6px; right: 6px; border-left: 0;  border-top: 0;    border-radius: 0 0 5px 0; animation-delay: 0.45s; }
+
+.launch-readout {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 11px;
+}
+.launch-track {
+  width: 186px;
+  max-width: 60vw;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--border-main);
+  overflow: hidden;
+}
+/* Fills over the same 1.5s the splash is held, so it reads as tracking the
+   real wait rather than as decoration that finishes early. */
+.launch-fill {
+  display: block;
+  height: 100%;
+  transform-origin: 0 50%;
+  background: var(--gradient-hero);
+  animation: launchBarFill 1.5s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* Phones: scale the whole composition down proportionally so it reads as a
+   contained instrument panel rather than crowding the screen. */
+@media (max-width: 480px) {
+  .launch-screen { gap: 26px; }
+  .launch-stage { width: 158px; height: 158px; }
+  .launch-pulse { width: 122px; height: 122px; }
+  .launch-core { width: 64px; height: 64px; border-radius: 17px; }
+  .launch-bracket { width: 15px; height: 15px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .launch-screen::before,
+  .launch-ring-outer,
+  .launch-ring-mid,
+  .launch-pulse,
+  .launch-scan { animation: none; }
+  .launch-pulse { opacity: 0.25; }
+  .launch-core { animation: none; opacity: 1; transform: none; }
+  .launch-bracket { animation: none; opacity: 1; }
+  .launch-fill { animation-duration: 0.6s; animation-timing-function: linear; }
+}
+
+/* Gradient text */
+.gradient-text {
+  background: var(--gradient-hero);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Gradient border */
+.gradient-border {
+  position: relative;
+}
+.gradient-border::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: var(--gradient-hero);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* ============================================
+   Component-Specific Styles
+   ============================================ */
+
+/* Header glass effect */
+.header-glass {
+  background: color-mix(in srgb, var(--bg-panel) 85%, transparent);
+  backdrop-filter: blur(16px) saturate(1.3);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+}
+
+/* Panel separator hover glow */
+.panel-separator {
+  transition: all 0.2s ease;
+}
+.panel-separator:hover {
+  box-shadow: 0 0 8px var(--glow-primary);
+}
+
+/* Editor container overrides */
+.editor-container textarea {
+  caret-color: var(--accent-primary) !important;
+}
+.editor-container pre {
+  margin: 0 !important;
+}
+
+/* Chat message bubbles */
+.chat-bubble-user {
+  background: linear-gradient(135deg, var(--bg-surface) 0%, color-mix(in srgb, var(--accent-primary-soft) 60%, var(--bg-surface)) 100%);
+  border: 1px solid var(--border-main);
+  border-right: 2px solid var(--accent-primary);
+}
+
+.chat-bubble-assistant {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-main);
+  border-left: 2px solid var(--accent-secondary);
+}
+
+/* Button hover lift */
+.btn-lift {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.btn-lift:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-panel);
+}
+.btn-lift:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+/* Starter card hover */
+.starter-card {
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.starter-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  border-color: var(--accent-primary) !important;
+}
+
+/* Toolbar button */
+.toolbar-btn {
+  transition: all 0.15s ease;
+  position: relative;
+}
+.toolbar-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+.toolbar-btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+/* Logo accent line */
+.logo-accent {
+  position: relative;
+}
+.logo-accent::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--gradient-hero);
+  border-radius: 1px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.logo-accent:hover::after {
+  opacity: 1;
+}
+
+/* Tab active indicator */
+.tab-active {
+  position: relative;
+}
+.tab-active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--gradient-accent);
+  border-radius: 1px 1px 0 0;
+}
+
+/* ============================================
+   PrismJS Syntax Highlighting — Enhanced
+   ============================================ */
+code[class*="language-"],
+pre[class*="language-"] {
+  color: var(--text-main);
+  direction: ltr;
+  text-align: left;
+  white-space: pre;
+  word-spacing: normal;
+  word-break: normal;
+  tab-size: 2;
+  hyphens: none;
+}
+
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+  color: var(--text-subtle);
+  font-style: italic;
+}
+
+.token.punctuation {
+  color: var(--text-muted);
+}
+
+.token.namespace {
+  opacity: .7;
+}
+
+.token.property,
+.token.tag,
+.token.boolean,
+.token.number,
+.token.constant,
+.token.symbol,
+.token.deleted {
+  color: #22d3ee;
+}
+
+.token.selector,
+.token.attr-name,
+.token.string,
+.token.char,
+.token.builtin,
+.token.inserted {
+  color: #34d399;
+}
+
+.token.operator,
+.token.entity,
+.token.url,
+.language-css .token.string,
+.style .token.string {
+  color: #fb923c;
+}
+
+.token.atrule,
+.token.attr-value,
+.token.keyword {
+  color: #818cf8;
+  font-weight: 600;
+}
+
+.token.function,
+.token.class-name {
+  color: #fbbf24;
+}
+
+.token.regex,
+.token.important,
+.token.variable {
+  color: #f472b6;
+}
+
+.token.important,
+.token.bold {
+  font-weight: bold;
+}
+.token.italic {
+  font-style: italic;
+}
+
+.token.entity {
+  cursor: help;
+}
+
+/* Light mode syntax adjustments */
+:root[data-theme="light"] .token.property,
+:root[data-theme="light"] .token.tag,
+:root[data-theme="light"] .token.boolean,
+:root[data-theme="light"] .token.number,
+:root[data-theme="light"] .token.constant,
+:root[data-theme="light"] .token.symbol,
+:root[data-theme="light"] .token.deleted {
+  color: #0891b2;
+}
+
+:root[data-theme="light"] .token.selector,
+:root[data-theme="light"] .token.attr-name,
+:root[data-theme="light"] .token.string,
+:root[data-theme="light"] .token.char,
+:root[data-theme="light"] .token.builtin,
+:root[data-theme="light"] .token.inserted {
+  color: #16a34a;
+}
+
+:root[data-theme="light"] .token.atrule,
+:root[data-theme="light"] .token.attr-value,
+:root[data-theme="light"] .token.keyword {
+  color: #7c3aed;
+}
+
+:root[data-theme="light"] .token.function,
+:root[data-theme="light"] .token.class-name {
+  color: #d97706;
+}
+
+:root[data-theme="light"] .token.comment,
+:root[data-theme="light"] .token.prolog,
+:root[data-theme="light"] .token.doctype,
+:root[data-theme="light"] .token.cdata {
+  color: #9ba2b8;
+}
+
+/* ============================================
+   Markdown Typography Overrides
+   ============================================ */
+
+.prose {
+  --tw-prose-body: var(--text-main);
+  --tw-prose-headings: var(--text-main);
+  --tw-prose-links: var(--accent-secondary);
+  --tw-prose-bold: var(--text-main);
+  --tw-prose-counters: var(--text-muted);
+  --tw-prose-bullets: var(--text-muted);
+  --tw-prose-hr: var(--border-light);
+  --tw-prose-quotes: var(--text-muted);
+  --tw-prose-quote-borders: var(--border-light);
+  --tw-prose-captions: var(--text-muted);
+  --tw-prose-code: var(--term-serial);
+  --tw-prose-pre-code: var(--text-main);
+  --tw-prose-pre-bg: var(--bg-surface);
+  --tw-prose-th-borders: var(--border-light);
+  --tw-prose-td-borders: var(--border-light);
+  
+  --tw-prose-invert-body: var(--text-main);
+  --tw-prose-invert-headings: var(--text-main);
+  --tw-prose-invert-links: var(--accent-secondary);
+  --tw-prose-invert-bold: var(--text-main);
+  --tw-prose-invert-counters: var(--text-muted);
+  --tw-prose-invert-bullets: var(--text-muted);
+  --tw-prose-invert-hr: var(--border-light);
+  --tw-prose-invert-quotes: var(--text-muted);
+  --tw-prose-invert-quote-borders: var(--border-light);
+  --tw-prose-invert-captions: var(--text-muted);
+  --tw-prose-invert-code: var(--term-serial);
+  --tw-prose-invert-pre-code: var(--text-main);
+  --tw-prose-invert-pre-bg: var(--bg-surface);
+  --tw-prose-invert-th-borders: var(--border-light);
+  --tw-prose-invert-td-borders: var(--border-light);
+}
+
+.prose pre {
+  background-color: var(--bg-surface) !important;
+  color: var(--text-main) !important;
+  border: 1px solid var(--border-main);
+  border-radius: 8px;
+}
+.prose pre code {
+  color: inherit !important;
+}
+.prose code {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-surface);
+  font-size: 0.85em;
+}
+.prose a {
+  text-decoration: none;
+  border-bottom: 1px solid var(--accent-secondary);
+  transition: border-color 0.2s;
+}
+.prose a:hover {
+  border-bottom-color: var(--accent-primary);
+}

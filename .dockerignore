@@ -1,0 +1,44 @@
+node_modules
+dist
+build
+.git
+*.log
+
+# Secrets — must never be baked into an image layer. Real values are injected
+# at deploy time via Cloud Run / Secret Manager instead.
+.env
+.env.local
+.admin-config.json
+
+# Local-only PlatformIO cache — the image bakes its own at build time (see
+# Dockerfile), a stale local one would just bloat the build context.
+.platformio
+.piocore-installer-*
+
+# Local hardware/dev-sandbox artifacts, not part of the app itself
+arduino_data
+arduino_downloads
+screenshot.png
+
+# One-off dev/patch scripts from earlier iterations — unused by any npm
+# script and not imported by the app, no reason to ship them in the image
+get-pip.py
+get-platformio.py
+patch_*.py
+patch_*.js
+fix_*.sh
+fix.js
+fix.sh
+fix_props.py
+rewrite_schematic.sh
+update_*.sh
+update_*.js
+install_pio.sh
+list_models.js
+test.js
+test-dom.js
+test-esptool.ts
+test-network.js
+test_gemini.js
+screenshot.js
+server_output.log
