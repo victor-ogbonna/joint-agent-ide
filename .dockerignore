@@ -42,3 +42,8 @@ test-network.js
 test_gemini.js
 screenshot.js
 server_output.log
+
+# Deployment config — read by Docker Compose on the host, never needed inside
+# the image. Copying them in would invalidate the build cache on every edit.
+docker-compose.yml
+Caddyfile

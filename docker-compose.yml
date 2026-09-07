@@ -1,0 +1,62 @@
+# Joint-Agent IDE — production stack for a single VPS (Hetzner Cloud etc.)
+#
+# Two containers. The app never faces the internet directly: Caddy owns 80/443,
+# terminates TLS, and proxies inward over a private network. Caddy obtains and
+# renews Let's Encrypt certificates on its own — no certbot, no cron, no manual
+# renewal to forget about in ninety days.
+#
+#   docker compose up -d --build     start (first run builds the image)
+#   docker compose logs -f app       follow application logs
+#   docker compose down              stop
+#
+# The app image bakes in the PlatformIO toolchain, so the first build is slow
+# (roughly 5-10 minutes) and later ones reuse cached layers.
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+    # Deliberately no `ports:` mapping — publishing 8080 to the host would let
+    # anyone reach the app over plain HTTP on that port, bypassing Caddy and TLS
+    # entirely. Only Caddy can reach it, over the internal network below.
+    expose:
+      - "8080"
+    networks:
+      - web
+    healthcheck:
+      # /api/status is unauthenticated and returns booleans only, which makes it
+      # a safe liveness probe.
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:8080/api/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Named volumes so issued certificates survive a container rebuild —
+      # without these, every redeploy re-requests certs and can hit Let's
+      # Encrypt rate limits.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    networks:
+      - web
+
+networks:
+  web:
+
+volumes:
+  caddy_data:
+  caddy_config:

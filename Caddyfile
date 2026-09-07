@@ -1,0 +1,42 @@
+# Joint-Agent IDE — reverse proxy and automatic HTTPS.
+#
+# BEFORE A DOMAIN EXISTS: leave this as-is. `:80` serves over plain HTTP on the
+# server's IP address, which is enough to confirm the deployment works.
+#
+# ONCE DNS POINTS AT THE SERVER: replace the `:80` line below with your domain,
+# e.g.
+#
+#     jointagent.dev, www.jointagent.dev {
+#
+# then `docker compose restart caddy`. Caddy requests and renews the certificate
+# automatically — nothing else to configure, and nothing to renew by hand.
+# The A record must already resolve to this server, or the certificate request
+# will fail.
+
+:80 {
+	# `app` resolves over the compose network; 8080 is never exposed to the host.
+	reverse_proxy app:8080 {
+		# The agent streams responses over server-sent events. Without this,
+		# Caddy buffers them and the whole reply lands at once at the end,
+		# which reads as the agent hanging and then dumping — the streaming
+		# effect disappears entirely.
+		flush_interval -1
+	}
+
+	encode gzip
+
+	header {
+		# Basic hardening. HSTS is deliberately omitted while serving on :80 —
+		# it would be ignored over HTTP, and switching it on before a domain is
+		# live risks pinning browsers to HTTPS for an IP that cannot serve it.
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
