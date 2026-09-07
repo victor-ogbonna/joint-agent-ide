@@ -62,12 +62,12 @@ function AuthModal({ mode, onClose, onSwitchMode }: { mode: AuthMode; onClose: (
           >
             <X size={16} />
           </button>
-          <img src="/logo.png" alt="Joint-Agent" className="w-11 h-11 mx-auto rounded-xl shadow-lg mb-3" />
+          <img src="/logo.png" alt="Joint-Agent IDE" className="w-11 h-11 mx-auto rounded-xl shadow-lg mb-3" />
           <h2 className="font-display font-bold text-lg text-[var(--text-main)]">
             {mode === "signup" ? "Create your account" : "Welcome back"}
           </h2>
           <p className="text-xs text-[var(--text-muted)] mt-1">
-            {mode === "signup" ? "Start building with the Joint-Agent." : "Sign in to pick up where you left off."}
+            {mode === "signup" ? "Start building with Joint-Agent IDE." : "Sign in to pick up where you left off."}
           </p>
         </div>
 
@@ -507,10 +507,10 @@ export default function HomePage({ waitlistMode = false }: { waitlistMode?: bool
           wrap onto two lines. */}
       <header className="relative z-10 px-4 sm:px-6 py-4 flex items-center justify-between gap-2 max-w-6xl mx-auto">
         <div className="flex items-center gap-2.5">
-          <img src="/logo.png" alt="Joint-Agent" className="w-8 h-8 rounded-lg shadow-md" />
+          <img src="/logo.png" alt="Joint-Agent IDE" className="w-8 h-8 rounded-lg shadow-md" />
           <div className="flex flex-col">
             <span className="font-display font-bold text-sm leading-tight">
-              Joint-<span className="gradient-text">Agent</span>
+              Joint-Agent <span className="gradient-text">IDE</span>
             </span>
             <span className="text-[8px] text-[var(--text-subtle)] font-mono tracking-[0.2em] uppercase">v1.0</span>
           </div>
@@ -530,7 +530,7 @@ export default function HomePage({ waitlistMode = false }: { waitlistMode?: bool
           >
             {/* Full product name doesn't fit beside Sign In on a phone; the
                 page title is right there, so "Launch" carries it alone. */}
-            <Zap size={12} /> Launch<span className="hidden sm:inline">&nbsp;Joint-Agent</span>
+            <Zap size={12} /> Launch<span className="hidden sm:inline">&nbsp;Joint-Agent IDE</span>
           </button>
         </div>
         )}
@@ -560,7 +560,7 @@ export default function HomePage({ waitlistMode = false }: { waitlistMode?: bool
             <span className="gradient-text">Your whole hardware stack.</span>
           </h1>
           <p className="mt-5 text-sm sm:text-base text-[var(--text-muted)] max-w-lg leading-relaxed">
-            Joint-Agent is an autonomous agent for embedded development — it writes firmware, compiles,
+            Joint-Agent IDE is an autonomous agent for embedded development — it writes firmware, compiles,
             debugs, and flashes real hardware from one browser tab, with auto circuit design &amp; simulation,
             companion apps, and Web3/plugin integrations rolling out next.
           </p>
@@ -579,7 +579,7 @@ export default function HomePage({ waitlistMode = false }: { waitlistMode?: bool
               className="flex items-center gap-1.5 text-sm font-semibold text-white px-5 py-2.5 rounded-lg shadow-lg btn-lift"
               style={{ background: "var(--gradient-accent)", boxShadow: "var(--shadow-glow)" }}
             >
-              Launch Joint-Agent <ArrowRight size={15} />
+              Launch Joint-Agent IDE <ArrowRight size={15} />
             </button>
             <button
               onClick={() => setAuthModal("signin")}
@@ -651,8 +651,8 @@ export default function HomePage({ waitlistMode = false }: { waitlistMode?: bool
           </h2>
           <p className="text-xs text-[var(--text-muted)] mb-6 max-w-sm mx-auto">
             {waitlistMode
-              ? "Joint-Agent is being opened up gradually. Leave your email and we'll let you in as soon as a place is free."
-              : "Join the waitlist and we'll email you the moment Joint-Agent officially launches."}
+              ? "Joint-Agent IDE is being opened up gradually. Leave your email and we'll let you in as soon as a place is free."
+              : "Join the waitlist and we'll email you the moment Joint-Agent IDE officially launches."}
           </p>
           <WaitlistForm />
         </div>
@@ -672,7 +672,7 @@ export default function HomePage({ waitlistMode = false }: { waitlistMode?: bool
             className="inline-flex items-center gap-1.5 text-sm font-semibold text-white px-6 py-3 rounded-lg shadow-lg btn-lift"
             style={{ background: "var(--gradient-accent)", boxShadow: "var(--shadow-glow)" }}
           >
-            Launch Joint-Agent <ArrowRight size={15} />
+            Launch Joint-Agent IDE <ArrowRight size={15} />
           </button>
         </div>
       </section>
@@ -684,7 +684,7 @@ export default function HomePage({ waitlistMode = false }: { waitlistMode?: bool
           of the faintest token at 70% opacity — legible in theory, invisible in
           practice, so it gets real size and contrast here. */}
       <footer className="relative z-10 text-center px-6 pb-[calc(2.5rem+env(safe-area-inset-bottom))] text-[10px] text-[var(--text-subtle)] font-mono uppercase tracking-widest">
-        <div>Joint-Agent · IoT · Blockchain · AI</div>
+        <div>Joint-Agent IDE · IoT · Blockchain · AI</div>
         <div className="mt-2.5 text-[12px] normal-case tracking-normal text-[var(--text-muted)]">
           Powered by <span className="font-semibold text-[var(--text-main)]">Ogbontor Engineering Enterprise</span>
         </div>

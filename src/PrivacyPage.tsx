@@ -26,7 +26,7 @@ export default function PrivacyPage() {
             href="/"
             className="flex items-center gap-2 text-xs text-[var(--text-muted)] hover:text-[var(--text-main)] transition"
           >
-            <ArrowLeft size={14} /> Back to Joint-Agent
+            <ArrowLeft size={14} /> Back to Joint-Agent IDE
           </a>
         </div>
       </header>
@@ -37,7 +37,7 @@ export default function PrivacyPage() {
 
         <Section title="Who we are">
           <p>
-            Joint-Agent is an AI-assisted development environment for microcontrollers, operated by
+            Joint-Agent IDE is an AI-assisted development environment for microcontrollers, operated by
             Ogbontor Engineering Enterprise. This policy explains what data the service collects, why,
             and who it is shared with. Questions can be sent to{" "}
             <a href="mailto:victorogbonna313@gmail.com" className="text-[var(--accent-secondary)] hover:underline">
@@ -153,7 +153,7 @@ export default function PrivacyPage() {
         </Section>
 
         <p className="text-[11px] text-[var(--text-subtle)] border-t border-[var(--border-main)] pt-6 mt-10">
-          Joint-Agent · Powered by Ogbontor Engineering Enterprise
+          Joint-Agent IDE · Powered by Ogbontor Engineering Enterprise
         </p>
       </main>
     </div>

@@ -359,7 +359,7 @@ export default function App() {
     // Initial hello terminal greetings
     if (!bootLoggedRef.current) {
       logToTerminal("==========================================================", "info");
-      logToTerminal("  JOINT-AGENT AUTONOMOUS IDE INITIALIZED                   ", "success");
+      logToTerminal("  JOINT-AGENT IDE INITIALIZED                   ", "success");
       logToTerminal("  Joint-Agent Embedded Core Ready                          ", "info");
       logToTerminal("==========================================================", "info");
       logToTerminal(`System Core: Node compiler initialized. Powered by Joint-Agent Engine.`, "info");
@@ -1431,10 +1431,10 @@ export default function App() {
         <div className="flex items-center gap-1.5 sm:gap-3">
           {/* Logo */}
           <div className="flex items-center gap-2.5 logo-accent cursor-default select-none">
-            <img src="/logo.png" alt="Joint-Agent" className="w-7 h-7 rounded-lg shrink-0 shadow-md" />
+            <img src="/logo.png" alt="Joint-Agent IDE" className="w-7 h-7 rounded-lg shrink-0 shadow-md" />
             <div className="flex flex-col hidden sm:flex">
               <h1 className="font-display font-bold text-[13px] text-[var(--text-main)] tracking-wide leading-tight flex items-center gap-1.5">
-                Joint-<span className="gradient-text">Agent</span>
+                Joint-Agent <span className="gradient-text">IDE</span>
                 <span className="text-[8px] font-mono font-semibold text-[var(--text-subtle)] bg-[var(--bg-surface)] border border-[var(--border-main)] rounded px-1 py-px leading-none">
                   v1.0
                 </span>

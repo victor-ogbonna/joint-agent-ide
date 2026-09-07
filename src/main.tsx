@@ -50,7 +50,7 @@ function LaunchScreen() {
         <span className="launch-bracket br" />
 
         <div className="launch-core">
-          <img src="/logo.png" alt="Joint-Agent" />
+          <img src="/logo.png" alt="Joint-Agent IDE" />
           <span className="launch-scan" />
         </div>
       </div>
