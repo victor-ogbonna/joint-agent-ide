@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Shield, Key, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard } from "lucide-react";
+import { Shield, Key, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw } from "lucide-react";
 
 const TOKEN_KEY = "jointagent_admin_token";
 
@@ -28,6 +28,12 @@ export default function AdminPage() {
   const [savingPaystack, setSavingPaystack] = useState(false);
   const [paystackSaveMessage, setPaystackSaveMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [loadingPaystackConfig, setLoadingPaystackConfig] = useState(false);
+
+  type WaitlistEntry = { email: string; joinedAt: string | null };
+  const [waitlist, setWaitlist] = useState<WaitlistEntry[]>([]);
+  const [loadingWaitlist, setLoadingWaitlist] = useState(false);
+  const [waitlistError, setWaitlistError] = useState<string | null>(null);
+  const [copiedEmails, setCopiedEmails] = useState(false);
 
   const authHeaders = (t: string) => ({ Authorization: `Bearer ${t}`, "Content-Type": "application/json" });
 
@@ -67,10 +73,39 @@ export default function AdminPage() {
     }
   };
 
+  const loadWaitlist = async (t: string) => {
+    setLoadingWaitlist(true);
+    setWaitlistError(null);
+    try {
+      const res = await fetch("/api/waitlist/entries", { headers: authHeaders(t) });
+      const data = await res.json();
+      if (!res.ok) {
+        setWaitlistError(data.error || "Could not load the waitlist.");
+        return;
+      }
+      setWaitlist(data.entries || []);
+    } catch {
+      setWaitlistError("Could not reach the server.");
+    } finally {
+      setLoadingWaitlist(false);
+    }
+  };
+
+  const handleCopyEmails = async () => {
+    try {
+      await navigator.clipboard.writeText(waitlist.map((w) => w.email).join(", "));
+      setCopiedEmails(true);
+      setTimeout(() => setCopiedEmails(false), 2000);
+    } catch {
+      setWaitlistError("Clipboard blocked by the browser — select the list manually.");
+    }
+  };
+
   useEffect(() => {
     if (token) {
       loadConfig(token);
       loadPaystackConfig(token);
+      loadWaitlist(token);
     }
   }, [token]);
 
@@ -388,6 +423,70 @@ export default function AdminPage() {
 
           <p className="text-[10px] text-[var(--text-subtle)] leading-relaxed border-t border-[var(--border-main)] pt-3">
             Test-mode keys/plan work fine before your Paystack account finishes live activation. Fields are saved individually — leave any blank to keep its current value.
+          </p>
+        </div>
+
+        <div className="bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl p-5 space-y-4 mt-4">
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 bg-orange-500/10 rounded-md text-orange-600">
+              <Users size={14} />
+            </div>
+            <h2 className="font-display font-bold text-sm">Waitlist</h2>
+            <span className="ml-auto font-mono text-xs text-[var(--text-main)]">
+              {loadingWaitlist ? "…" : waitlist.length}
+            </span>
+          </div>
+
+          {waitlistError && (
+            <div className="flex items-start gap-1.5 text-xs text-red-400">
+              <AlertCircle size={13} className="mt-0.5 shrink-0" />
+              <span>{waitlistError}</span>
+            </div>
+          )}
+
+          {!loadingWaitlist && !waitlistError && waitlist.length === 0 && (
+            <p className="text-xs text-[var(--text-muted)]">
+              Nobody has signed up yet. Signups from <span className="font-mono">/waitlist</span> appear here.
+            </p>
+          )}
+
+          {waitlist.length > 0 && (
+            <div className="max-h-64 overflow-y-auto border border-[var(--border-main)] rounded-lg divide-y divide-[var(--border-main)]">
+              {waitlist.map((entry) => (
+                <div key={entry.email} className="flex items-center gap-3 px-3 py-2 text-xs">
+                  <span className="font-mono text-[var(--text-main)] truncate">{entry.email}</span>
+                  <span className="ml-auto shrink-0 text-[10px] text-[var(--text-subtle)]">
+                    {entry.joinedAt ? new Date(entry.joinedAt).toLocaleDateString() : "—"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => token && loadWaitlist(token)}
+              disabled={loadingWaitlist}
+              className="flex items-center justify-center gap-1.5 border border-[var(--border-main)] hover:border-[var(--accent-primary)] disabled:opacity-50 text-[var(--text-main)] text-xs font-semibold px-3 py-2 rounded-lg transition"
+            >
+              {loadingWaitlist ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+              Refresh
+            </button>
+            {waitlist.length > 0 && (
+              <button
+                type="button"
+                onClick={handleCopyEmails}
+                className="flex items-center justify-center gap-1.5 bg-orange-600 hover:bg-orange-500 text-white text-xs font-semibold px-3 py-2 rounded-lg transition"
+              >
+                {copiedEmails ? <Check size={13} /> : <Copy size={13} />}
+                {copiedEmails ? "Copied" : "Copy all emails"}
+              </button>
+            )}
+          </div>
+
+          <p className="text-[10px] text-[var(--text-subtle)] leading-relaxed border-t border-[var(--border-main)] pt-3">
+            Newest first, up to 500. Paste the copied list into the BCC field when you email the waitlist — never the To field, or every subscriber sees the others' addresses.
           </p>
         </div>
       </main>

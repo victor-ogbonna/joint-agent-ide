@@ -31,7 +31,38 @@ function recordSubmission(ip: string) {
   }
 }
 
-export function registerWaitlistRoutes(app: express.Express) {
+export function registerWaitlistRoutes(
+  app: express.Express,
+  requireAdmin: express.RequestHandler
+) {
+  // Read the signups back. Admin-gated: these are other people's email
+  // addresses, so this must never be reachable without the admin password.
+  app.get("/api/waitlist/entries", requireAdmin, async (_req, res) => {
+    if (!isFirebaseAdminConfigured()) {
+      return res.status(503).json({ error: "Waitlist isn't configured yet." });
+    }
+    try {
+      const snap = await adminDb
+        .collection("waitlist")
+        .orderBy("joinedAt", "desc")
+        .limit(500)
+        .get();
+      const entries = snap.docs.map((d) => {
+        const data = d.data() as { email?: string; joinedAt?: { toDate(): Date } };
+        return {
+          email: data.email ?? d.id,
+          // Serialized here rather than client-side: joinedAt is a Firestore
+          // Timestamp, which does not survive JSON on its own.
+          joinedAt: data.joinedAt ? data.joinedAt.toDate().toISOString() : null,
+        };
+      });
+      res.json({ total: entries.length, entries });
+    } catch (err) {
+      console.error("Failed to read waitlist:", err);
+      res.status(500).json({ error: "Could not load the waitlist." });
+    }
+  });
+
   app.post("/api/waitlist/join", async (req, res) => {
     const ip = req.ip || req.socket.remoteAddress || "unknown";
     if (isRateLimited(ip)) {

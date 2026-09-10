@@ -286,7 +286,7 @@ app.post("/api/admin/config", requireAdmin, async (req, res) => {
 });
 
 registerPaystackRoutes(app, requireAdmin);
-registerWaitlistRoutes(app);
+registerWaitlistRoutes(app, requireAdmin);
 
 // Lets the frontend check where a signed-in user stands relative to their
 // token cap — used both to seed the UI on load and by a blocked user's
