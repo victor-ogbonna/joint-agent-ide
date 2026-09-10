@@ -307,6 +307,7 @@ function AgentDemoPanel() {
   const [phase, setPhase] = useState(0);
   const [typedPrompt, setTypedPrompt] = useState("");
   const [typedCode, setTypedCode] = useState("");
+  const [heroFailed, setHeroFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -352,12 +353,17 @@ function AgentDemoPanel() {
 
       {/* The real hardware, held still at the top. Deliberately outside the
           typing loop — it's context for what the agent is driving, not part
-          of the choreography, so it shouldn't flicker in and out. */}
-      <img
-        src="/hero-circuit.jpg"
-        alt="An Arduino Uno wired to an LED on a breadboard"
-        className="w-full h-28 sm:h-36 lg:h-44 object-cover border-b border-[var(--border-main)]"
-      />
+          of the choreography, so it shouldn't flicker in and out.
+          If the photo is missing we drop the whole band rather than render a
+          broken-image icon, which looked worse than having no photo at all. */}
+      {!heroFailed && (
+        <img
+          src="/hero-circuit.jpg"
+          alt="An Arduino Uno wired to an LED on a breadboard"
+          onError={() => setHeroFailed(true)}
+          className="w-full h-28 sm:h-36 lg:h-44 object-cover border-b border-[var(--border-main)]"
+        />
+      )}
 
       <div className="p-4 min-h-[120px] flex flex-col justify-end">
         <div className="flex items-start gap-2">
