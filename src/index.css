@@ -77,6 +77,20 @@ html, body, #root {
   overflow: hidden;
 }
 
+/* Document-style routes (homepage, waitlist, privacy) scroll the page itself.
+   The rule above locks the viewport for the IDE, which needs a fixed shell for
+   its own panes — but on a long marketing page it meant the only scrollable
+   thing was an inner div. That scrolls under a mouse wheel but not reliably
+   with touch, keyboard or the window scrollbar, so the page read as frozen.
+   Pages opt in with <html class="doc-scroll"> (see useDocumentScroll). */
+html.doc-scroll,
+html.doc-scroll body,
+html.doc-scroll #root {
+  height: auto;
+  min-height: 100%;
+  overflow: visible;
+}
+
 body {
   background-color: var(--bg-root);
   color: var(--text-main);

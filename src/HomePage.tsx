@@ -6,6 +6,7 @@ import {
   MessageSquare, FileCode2, FlaskConical, Activity, Chrome, Bell, Check
 } from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
+import { useDocumentScroll } from "./useDocumentScroll";
 
 type AuthMode = "signin" | "signup";
 
@@ -413,6 +414,14 @@ const DIFFERENTIATORS = [
   { icon: Wallet, title: "Web3, when you need it", desc: "Bring on-chain data and wallet connections into a project without leaving the IDE." },
 ];
 
+// The discovery survey offered right after someone joins — the highest-intent
+// moment we get, so it's worth asking there rather than in a later email.
+//
+// EDIT THIS ONE LINE when the form exists: paste the Google Form URL, or a
+// custom short link (e.g. https://afrojoint.xyz/survey) pointed at it. Set it
+// back to "" to hide the offer entirely — nothing else needs changing.
+const SURVEY_URL = import.meta.env.VITE_SURVEY_URL ?? "";
+
 // Additive, not a gate — the app above is already open and usable today.
 // This just captures interest from visitors who'd rather be notified at the
 // official launch than dig in right now.
@@ -447,8 +456,27 @@ function WaitlistForm() {
 
   if (status === "done") {
     return (
-      <div className="flex items-center justify-center gap-2 text-sm font-medium text-[var(--success,#22c55e)] py-2.5">
-        <Check size={16} /> You're on the list — we'll email you at launch.
+      <div className="flex flex-col items-center gap-3 py-2.5">
+        <div className="flex items-center justify-center gap-2 text-sm font-medium text-[var(--success,#22c55e)]">
+          <Check size={16} /> You're on the list — we'll email you at launch.
+        </div>
+
+        {SURVEY_URL && (
+          <div className="max-w-sm text-center border-t border-[var(--border-main)] pt-3">
+            <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+              While you're here — what should we build first? Five minutes, and it
+              genuinely shapes what ships.
+            </p>
+            <a
+              href={SURVEY_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 mt-2.5 text-xs font-semibold text-[var(--accent-primary)] hover:underline"
+            >
+              Answer a few questions <ArrowRight size={13} />
+            </a>
+          </div>
+        )}
       </div>
     );
   }
@@ -489,6 +517,7 @@ function WaitlistForm() {
 // Sharing one component rather than duplicating the copy into a second page
 // means the pitch link can never drift out of sync with the real homepage.
 export default function HomePage({ waitlistMode = false }: { waitlistMode?: boolean }) {
+  useDocumentScroll();
   const [authModal, setAuthModal] = useState<AuthMode | null>(null);
 
   return (
@@ -496,7 +525,7 @@ export default function HomePage({ waitlistMode = false }: { waitlistMode?: bool
     // IDE's fixed-viewport layout, so a min-height here just grows past the
     // root and gets clipped — overflow-y-auto never engages and the page can't
     // be scrolled at all. A definite height makes this a real scroll container.
-    <div className="h-full w-full bg-[var(--bg-root)] text-[var(--text-main)] overflow-y-auto overflow-x-hidden relative">
+    <div className="min-h-full w-full bg-[var(--bg-root)] text-[var(--text-main)] overflow-x-hidden relative">
       <div className="absolute inset-0 opacity-70">
         <CircuitBackdrop />
       </div>

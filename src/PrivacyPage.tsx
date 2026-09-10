@@ -1,5 +1,6 @@
 import React from "react";
 import { ArrowLeft } from "lucide-react";
+import { useDocumentScroll } from "./useDocumentScroll";
 
 // Required by Google's OAuth consent screen, and genuinely needed since the
 // app handles accounts, payments, and prompt content. Written to describe what
@@ -19,7 +20,7 @@ export default function PrivacyPage() {
   return (
     // h-full for the same reason as HomePage — #root is height:100% with
     // overflow:hidden, so a min-height here is clipped instead of scrolled.
-    <div className="h-full w-full bg-[var(--bg-root)] text-[var(--text-main)] overflow-y-auto">
+    <div className="min-h-full w-full bg-[var(--bg-root)] text-[var(--text-main)]">
       <header className="border-b border-[var(--border-main)] px-6 py-4">
         <div className="max-w-2xl mx-auto flex items-center gap-3">
           <a
