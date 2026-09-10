@@ -14,7 +14,7 @@ declare global {
 // Free users get this once, for life. Active subscribers get PAID_TOKEN_CAP
 // fresh every billing cycle instead (reset by the Paystack webhook/verify
 // handlers in server/paystack.ts on each successful charge).
-export const FREE_TOKEN_CAP = 68000;
+export const FREE_TOKEN_CAP = 50000;
 export const PAID_TOKEN_CAP = 400000;
 
 // Per-uid request throttle, independent of the token cap — bounds how fast a

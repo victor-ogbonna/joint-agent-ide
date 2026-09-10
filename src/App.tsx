@@ -46,7 +46,7 @@ const getBoardInfo = (vendorId: number | undefined, productId: number | undefine
 
 // Mirrors server/quota.ts's FREE_TOKEN_CAP / PAID_TOKEN_CAP — used for display
 // copy only, the real enforcement is server-side.
-const FREE_TOKEN_CAP = 68000;
+const FREE_TOKEN_CAP = 50000;
 const PAID_TOKEN_CAP = 400000;
 
 const INITIAL_CODE = `/**
