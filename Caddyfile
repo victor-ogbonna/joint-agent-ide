@@ -1,19 +1,13 @@
 # Joint-Agent IDE — reverse proxy and automatic HTTPS.
 #
-# BEFORE A DOMAIN EXISTS: leave this as-is. `:80` serves over plain HTTP on the
-# server's IP address, which is enough to confirm the deployment works.
+# Live on afrojoint.xyz since 11 Sep 2026. Caddy requests and renews the
+# Let's Encrypt certificate automatically — nothing to renew by hand.
 #
-# ONCE DNS POINTS AT THE SERVER: replace the `:80` line below with your domain,
-# e.g.
-#
-#     jointagent.dev, www.jointagent.dev {
-#
-# then `docker compose restart caddy`. Caddy requests and renews the certificate
-# automatically — nothing else to configure, and nothing to renew by hand.
-# The A record must already resolve to this server, or the certificate request
-# will fail.
+# The A records for both names must resolve to this server, and Cloudflare's
+# proxy must stay OFF ("DNS only", grey cloud). With the orange proxy on,
+# Cloudflare terminates TLS itself and Caddy's certificate challenge fails.
 
-:80 {
+afrojoint.xyz, www.afrojoint.xyz {
 	# `app` resolves over the compose network; 8080 is never exposed to the host.
 	reverse_proxy app:8080 {
 		# The agent streams responses over server-sent events. Without this,
