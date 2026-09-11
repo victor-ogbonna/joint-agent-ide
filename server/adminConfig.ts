@@ -17,6 +17,8 @@ const ADMIN_CONFIG_PATH = path.join(process.cwd(), ".admin-config.json");
 
 export interface AdminConfig {
   geminiApiKey?: string;
+  /** While true, only allowlisted accounts may use the product (see server/access.ts). */
+  launchLocked?: boolean;
   paystackSecretKey?: string;
   paystackPublicKey?: string;
   paystackPlanCode?: string;
@@ -27,6 +29,7 @@ export interface AdminConfig {
 // (or the Render dashboard) originally set.
 const RENDER_ENV_VAR_NAMES: Record<keyof AdminConfig, string> = {
   geminiApiKey: "GEMINI_API_KEY",
+  launchLocked: "LAUNCH_LOCKED",
   paystackSecretKey: "PAYSTACK_SECRET_KEY",
   paystackPublicKey: "PAYSTACK_PUBLIC_KEY",
   paystackPlanCode: "PAYSTACK_PLAN_CODE",

@@ -22,13 +22,22 @@ import { getFirestore } from "firebase/firestore";
 // "<project>.firebaseapp.com". The server proxies /__/auth/* through to Firebase
 // (see server/firebaseAuthProxy.ts) so that works without Firebase Hosting.
 //
-// Left as null until Joint-Agent has a domain: with no custom domain configured
+// Set to afrojoint.xyz on 11 Sep 2026. Requests to /__/auth/* are proxied to
+// the Firebase backend by server/firebaseAuthProxy.ts, so Google's consent
+// screen shows the real domain instead of afro-joint-ide.firebaseapp.com.
+//
+// This only works if afrojoint.xyz is listed under BOTH:
+//   Firebase Console -> Authentication -> Settings -> Authorized domains
+//   Google Cloud -> Credentials -> Web client -> Authorized JavaScript origins
+// Miss either and sign-in breaks outright.
+//
+// Was left as null until Joint-Agent had a domain: with no custom domain
 // the Firebase default is correct everywhere, and pointing this at a domain that
 // isn't live yet would break sign-in in production. Set it to the new domain
 // once DNS resolves, and add that domain to BOTH Firebase Console ->
 // Authentication -> Settings -> Authorized domains AND the Google Cloud OAuth
 // client's authorized redirect URIs as https://<domain>/__/auth/handler.
-const PROD_AUTH_DOMAIN: string | null = null;
+const PROD_AUTH_DOMAIN: string | null = "afrojoint.xyz";
 
 const isLocalhost =
   typeof window !== "undefined" && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(window.location.hostname);

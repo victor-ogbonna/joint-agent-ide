@@ -1,12 +1,18 @@
 import type { Request, Response, NextFunction } from "express";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { adminAuth, adminDb, isFirebaseAdminConfigured } from "./firebaseAdmin";
+import { loadAdminConfig } from "./adminConfig";
+import { isAllowlisted, isUnmetered, LAUNCH_LOCKED_CODE, LAUNCH_LOCKED_MESSAGE } from "./access";
+
+/** Sentinel subscription status for accounts whose usage is never counted. */
+export const UNMETERED_STATUS = "unmetered";
 
 declare global {
   namespace Express {
     interface Request {
       uid?: string;
       quota?: { subscriptionStatus: string; tokensUsed: number; tokenCap: number };
+      email?: string | null;
     }
   }
 }
@@ -78,16 +84,31 @@ export async function getOrCreateUserDoc(uid: string): Promise<UserQuotaDoc> {
   };
 }
 
-async function verifyBearerToken(req: Request): Promise<string | null> {
+type Identity = { uid: string; email: string | null; emailVerified: boolean };
+
+async function verifyBearerToken(req: Request): Promise<Identity | null> {
   const authHeader = req.headers.authorization || "";
   const idToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
   if (!idToken) return null;
   try {
     const decoded = await adminAuth.verifyIdToken(idToken);
-    return decoded.uid;
+    return {
+      uid: decoded.uid,
+      email: decoded.email ?? null,
+      // Never trust the address without this — see server/access.ts.
+      emailVerified: decoded.email_verified === true,
+    };
   } catch {
     return null;
   }
+}
+
+/** Refuses everyone but the allowlist while the launch lock is on. */
+function launchLockCheck(who: Identity, res: Response): boolean {
+  if (!loadAdminConfig().launchLocked) return true;
+  if (isAllowlisted(who.email, who.emailVerified)) return true;
+  res.status(403).json({ error: LAUNCH_LOCKED_MESSAGE, code: LAUNCH_LOCKED_CODE });
+  return false;
 }
 
 // Auth only, no quota check — for routes a blocked user must still reach
@@ -96,11 +117,13 @@ export async function requireFirebaseAuth(req: Request, res: Response, next: Nex
   if (!isFirebaseAdminConfigured()) {
     return res.status(503).json({ error: "Sign-in is not configured on the server yet.", code: "AUTH_NOT_CONFIGURED" });
   }
-  const uid = await verifyBearerToken(req);
-  if (!uid) {
+  const who = await verifyBearerToken(req);
+  if (!who) {
     return res.status(401).json({ error: "Sign in required.", code: "AUTH_REQUIRED" });
   }
-  req.uid = uid;
+  if (!launchLockCheck(who, res)) return;
+  req.uid = who.uid;
+  req.email = who.email;
   next();
 }
 
@@ -109,15 +132,27 @@ export async function requireAuthAndQuota(req: Request, res: Response, next: Nex
   if (!isFirebaseAdminConfigured()) {
     return res.status(503).json({ error: "Sign-in is not configured on the server yet.", code: "AUTH_NOT_CONFIGURED" });
   }
-  const uid = await verifyBearerToken(req);
-  if (!uid) {
+  const who = await verifyBearerToken(req);
+  if (!who) {
     return res.status(401).json({ error: "Sign in required.", code: "AUTH_REQUIRED" });
   }
+  if (!launchLockCheck(who, res)) return;
+  const uid = who.uid;
 
   // Cheap, in-memory — checked before the Firestore read below so an
   // abusive burst doesn't cost a Firestore read per request either.
   if (isRateLimited(uid)) {
     return res.status(429).json({ error: "Too many requests — please slow down.", code: "RATE_LIMITED" });
+  }
+
+  // Exempt accounts skip the cap entirely. UNMETERED_STATUS flows through to
+  // incrementTokenUsage via req.quota, which short-circuits on it, so no call
+  // site needs to know about the exemption.
+  if (isUnmetered(who.email, who.emailVerified)) {
+    req.uid = uid;
+    req.email = who.email;
+    req.quota = { subscriptionStatus: UNMETERED_STATUS, tokensUsed: 0, tokenCap: Number.MAX_SAFE_INTEGER };
+    return next();
   }
 
   const doc = await getOrCreateUserDoc(uid);
@@ -136,6 +171,7 @@ export async function requireAuthAndQuota(req: Request, res: Response, next: Nex
   }
 
   req.uid = uid;
+  req.email = who.email;
   req.quota = { subscriptionStatus: doc.subscriptionStatus, tokensUsed, tokenCap };
   next();
 }
@@ -145,6 +181,7 @@ export async function requireAuthAndQuota(req: Request, res: Response, next: Nex
 // a follow-up request.
 export async function incrementTokenUsage(uid: string, subscriptionStatus: string, tokens: number): Promise<void> {
   if (!tokens || tokens <= 0) return;
+  if (subscriptionStatus === UNMETERED_STATUS) return;
   const field = subscriptionStatus === "active" ? "cycleTokensUsed" : "lifetimeFreeTokensUsed";
   try {
     await adminDb.collection("users").doc(uid).update({

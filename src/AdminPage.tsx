@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useDocumentScroll } from "./useDocumentScroll";
-import { Shield, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw } from "lucide-react";
+import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw } from "lucide-react";
 
 const TOKEN_KEY = "jointagent_admin_token";
 
@@ -30,6 +30,9 @@ export default function AdminPage() {
   const [loadingWaitlist, setLoadingWaitlist] = useState(false);
   const [waitlistError, setWaitlistError] = useState<string | null>(null);
   const [copiedEmails, setCopiedEmails] = useState(false);
+
+  const [launchLocked, setLaunchLocked] = useState<boolean | null>(null);
+  const [togglingLock, setTogglingLock] = useState(false);
 
   const authHeaders = (t: string) => ({ Authorization: `Bearer ${t}`, "Content-Type": "application/json" });
 
@@ -69,6 +72,30 @@ export default function AdminPage() {
     }
   };
 
+  const loadLaunchStatus = async (t: string) => {
+    try {
+      const res = await fetch("/api/admin/launch-status", { headers: authHeaders(t) });
+      if (!res.ok) return;
+      const data = await res.json();
+      setLaunchLocked(data.launchLocked);
+    } catch { /* leave as null; the toggle renders disabled */ }
+  };
+
+  const toggleLaunchLock = async (next: boolean) => {
+    if (!token) return;
+    setTogglingLock(true);
+    try {
+      const res = await fetch("/api/admin/launch-status", {
+        method: "POST",
+        headers: authHeaders(token),
+        body: JSON.stringify({ launchLocked: next })
+      });
+      const data = await res.json();
+      if (res.ok) setLaunchLocked(data.launchLocked);
+    } catch { /* keep the previous state on failure */ }
+    finally { setTogglingLock(false); }
+  };
+
   const handleCopyEmails = async () => {
     try {
       await navigator.clipboard.writeText(waitlist.map((w) => w.email).join(", "));
@@ -83,6 +110,7 @@ export default function AdminPage() {
     if (token) {
       loadPaystackConfig(token);
       loadWaitlist(token);
+      loadLaunchStatus(token);
     }
   }, [token]);
 
@@ -228,6 +256,40 @@ export default function AdminPage() {
       </header>
 
       <main className="max-w-lg mx-auto p-6 pb-16">
+        <div className="bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl p-5 space-y-4 mb-4">
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 bg-orange-500/10 rounded-md text-orange-600">
+              <Lock size={14} />
+            </div>
+            <h2 className="font-display font-bold text-sm">Pre-launch lock</h2>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={launchLocked === true}
+              aria-label="Pre-launch lock"
+              disabled={launchLocked === null || togglingLock}
+              onClick={() => toggleLaunchLock(!launchLocked)}
+              className={`ml-auto relative w-11 h-6 rounded-full transition disabled:opacity-50 ${launchLocked ? "bg-orange-600" : "bg-[var(--bg-surface)] border border-[var(--border-main)]"}`}
+            >
+              <span className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-all ${launchLocked ? "left-6" : "left-1"}`} />
+            </button>
+          </div>
+
+          <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+            {launchLocked === null
+              ? "Loading…"
+              : launchLocked
+                ? "ON — the IDE is closed. Launch IDE is hidden, and anyone signed in who isn't allowlisted is signed out. The homepage and waitlist stay public."
+                : "OFF — the IDE is open to everyone who signs in."}
+          </p>
+
+          <p className="text-[10px] text-[var(--text-subtle)] leading-relaxed border-t border-[var(--border-main)] pt-3">
+            Allowlisted while locked: <span className="font-mono">victorogbonna313@gmail.com</span> (usage never counted)
+            and <span className="font-mono">chineduogbonna313@gmail.com</span> (counted normally).
+            Both must sign in with Google — the allowlist ignores unverified email addresses.
+          </p>
+        </div>
+
         <div className="bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl p-5 space-y-4">
           <div className="flex items-center gap-2">
             <div className="p-1.5 bg-orange-500/10 rounded-md text-orange-600">

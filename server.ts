@@ -285,6 +285,29 @@ app.post("/api/admin/config", requireAdmin, async (req, res) => {
   res.json({ success: true, maskedApiKey: maskApiKey(activeApiKey), durable });
 });
 
+// Public: the client reads this on load to decide whether to show "Launch IDE"
+// and whether to sign a non-allowlisted user out. It is deliberately
+// unauthenticated and returns a single boolean — the server still refuses
+// locked-out users at the middleware, so this endpoint is a UI hint, never the
+// enforcement.
+app.get("/api/launch-status", (_req, res) => {
+  res.json({ launchLocked: loadAdminConfig().launchLocked === true });
+});
+
+app.get("/api/admin/launch-status", requireAdmin, (_req, res) => {
+  res.json({ launchLocked: loadAdminConfig().launchLocked === true });
+});
+
+app.post("/api/admin/launch-status", requireAdmin, async (req, res) => {
+  const { launchLocked } = req.body || {};
+  if (typeof launchLocked !== "boolean") {
+    return res.status(400).json({ error: "launchLocked must be true or false." });
+  }
+  await saveAdminConfig({ launchLocked });
+  console.log(`Launch lock ${launchLocked ? "ENABLED" : "DISABLED"} via admin page.`);
+  res.json({ launchLocked });
+});
+
 registerPaystackRoutes(app, requireAdmin);
 registerWaitlistRoutes(app, requireAdmin);
 

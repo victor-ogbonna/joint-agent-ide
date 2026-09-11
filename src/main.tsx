@@ -65,15 +65,53 @@ function LaunchScreen() {
 }
 
 function RootRoute() {
-  const { user, loading } = useAuth();
+  const { user, loading, signOut } = useAuth();
   const [holding, setHolding] = useState(true);
+  const [access, setAccess] = useState<'checking' | 'open' | 'locked'>('checking');
 
   useEffect(() => {
     const t = setTimeout(() => setHolding(false), MIN_LAUNCH_MS);
     return () => clearTimeout(t);
   }, []);
 
-  if (loading || holding) return <LaunchScreen />;
+  // The pre-launch lock (admin page -> Pre-launch lock). This is presentation
+  // only: the server refuses locked-out accounts at the middleware regardless,
+  // so the worst a bypass achieves is a UI that 403s on every action. That is
+  // also why a failed check falls open rather than closed — a blip must not
+  // lock out the whole product.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/launch-status');
+        const { launchLocked } = await res.json();
+        if (cancelled) return;
+        if (!launchLocked) return setAccess('open');
+        if (!user) return setAccess('locked');
+
+        // Locked and signed in. Only the server knows who is allowlisted, so
+        // ask it rather than shipping the list to the browser.
+        const idToken = await user.getIdToken();
+        const probe = await fetch('/api/quota/status', { headers: { Authorization: `Bearer ${idToken}` } });
+        if (cancelled) return;
+        if (probe.status === 403) {
+          await signOut();
+          setAccess('locked');
+        } else {
+          setAccess('open');
+        }
+      } catch {
+        if (!cancelled) setAccess('open');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [user, signOut]);
+
+  if (loading || holding || access === 'checking') return <LaunchScreen />;
+
+  // Locked: everyone who is not allowlisted sees the waitlist page, which
+  // already has every door into the product removed.
+  if (access === 'locked') return <HomePage waitlistMode />;
 
   return user ? <App /> : <HomePage />;
 }
