@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from "motion/react";
 import {
   Cpu, Wallet, TerminalSquare, X, Loader2, Zap,
   Mail, Lock, User as UserIcon, ArrowRight, Sparkles,
-  MessageSquare, FileCode2, FlaskConical, Activity, Chrome, Bell, Check
+  MessageSquare, FileCode2, FlaskConical, Activity, Chrome, Bell, Check, Smartphone
 } from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { useDocumentScroll } from "./useDocumentScroll";
@@ -671,6 +671,36 @@ export default function HomePage({ waitlistMode = false }: { waitlistMode?: bool
               <p className="text-xs text-[var(--text-muted)] leading-relaxed">{d.desc}</p>
             </div>
           ))}
+        </div>
+      </section>
+
+      {/* Coming next — deliberately NOT in the feature lists above, which
+          describe what works today. Phone flashing needs the Bridge Agent and
+          has not shipped, so it carries an explicit badge: a visitor must never
+          sign up expecting to flash from a phone tonight. On the waitlist page
+          it is the strongest reason to leave an email, so it leads with that. */}
+      <section className="relative z-10 max-w-5xl mx-auto px-6 pb-24">
+        <div className="rounded-2xl border border-[var(--accent-primary)]/30 bg-[var(--accent-primary-soft)] px-6 sm:px-8 py-7">
+          <div className="flex flex-col sm:flex-row sm:items-start gap-5">
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center text-white shrink-0" style={{ background: "var(--gradient-hero)" }}>
+              <Smartphone size={18} />
+            </div>
+            <div className="flex-1">
+              <div className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--accent-primary)] border border-[var(--accent-primary)]/40 rounded-full px-2.5 py-0.5 mb-2.5">
+                Coming next
+              </div>
+              <h3 className="font-display font-bold text-base sm:text-lg mb-2 text-[var(--text-main)]">
+                Build hardware with no laptop at all
+              </h3>
+              <p className="text-xs sm:text-[13px] text-[var(--text-muted)] leading-relaxed max-w-2xl">
+                An OTG cable will turn any Android phone into the whole workbench — describe
+                the project, watch it compile, flash it to the board. No computer in the loop.
+                {waitlistMode
+                  ? " If you have a phone and no laptop, this is the release to wait for."
+                  : " Flashing needs a desktop browser today; the Bridge Agent removes that."}
+              </p>
+            </div>
+          </div>
         </div>
       </section>
 
