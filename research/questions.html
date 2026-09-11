@@ -1,0 +1,210 @@
+<title>Joint-Agent Discovery Questions</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg:#FFFFFF; --ink:#14171F; --muted:#5A6272; --line:#E4E6EB;
+    --brand:#F97316; --soft:rgba(249,115,22,.08); --card:#FAFAFB;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#0B0D12; --ink:#EDEAE6; --muted:#8B93A3; --line:#1F242E;
+      --soft:rgba(249,115,22,.13); --card:#14171F;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#0B0D12; --ink:#EDEAE6; --muted:#8B93A3; --line:#1F242E;
+    --soft:rgba(249,115,22,.13); --card:#14171F;
+  }
+  * { box-sizing:border-box; }
+  body { background:var(--bg); color:var(--ink); margin:0;
+    font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:47rem; margin:0 auto; padding:2.5rem 1.25rem 5rem; }
+  header { border-bottom:2px solid var(--brand); padding-bottom:1.25rem; margin-bottom:2rem; }
+  h1 { font-size:clamp(1.6rem,4.5vw,2.1rem); line-height:1.15; margin:0 0 .4rem;
+        letter-spacing:-.02em; }
+  .sub { color:var(--muted); font-size:.95rem; margin:0; }
+  h2 { font-size:.72rem; letter-spacing:.16em; text-transform:uppercase; color:var(--brand);
+        margin:2.5rem 0 1rem; padding-top:1.25rem; border-top:1px solid var(--line); }
+  h2:first-of-type { border-top:0; padding-top:0; }
+  p { margin:.55rem 0; }
+  p.q { margin-top:1.75rem; }
+  p.q strong { font-weight:650; }
+  .kind { display:inline-block; font-size:.78rem; color:var(--muted); font-style:normal; }
+  ul { margin:.5rem 0 0; padding-left:1.1rem; }
+  li { margin:.2rem 0; color:var(--muted); }
+  .intro { background:var(--card); border-left:3px solid var(--brand); padding:1rem 1.15rem;
+            border-radius:0 4px 4px 0; margin-bottom:.5rem; }
+  .intro p { margin:0; font-size:.95rem; }
+  .notes { margin-top:3.5rem; background:var(--card); border:1px solid var(--line);
+            border-radius:6px; padding:1.4rem 1.5rem; }
+  .notes h3 { margin:0 0 .3rem; font-size:.72rem; letter-spacing:.16em;
+               text-transform:uppercase; color:var(--brand); }
+  .notes .hint { color:var(--muted); font-size:.85rem; margin:0 0 .9rem; }
+  .notes li { margin:.45rem 0; font-size:.92rem; }
+  .rule { background:var(--soft); border-radius:4px; padding:.85rem 1rem;
+           font-size:.92rem; margin:1.25rem 0 0; }
+</style>
+<div class="wrap">
+  <header>
+    <h1>Joint-Agent IDE &mdash; discovery questions</h1>
+    <p class="sub">25 questions &middot; about 5 minutes</p>
+  </header>
+
+  <div class="intro">
+    <p>I&rsquo;m building Joint-Agent IDE &mdash; an AI agent that writes, compiles and flashes
+    embedded firmware from a browser tab, with nothing installed. I&rsquo;d like to understand
+    how you actually work today. There are no wrong answers, and honest criticism is more
+    useful to me than encouragement.</p>
+  </div>
+
+  <div class="rule"><strong>For face-to-face interviews:</strong> ask what they
+  <em>did</em>, not what they <em>would</em> do. &ldquo;Tell me about the last time&hellip;&rdquo;
+  gets you truth. &ldquo;Would you use a tool that&hellip;&rdquo; gets you politeness.</div>
+
+  <h2>Section 1 — Who you are</h2>
+<p class="q"><strong>1. What best describes you?</strong></p>
+<p><em class="kind">(Multiple choice)</em></p>
+<ul>
+<li>Student</li>
+<li>Hobbyist / maker</li>
+<li>Professional embedded engineer</li>
+<li>Bootcamp or self-taught, still learning</li>
+<li>Educator / instructor</li>
+<li>Other</li>
+</ul>
+<p class="q"><strong>2. How long have you worked with microcontrollers?</strong></p>
+<p><em class="kind">(Multiple choice)</em></p>
+<ul>
+<li>Never, but I want to</li>
+<li>Under 6 months</li>
+<li>6 months – 2 years</li>
+<li>2–5 years</li>
+<li>5+ years</li>
+</ul>
+<p class="q"><strong>3. Which boards do you actually use?</strong></p>
+<p><em class="kind">(Checkboxes)</em></p>
+<ul>
+<li>Arduino (Uno, Nano, Mega…)</li>
+<li>ESP32 / ESP8266</li>
+<li>Raspberry Pi Pico / RP2040</li>
+<li>STM32</li>
+<li>Nordic nRF</li>
+<li>Teensy</li>
+<li>Other</li>
+<li>None yet</li>
+</ul>
+<p class="q"><strong>4. What do you develop on?</strong></p>
+<p><em class="kind">(Multiple choice)</em> — Windows / macOS / Linux / Chromebook / Only a phone or tablet / Shared or lab computer</p>
+<h2>Section 2 — How it goes today</h2>
+<p class="q"><strong>5. Think about the last embedded project you started. What happened to it?</strong></p>
+<p><em class="kind">(Multiple choice)</em></p>
+<ul>
+<li>Finished it</li>
+<li>Still working on it</li>
+<li>Abandoned it partway</li>
+<li>Never got past setup</li>
+<li>Haven&#x27;t started one yet</li>
+</ul>
+<p class="q"><strong>6. If you abandoned or stalled — what actually stopped you?</strong></p>
+<p><em class="kind">(Paragraph, optional)</em></p>
+<p class="q"><strong>7. On a computer where nothing is set up yet, roughly how long does it take you to get your first code running on a board?</strong></p>
+<p><em class="kind">(Multiple choice)</em></p>
+<ul>
+<li>Under 15 minutes</li>
+<li>15–60 minutes</li>
+<li>1–3 hours</li>
+<li>Most of a day</li>
+<li>More than a day</li>
+<li>I&#x27;ve never managed it</li>
+</ul>
+<p class="q"><strong>8. Which of these have personally cost you time?</strong></p>
+<p><em class="kind">(Checkboxes)</em></p>
+<ul>
+<li>Installing the coding software (IDE / toolchain)</li>
+<li>Driver problems / board not detected</li>
+<li>Finding the right serial port</li>
+<li>Library version conflicts</li>
+<li>Compiler errors I couldn&#x27;t decode</li>
+<li>Wiring or hardware uncertainty</li>
+<li>Laptop too slow or out of space</li>
+<li>None of these</li>
+</ul>
+<p class="q"><strong>9. Tell me about the most frustrating hour you&#x27;ve spent on an embedded project.</strong></p>
+<p><em class="kind">(Paragraph)</em></p>
+<h2>Section 3 — AI in the loop</h2>
+<p class="q"><strong>10. Have you used AI (ChatGPT, Copilot, Claude…) to help write firmware?</strong></p>
+<p><em class="kind">(Multiple choice)</em> — Yes, regularly / Yes, occasionally / Tried it, stopped / Never</p>
+<p class="q"><strong>11. If you have — what went wrong with it?</strong></p>
+<p><em class="kind">(Paragraph, optional)</em></p>
+<p class="q"><strong>12. What would stop you trusting AI-written code for a project that actually matters to you?</strong></p>
+<p><em class="kind">(Paragraph)</em></p>
+<p class="q"><strong>13. Some AI tools only show you code on the screen — you still have to find out yourself whether it works. Joint-Agent IDE actually builds the code and puts it on your board, so if something is wrong you see it immediately instead of guessing.</strong></p>
+<p><strong>How much more would you trust it because of that?</strong></p>
+<p><em class="kind">(Linear scale 1–5: Not more at all → A lot more)</em></p>
+<h2>Section 4 — The product</h2>
+<p class="q"><strong>14. Imagine describing your project in plain English, and the code is written, built and loaded onto your board for you — with nothing to install first. How useful would that be to you?</strong></p>
+<p><em class="kind">(Linear scale 1–5)</em></p>
+<p class="q"><strong>15. What&#x27;s your first reaction — including scepticism?</strong></p>
+<p><em class="kind">(Paragraph)</em></p>
+<p class="q"><strong>16. What would need to be true before you&#x27;d use it for something that matters?</strong></p>
+<p><em class="kind">(Paragraph)</em></p>
+<p class="q"><strong>17. Which would you actually use?</strong></p>
+<p><em class="kind">(Checkboxes)</em></p>
+<ul>
+<li>Writing firmware from a description</li>
+<li>Debugging existing code</li>
+<li>Auto-generated circuit diagrams</li>
+<li>Flashing without installing anything</li>
+<li>Learning embedded from scratch</li>
+<li>Teaching it to others</li>
+<li>Loading code onto a board from my phone instead of a laptop</li>
+</ul>
+<p class="q"><strong>17b. Do you own a laptop or desktop you can use for building projects?</strong></p>
+<p><em class="kind">(Multiple choice)</em></p>
+<ul>
+<li>Yes, my own</li>
+<li>I share one with family, school or work</li>
+<li>No, but I have a smartphone</li>
+<li>No computer or smartphone I can use for this</li>
+</ul>
+<p class="q"><strong>17c. If you could describe a project and load it onto a board using only your phone, how much would that matter to you?</strong></p>
+<p><em class="kind">(Linear scale 1–5: Not at all → It would change everything)</em></p>
+<h2>Section 5 — Money</h2>
+<p class="q"><strong>18. What do you currently spend on embedded development tools per month?</strong></p>
+<p><em class="kind">(Multiple choice)</em> — Nothing / Under $5 / $5–15 / $15–50 / Over $50</p>
+<p class="q"><strong>19. If this saved you the setup pain entirely, what feels fair per month?</strong></p>
+<p><em class="kind">(Multiple choice)</em> — I&#x27;d only use it free / $3–5 / $6–10 / $11–20 / Over $20 / I&#x27;d want my school or employer to pay</p>
+<p class="q"><strong>20. $7/month for roughly 100 projects. Reaction?</strong></p>
+<p><em class="kind">(Multiple choice)</em></p>
+<ul>
+<li>Cheap, I&#x27;d pay today</li>
+<li>Reasonable</li>
+<li>About right but I&#x27;d want to try it first</li>
+<li>Too expensive for me personally</li>
+<li>I&#x27;d need someone else to pay</li>
+</ul>
+<p class="q"><strong>21. If you&#x27;re a student or educator — would your department pay for a group licence?</strong></p>
+<p><em class="kind">(Multiple choice, optional)</em> — Yes, likely / Maybe / Unlikely / Don&#x27;t know / Not applicable</p>
+<h2>Section 6 — Close</h2>
+<p class="q"><strong>22. Is there a hardware project you wanted to build but didn&#x27;t? What was it, and what stopped you?</strong></p>
+<p><em class="kind">(Paragraph)</em></p>
+<p class="q"><strong>23. Anything I should have asked and didn&#x27;t?</strong></p>
+<p><em class="kind">(Paragraph)</em></p>
+<p class="q"><strong>24. Want early access?</strong></p>
+<p><em class="kind">(Multiple choice)</em> — Yes / No</p>
+<p class="q"><strong>25. Email, if you said yes</strong></p>
+<p><em class="kind">(Short answer, optional)</em></p>
+
+  <div class="notes">
+    <h3>Reading the responses</h3>
+    <p class="hint">For you &mdash; not part of the form.</p>
+    <ul><li><strong>Q7 and Q5 together</strong> are your core evidence. People who &quot;never got past setup&quot; combined with multi-hour setup times *are* the thesis, in their own words.</li>
+<li><strong>Q9 and Q22</strong> are where pitch quotes come from. A real sentence from a real person beats any statistic on a slide.</li>
+<li><strong>Q19 vs Q20</strong> tells you whether $7 is right. If most pick &quot;$3–5&quot; in Q19 but &quot;reasonable&quot; in Q20, the price is fine and the framing is what sells it.</li>
+<li><strong>Q17b and Q17c together</strong> are the phone thesis. If a meaningful share answer &quot;I share one&quot; or &quot;no, but I have a smartphone&quot; and rate Q17c 4–5, that is direct evidence for the Bridge Agent being the biggest unlock — quote the proportion on the market slide.</li>
+<li><strong>Q21</strong> is the institutional-licensing signal — the answer to the &quot;$7 can&#x27;t reach venture scale&quot; objection. If departments would pay, say so on stage.</li>
+<li><strong>Q12 and Q16</strong> are your roadmap. Whatever blocks trust is what to build next.</li>
+</ul><p><strong>Feed answers back into the deck.</strong> Right now slide 5 says &quot;50 discovery</p interviews&quot; as a bare number. One verbatim quote from Q9 on the problem slide would do more work than the number does.</li></ul>
+  </div>
+</div>
