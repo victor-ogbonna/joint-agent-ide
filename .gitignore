@@ -40,3 +40,7 @@ arduino-cli.yaml
 patch_*.py
 patch_*.js
 bun.lock
+
+# pptx build tooling — the generator script is tracked, its deps are not
+deck/pptx/node_modules/
+deck/pptx/package-lock.json
