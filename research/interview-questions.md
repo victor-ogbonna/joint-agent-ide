@@ -1,0 +1,202 @@
+# Joint-Agent IDE — customer discovery questionnaire
+
+Paste into Google Forms. Section breaks are marked. Works for self-serve
+responses and as a script for face-to-face interviews — transcribe those into
+the same Form so all responses land in one sheet.
+
+**One rule for the physical interviews:** ask about what they *did*, not what
+they *would* do. "Tell me about the last time…" gets you truth. "Would you use
+a tool that…" gets you politeness.
+
+---
+
+## Intro text for the form
+
+> I'm building Joint-Agent IDE — an AI agent that writes, compiles and flashes
+> embedded firmware from a browser tab, with nothing installed. I'd like to
+> understand how you actually work today. Around 5 minutes. There are no wrong
+> answers, and honest criticism is more useful to me than encouragement.
+
+---
+
+## Section 1 — Who you are
+
+**1. What best describes you?**
+*(Multiple choice)*
+- Student
+- Hobbyist / maker
+- Professional embedded engineer
+- Bootcamp or self-taught, still learning
+- Educator / instructor
+- Other
+
+**2. How long have you worked with microcontrollers?**
+*(Multiple choice)*
+- Never, but I want to
+- Under 6 months
+- 6 months – 2 years
+- 2–5 years
+- 5+ years
+
+**3. Which boards do you actually use?**
+*(Checkboxes)*
+- Arduino (Uno, Nano, Mega…)
+- ESP32 / ESP8266
+- Raspberry Pi Pico / RP2040
+- STM32
+- Nordic nRF
+- Teensy
+- Other
+- None yet
+
+**4. What do you develop on?**
+*(Multiple choice)* — Windows / macOS / Linux / Chromebook / Only a phone or tablet / Shared or lab computer
+
+---
+
+## Section 2 — How it goes today
+
+**5. Think about the last embedded project you started. What happened to it?**
+*(Multiple choice)*
+- Finished it
+- Still working on it
+- Abandoned it partway
+- Never got past setup
+- Haven't started one yet
+
+**6. If you abandoned or stalled — what actually stopped you?**
+*(Paragraph, optional)*
+
+**7. On a computer where nothing is set up yet, roughly how long does it take you to get your first code running on a board?**
+*(Multiple choice)*
+- Under 15 minutes
+- 15–60 minutes
+- 1–3 hours
+- Most of a day
+- More than a day
+- I've never managed it
+
+**8. Which of these have personally cost you time?**
+*(Checkboxes)*
+- Installing the coding software (IDE / toolchain)
+- Driver problems / board not detected
+- Finding the right serial port
+- Library version conflicts
+- Compiler errors I couldn't decode
+- Wiring or hardware uncertainty
+- Laptop too slow or out of space
+- None of these
+
+**9. Tell me about the most frustrating hour you've spent on an embedded project.**
+*(Paragraph)*
+
+---
+
+## Section 3 — AI in the loop
+
+**10. Have you used AI (ChatGPT, Copilot, Claude…) to help write firmware?**
+*(Multiple choice)* — Yes, regularly / Yes, occasionally / Tried it, stopped / Never
+
+**11. If you have — what went wrong with it?**
+*(Paragraph, optional)*
+
+**12. What would stop you trusting AI-written code for a project that actually matters to you?**
+*(Paragraph)*
+
+**13. Some AI tools only show you code on the screen — you still have to find out yourself whether it works. Joint-Agent IDE actually builds the code and puts it on your board, so if something is wrong you see it immediately instead of guessing.**
+
+**How much more would you trust it because of that?**
+*(Linear scale 1–5: Not more at all → A lot more)*
+
+---
+
+## Section 4 — The product
+
+**14. Imagine describing your project in plain English, and the code is written, built and loaded onto your board for you — with nothing to install first. How useful would that be to you?**
+*(Linear scale 1–5)*
+
+**15. What's your first reaction — including scepticism?**
+*(Paragraph)*
+
+**16. What would need to be true before you'd use it for something that matters?**
+*(Paragraph)*
+
+**17. Which would you actually use?**
+*(Checkboxes)*
+- Writing firmware from a description
+- Debugging existing code
+- Auto-generated circuit diagrams
+- Flashing without installing anything
+- Learning embedded from scratch
+- Teaching it to others
+- Loading code onto a board from my phone instead of a laptop
+
+**17b. Do you own a laptop or desktop you can use for building projects?**
+*(Multiple choice)*
+- Yes, my own
+- I share one with family, school or work
+- No, but I have a smartphone
+- No computer or smartphone I can use for this
+
+**17c. If you could describe a project and load it onto a board using only your phone, how much would that matter to you?**
+*(Linear scale 1–5: Not at all → It would change everything)*
+
+---
+
+## Section 5 — Money
+
+**18. What do you currently spend on embedded development tools per month?**
+*(Multiple choice)* — Nothing / Under $5 / $5–15 / $15–50 / Over $50
+
+**19. If this saved you the setup pain entirely, what feels fair per month?**
+*(Multiple choice)* — I'd only use it free / $3–5 / $6–10 / $11–20 / Over $20 / I'd want my school or employer to pay
+
+**20. $7/month for roughly 100 projects. Reaction?**
+*(Multiple choice)*
+- Cheap, I'd pay today
+- Reasonable
+- About right but I'd want to try it first
+- Too expensive for me personally
+- I'd need someone else to pay
+
+**21. If you're a student or educator — would your department pay for a group licence?**
+*(Multiple choice, optional)* — Yes, likely / Maybe / Unlikely / Don't know / Not applicable
+
+---
+
+## Section 6 — Close
+
+**22. Is there a hardware project you wanted to build but didn't? What was it, and what stopped you?**
+*(Paragraph)*
+
+**23. Anything I should have asked and didn't?**
+*(Paragraph)*
+
+**24. Want early access?**
+*(Multiple choice)* — Yes / No
+
+**25. Email, if you said yes**
+*(Short answer, optional)*
+
+---
+
+## What to watch for in the responses
+
+- **Q7 and Q5 together** are your core evidence. People who "never got past
+  setup" combined with multi-hour setup times *are* the thesis, in their own
+  words.
+- **Q9 and Q22** are where pitch quotes come from. A real sentence from a real
+  person beats any statistic on a slide.
+- **Q19 vs Q20** tells you whether $7 is right. If most pick "$3–5" in Q19 but
+  "reasonable" in Q20, the price is fine and the framing is what sells it.
+- **Q17b and Q17c together** are the phone thesis. If a meaningful share answer
+  "I share one" or "no, but I have a smartphone" and rate Q17c 4–5, that is
+  direct evidence for the Bridge Agent being the biggest unlock — quote the
+  proportion on the market slide.
+- **Q21** is the institutional-licensing signal — the answer to the "$7 can't
+  reach venture scale" objection. If departments would pay, say so on stage.
+- **Q12 and Q16** are your roadmap. Whatever blocks trust is what to build next.
+
+**Feed answers back into the deck.** Right now slide 5 says "50 discovery
+interviews" as a bare number. One verbatim quote from Q9 on the problem slide
+would do more work than the number does.
