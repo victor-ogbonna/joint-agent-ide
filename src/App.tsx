@@ -1393,7 +1393,13 @@ export default function App() {
         email: user.email,
         plan: cfg.planCode,
         metadata: { uid: user.uid },
-        callback: async (response) => {
+        // Paystack's inline script rejects an async callback outright — it checks
+        // the function's constructor name, and an async function reports
+        // "AsyncFunction", which fails validation with "Attribute callback must
+        // be a valid function". So this stays a plain function and starts the
+        // verification separately; Paystack never awaits it anyway.
+        callback: (response) => {
+          void (async () => {
           try {
             const idToken = await user.getIdToken();
             const verifyRes = await fetch("/api/paystack/verify", {
@@ -1415,6 +1421,7 @@ export default function App() {
           } finally {
             setIsSubscribing(false);
           }
+          })();
         },
         onClose: () => setIsSubscribing(false)
       }).openIframe();

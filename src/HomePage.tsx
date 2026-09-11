@@ -591,7 +591,7 @@ export default function HomePage({ waitlistMode = false }: { waitlistMode?: bool
             <Sparkles size={11} /> Autonomous Embedded AI Agent
           </div>
           <h1 className="font-display font-bold text-4xl sm:text-5xl leading-[1.1] tracking-tight text-balance">
-            One agent.<br />
+            One Agent.<br />
             <span className="gradient-text">Your whole hardware stack.</span>
           </h1>
           <p className="mt-5 text-sm sm:text-base text-[var(--text-muted)] max-w-lg leading-relaxed">
