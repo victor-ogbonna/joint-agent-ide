@@ -14,6 +14,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { SerialPort } from 'serialport';
 import { ReadlineParser } from '@serialport/parser-readline';
 import { loadAdminConfig, saveAdminConfig } from './server/adminConfig';
+import { readAccessLists, sanitiseEmailList } from './server/access';
 import { requireAuthAndQuota, requireFirebaseAuth, incrementTokenUsage, FREE_TOKEN_CAP, PAID_TOKEN_CAP, getOrCreateUserDoc } from './server/quota';
 import { registerPaystackRoutes } from './server/paystack';
 import { registerWaitlistRoutes } from './server/waitlist';
@@ -306,6 +307,24 @@ app.post("/api/admin/launch-status", requireAdmin, async (req, res) => {
   await saveAdminConfig({ launchLocked });
   console.log(`Launch lock ${launchLocked ? "ENABLED" : "DISABLED"} via admin page.`);
   res.json({ launchLocked });
+});
+
+app.get("/api/admin/access-lists", requireAdmin, (_req, res) => {
+  res.json(readAccessLists());
+});
+
+app.post("/api/admin/access-lists", requireAdmin, async (req, res) => {
+  const { proAccessEmails, earlyAccessEmails } = req.body || {};
+  const pro = sanitiseEmailList(proAccessEmails);
+  const early = sanitiseEmailList(earlyAccessEmails);
+  if (pro === null || early === null) {
+    return res.status(400).json({ error: "Every entry must be a valid email address." });
+  }
+  // An address in both lists would be ambiguous; Pro is the stronger grant.
+  const earlyOnly = early.filter((e) => !pro.includes(e));
+  await saveAdminConfig({ proAccessEmails: pro, earlyAccessEmails: earlyOnly });
+  console.log(`Access lists updated via admin page: ${pro.length} pro, ${earlyOnly.length} early.`);
+  res.json(readAccessLists());
 });
 
 registerPaystackRoutes(app, requireAdmin);

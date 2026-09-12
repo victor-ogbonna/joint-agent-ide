@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useDocumentScroll } from "./useDocumentScroll";
-import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw } from "lucide-react";
+import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw, UserPlus, Trash2 } from "lucide-react";
 
 const TOKEN_KEY = "jointagent_admin_token";
 
@@ -33,6 +33,14 @@ export default function AdminPage() {
 
   const [launchLocked, setLaunchLocked] = useState<boolean | null>(null);
   const [togglingLock, setTogglingLock] = useState(false);
+
+  const [proEmails, setProEmails] = useState<string[]>([]);
+  const [earlyEmails, setEarlyEmails] = useState<string[]>([]);
+  const [ownerEmails, setOwnerEmails] = useState<string[]>([]);
+  const [newGrantEmail, setNewGrantEmail] = useState("");
+  const [newGrantTier, setNewGrantTier] = useState<"pro" | "early">("pro");
+  const [savingGrants, setSavingGrants] = useState(false);
+  const [grantError, setGrantError] = useState<string | null>(null);
 
   const authHeaders = (t: string) => ({ Authorization: `Bearer ${t}`, "Content-Type": "application/json" });
 
@@ -96,6 +104,59 @@ export default function AdminPage() {
     finally { setTogglingLock(false); }
   };
 
+  const loadAccessLists = async (t: string) => {
+    try {
+      const res = await fetch("/api/admin/access-lists", { headers: authHeaders(t) });
+      if (!res.ok) return;
+      const d = await res.json();
+      setProEmails(d.proAccessEmails || []);
+      setEarlyEmails(d.earlyAccessEmails || []);
+      setOwnerEmails(d.ownerEmails || []);
+    } catch { /* lists stay empty; the form still works */ }
+  };
+
+  const saveGrants = async (pro: string[], early: string[]) => {
+    if (!token) return;
+    setSavingGrants(true);
+    setGrantError(null);
+    try {
+      const res = await fetch("/api/admin/access-lists", {
+        method: "POST",
+        headers: authHeaders(token),
+        body: JSON.stringify({ proAccessEmails: pro, earlyAccessEmails: early })
+      });
+      const d = await res.json();
+      if (!res.ok) {
+        setGrantError(d.error || "Could not save.");
+        return;
+      }
+      setProEmails(d.proAccessEmails || []);
+      setEarlyEmails(d.earlyAccessEmails || []);
+    } catch {
+      setGrantError("Could not reach the server.");
+    } finally {
+      setSavingGrants(false);
+    }
+  };
+
+  const addGrant = (e: React.FormEvent) => {
+    e.preventDefault();
+    const email = newGrantEmail.trim().toLowerCase();
+    if (!email) return;
+    // Adding to one tier removes from the other, so an address is never in both.
+    const pro = newGrantTier === "pro"
+      ? Array.from(new Set([...proEmails, email]))
+      : proEmails.filter((x) => x !== email);
+    const early = newGrantTier === "early"
+      ? Array.from(new Set([...earlyEmails, email]))
+      : earlyEmails.filter((x) => x !== email);
+    setNewGrantEmail("");
+    saveGrants(pro, early);
+  };
+
+  const removeGrant = (email: string) =>
+    saveGrants(proEmails.filter((x) => x !== email), earlyEmails.filter((x) => x !== email));
+
   const handleCopyEmails = async () => {
     try {
       await navigator.clipboard.writeText(waitlist.map((w) => w.email).join(", "));
@@ -111,6 +172,7 @@ export default function AdminPage() {
       loadPaystackConfig(token);
       loadWaitlist(token);
       loadLaunchStatus(token);
+      loadAccessLists(token);
     }
   }, [token]);
 
@@ -287,6 +349,93 @@ export default function AdminPage() {
             Allowlisted while locked: <span className="font-mono">victorogbonna313@gmail.com</span> (usage never counted)
             and <span className="font-mono">chineduogbonna313@gmail.com</span> (counted normally).
             Both must sign in with Google — the allowlist ignores unverified email addresses.
+          </p>
+        </div>
+
+        <div className="bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl p-5 space-y-4 mb-4">
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 bg-orange-500/10 rounded-md text-orange-600">
+              <UserPlus size={14} />
+            </div>
+            <h2 className="font-display font-bold text-sm">Granted access</h2>
+            <span className="ml-auto font-mono text-xs text-[var(--text-main)]">
+              {proEmails.length + earlyEmails.length}
+            </span>
+          </div>
+
+          <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+            These accounts can use the IDE even while the pre-launch lock is on.
+            <span className="text-[var(--text-main)]"> Pro</span> also gets the paid
+            token allowance without paying — for VCs and design partners.
+            <span className="text-[var(--text-main)]"> Regular</span> gets the normal
+            free allowance.
+          </p>
+
+          <form onSubmit={addGrant} className="space-y-2">
+            <input
+              type="email"
+              value={newGrantEmail}
+              onChange={(e) => setNewGrantEmail(e.target.value)}
+              placeholder="name@example.com"
+              className="w-full bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-lg px-3 py-2 text-sm font-mono text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] transition"
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex rounded-lg border border-[var(--border-main)] overflow-hidden">
+                {(["pro", "early"] as const).map((tier) => (
+                  <button
+                    key={tier}
+                    type="button"
+                    onClick={() => setNewGrantTier(tier)}
+                    className={`px-3 py-2 text-xs font-semibold transition ${newGrantTier === tier ? "bg-orange-600 text-white" : "text-[var(--text-muted)] hover:text-[var(--text-main)]"}`}
+                  >
+                    {tier === "pro" ? "Pro" : "Regular"}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="submit"
+                disabled={savingGrants || !newGrantEmail.trim()}
+                className="flex items-center justify-center gap-1.5 bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 rounded-lg transition"
+              >
+                {savingGrants ? <Loader2 size={13} className="animate-spin" /> : <UserPlus size={13} />}
+                Grant access
+              </button>
+            </div>
+          </form>
+
+          {grantError && (
+            <div className="flex items-start gap-1.5 text-xs text-red-400">
+              <AlertCircle size={13} className="mt-0.5 shrink-0" />
+              <span>{grantError}</span>
+            </div>
+          )}
+
+          {(proEmails.length > 0 || earlyEmails.length > 0) && (
+            <div className="border border-[var(--border-main)] rounded-lg divide-y divide-[var(--border-main)] max-h-56 overflow-y-auto">
+              {[...proEmails.map((e) => [e, "Pro"] as const), ...earlyEmails.map((e) => [e, "Regular"] as const)].map(([email, tier]) => (
+                <div key={email} className="flex items-center gap-2 px-3 py-2 text-xs">
+                  <span className="font-mono text-[var(--text-main)] truncate">{email}</span>
+                  <span className={`shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded ${tier === "Pro" ? "bg-orange-500/15 text-orange-500" : "bg-[var(--bg-surface)] text-[var(--text-muted)]"}`}>
+                    {tier}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeGrant(email)}
+                    disabled={savingGrants}
+                    aria-label={`Remove ${email}`}
+                    className="ml-auto shrink-0 p-1 text-[var(--text-subtle)] hover:text-red-400 transition disabled:opacity-50"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <p className="text-[10px] text-[var(--text-subtle)] leading-relaxed border-t border-[var(--border-main)] pt-3">
+            Owner, always unmetered and not editable here:{" "}
+            <span className="font-mono">{ownerEmails.join(", ") || "—"}</span>.
+            Granted accounts must sign in with Google — an unverified email address never matches a grant.
           </p>
         </div>
 

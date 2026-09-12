@@ -40,8 +40,19 @@ export default function ThanksPage() {
 
         <p className="text-sm text-[var(--text-muted)] leading-relaxed mb-7">
           We're deciding what to build next, and a few minutes from you counts for
-          more than any amount of guessing on our side. Five minutes, no wrong
-          answers — and honest criticism helps more than encouragement.
+          more than any amount of guessing on our side.{" "}
+          {SURVEY_URL ? (
+            <a
+              href={SURVEY_URL}
+              className="text-[var(--accent-primary)] underline underline-offset-2 hover:opacity-80 transition"
+            >
+              Our short survey
+            </a>
+          ) : (
+            "Our short survey"
+          )}{" "}
+          takes about five minutes. No wrong answers, and honest criticism helps
+          more than encouragement.
         </p>
 
         {SURVEY_URL ? (
@@ -55,15 +66,13 @@ export default function ThanksPage() {
             </a>
 
             <div className="mt-4 min-h-[1.25rem] text-xs text-[var(--text-subtle)]">
-              {cancelled ? (
-                <a href="/" className="hover:text-[var(--text-main)] transition">Back to the homepage</a>
-              ) : (
+              {cancelled ? null : (
                 <span className="inline-flex items-center gap-1.5">
                   <Clock size={12} /> Opening in {left}s ·{" "}
                   <button
                     type="button"
                     onClick={() => setCancelled(true)}
-                    className="underline hover:text-[var(--text-main)] transition"
+                    className="underline hover:text-[var(--text-main)] transition px-2 py-2 -my-2"
                   >
                     skip
                   </button>
@@ -71,11 +80,7 @@ export default function ThanksPage() {
               )}
             </div>
           </>
-        ) : (
-          <a href="/" className="text-xs text-[var(--text-subtle)] hover:text-[var(--text-main)] transition">
-            Back to the homepage
-          </a>
-        )}
+        ) : null}
       </div>
     </div>
   );

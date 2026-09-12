@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { adminAuth, adminDb, isFirebaseAdminConfigured } from "./firebaseAdmin";
 import { loadAdminConfig } from "./adminConfig";
-import { isAllowlisted, isUnmetered, LAUNCH_LOCKED_CODE, LAUNCH_LOCKED_MESSAGE } from "./access";
+import { accessLevelFor, bypassesLaunchLock, LAUNCH_LOCKED_CODE, LAUNCH_LOCKED_MESSAGE } from "./access";
 
 /** Sentinel subscription status for accounts whose usage is never counted. */
 export const UNMETERED_STATUS = "unmetered";
@@ -103,10 +103,10 @@ async function verifyBearerToken(req: Request): Promise<Identity | null> {
   }
 }
 
-/** Refuses everyone but the allowlist while the launch lock is on. */
+/** Refuses everyone without a grant while the launch lock is on. */
 function launchLockCheck(who: Identity, res: Response): boolean {
   if (!loadAdminConfig().launchLocked) return true;
-  if (isAllowlisted(who.email, who.emailVerified)) return true;
+  if (bypassesLaunchLock(accessLevelFor(who.email, who.emailVerified))) return true;
   res.status(403).json({ error: LAUNCH_LOCKED_MESSAGE, code: LAUNCH_LOCKED_CODE });
   return false;
 }
@@ -145,10 +145,12 @@ export async function requireAuthAndQuota(req: Request, res: Response, next: Nex
     return res.status(429).json({ error: "Too many requests — please slow down.", code: "RATE_LIMITED" });
   }
 
-  // Exempt accounts skip the cap entirely. UNMETERED_STATUS flows through to
+  const level = accessLevelFor(who.email, who.emailVerified);
+
+  // The owner is never metered. UNMETERED_STATUS flows through to
   // incrementTokenUsage via req.quota, which short-circuits on it, so no call
   // site needs to know about the exemption.
-  if (isUnmetered(who.email, who.emailVerified)) {
+  if (level === "unmetered") {
     req.uid = uid;
     req.email = who.email;
     req.quota = { subscriptionStatus: UNMETERED_STATUS, tokensUsed: 0, tokenCap: Number.MAX_SAFE_INTEGER };
@@ -156,7 +158,9 @@ export async function requireAuthAndQuota(req: Request, res: Response, next: Nex
   }
 
   const doc = await getOrCreateUserDoc(uid);
-  const isPaid = doc.subscriptionStatus === "active";
+  // A granted Pro account gets the paid cap without a Paystack subscription,
+  // and is still metered — the grant raises the ceiling, it does not remove it.
+  const isPaid = doc.subscriptionStatus === "active" || level === "pro";
   const tokenCap = isPaid ? PAID_TOKEN_CAP : FREE_TOKEN_CAP;
   const tokensUsed = isPaid ? doc.cycleTokensUsed : doc.lifetimeFreeTokensUsed;
 
