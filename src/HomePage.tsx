@@ -447,6 +447,14 @@ function WaitlistForm() {
         setStatus("error");
         return;
       }
+      // Hand off to /thanks, which confirms the signup and then opens the
+      // discovery survey. Done here rather than inline so the ask gets a whole
+      // page instead of a line under a form — this is the highest-intent
+      // moment we get with someone.
+      if (SURVEY_URL) {
+        window.location.assign("/thanks");
+        return;
+      }
       setStatus("done");
     } catch {
       setErrorMsg("Could not reach the server.");

@@ -4,6 +4,7 @@ import App from './App.tsx';
 import AdminPage from './AdminPage.tsx';
 import HomePage from './HomePage.tsx';
 import PrivacyPage from './PrivacyPage.tsx';
+import ThanksPage from './ThanksPage.tsx';
 import { AuthProvider, useAuth } from './contexts/AuthContext.tsx';
 import './index.css';
 
@@ -16,6 +17,9 @@ const currentPath = window.location.pathname.replace(/\/+$/, '');
 const isAdminRoute = currentPath === '/admin';
 const isPrivacyRoute = currentPath === '/privacy';
 const isWaitlistRoute = currentPath === '/waitlist';
+// Where a successful waitlist signup lands. Public and auth-free like
+// /waitlist — the people seeing it do not have accounts yet.
+const isThanksRoute = currentPath === '/thanks';
 
 // Auth usually resolves in a few hundred ms — too fast for the power-on to
 // register as intentional rather than as a flicker. Long enough to land, short
@@ -122,6 +126,8 @@ createRoot(document.getElementById('root')!).render(
       <AdminPage />
     ) : isPrivacyRoute ? (
       <PrivacyPage />
+    ) : isThanksRoute ? (
+      <ThanksPage />
     ) : isWaitlistRoute ? (
       // Same marketing page, product doors removed. Rendered outside
       // AuthProvider deliberately — nothing on it touches auth.
