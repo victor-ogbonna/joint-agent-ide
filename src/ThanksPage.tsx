@@ -39,17 +39,16 @@ export default function ThanksPage() {
         </h1>
 
         <p className="text-sm text-[var(--text-muted)] leading-relaxed mb-7">
-          We're deciding what to build next, and your answers count for more
-          than our guesses.{" "}
+          Your answers count for more than our guesses.{" "}
           {SURVEY_URL ? (
             <a
               href={SURVEY_URL}
               className="text-[var(--accent-primary)] underline underline-offset-2 hover:opacity-80 transition"
             >
-              Five minutes, honest answers
+              Tell us what to build next
             </a>
           ) : (
-            "Five minutes, honest answers"
+            "Tell us what to build next"
           )}{" "}
           — criticism helps more than praise.
         </p>
