@@ -48,6 +48,16 @@ COPY package.json package-lock.json* ./
 RUN npm install
 
 COPY . .
+
+# Vite inlines VITE_* variables at BUILD time, but .env is dockerignored on
+# purpose — secrets must never be baked into an image. So any VITE_* value the
+# client needs has to arrive as an explicit build arg. These are public by
+# definition: they end up readable in the browser bundle, so nothing secret
+# belongs here. Without this the variable is simply undefined at build and the
+# feature silently does nothing in production while working fine in dev.
+ARG VITE_SURVEY_URL=""
+ENV VITE_SURVEY_URL=$VITE_SURVEY_URL
+
 RUN npm run build
 RUN npm prune --omit=dev
 

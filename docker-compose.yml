@@ -14,7 +14,12 @@
 
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        # Compose interpolates this from .env in this directory. Build-time
+        # only — see the ARG note in the Dockerfile.
+        VITE_SURVEY_URL: "${VITE_SURVEY_URL:-}"
     restart: unless-stopped
     env_file: .env
     environment:
