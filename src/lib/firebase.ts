@@ -25,26 +25,37 @@ import { getFirestore } from "firebase/firestore";
 // Set to afrojoint.xyz on 11 Sep 2026. Requests to /__/auth/* are proxied to
 // the Firebase backend by server/firebaseAuthProxy.ts, so Google's consent
 // screen shows the real domain instead of afro-joint-ide.firebaseapp.com.
+// Google's consent screen shows whatever authDomain is set to, so it must be
+// the domain the visitor is actually on — otherwise someone signing in at
+// jointagentide.com is asked to "continue to afrojoint.xyz", which looks like a
+// phishing attempt.
 //
-// This only works if afrojoint.xyz is listed under BOTH:
+// Derived from the current hostname rather than hardcoded, deliberately. A
+// single constant is all-or-nothing: point it at a domain that is not yet
+// registered with Google and sign-in breaks on EVERY domain at once. This way
+// each domain stands alone, so the known-good one keeps working while a new one
+// is being registered.
+//
+// A domain only works here once it is listed in BOTH:
 //   Firebase Console -> Authentication -> Settings -> Authorized domains
 //   Google Cloud -> Credentials -> Web client -> Authorized JavaScript origins
-// Miss either and sign-in breaks outright.
+// Miss either and sign-in fails on that domain alone.
 //
-// Was left as null until Joint-Agent had a domain: with no custom domain
-// the Firebase default is correct everywhere, and pointing this at a domain that
-// isn't live yet would break sign-in in production. Set it to the new domain
-// once DNS resolves, and add that domain to BOTH Firebase Console ->
-// Authentication -> Settings -> Authorized domains AND the Google Cloud OAuth
-// client's authorized redirect URIs as https://<domain>/__/auth/handler.
-const PROD_AUTH_DOMAIN: string | null = "afrojoint.xyz";
+// www is folded onto the apex so only the apex needs registering.
+const AUTH_DOMAINS = ["jointagentide.com", "afrojoint.xyz"];
 
-const isLocalhost =
-  typeof window !== "undefined" && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(window.location.hostname);
+const hostname = typeof window !== "undefined" ? window.location.hostname : "";
+const isLocalhost = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(hostname);
+const apex = hostname.replace(/^www\./, "");
+
+// Falls back to the Firebase-hosted domain, which is always authorised — the
+// consent screen reads worse, but sign-in keeps working.
+const resolvedAuthDomain =
+  !isLocalhost && AUTH_DOMAINS.includes(apex) ? apex : "afro-joint-ide.firebaseapp.com";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCjGpSSw4P_oklMJKcmMebfMyE2reZIsxI",
-  authDomain: !isLocalhost && PROD_AUTH_DOMAIN ? PROD_AUTH_DOMAIN : "afro-joint-ide.firebaseapp.com",
+  authDomain: resolvedAuthDomain,
   projectId: "afro-joint-ide",
   storageBucket: "afro-joint-ide.firebasestorage.app",
   messagingSenderId: "367947451511",
