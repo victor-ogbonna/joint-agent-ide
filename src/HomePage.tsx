@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { motion, AnimatePresence } from "motion/react";
+import { motion } from "motion/react";
 import {
   Cpu, Wallet, TerminalSquare, X, Loader2, Zap,
   Mail, Lock, User as UserIcon, ArrowRight, Sparkles,
@@ -377,21 +377,39 @@ function AgentDemoPanel() {
         </div>
       </div>
 
-      <AnimatePresence mode="wait">
-        {phase >= 2 && (
-          <motion.div
-            key="code"
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            transition={{ duration: 0.3 }}
-            className="border-t border-[var(--border-main)] bg-[var(--bg-root)] overflow-hidden"
-          >
-            <pre className="text-[10.5px] sm:text-[11px] leading-relaxed p-4 font-mono text-[var(--text-main)] overflow-x-auto whitespace-pre">
-              <code>{typedCode}</code>
-            </pre>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* Fixed-height code pane.
+ 
+          This used to move the whole page. The block mounted and unmounted with
+          an animated height, and the <pre> also grew line by line as the code
+          typed, so everything below it shifted on every frame of the loop —
+          which on a narrow screen meant the waitlist form crawled up and down
+          while you were trying to read or tap it.
+ 
+          Now a full, invisible copy of the sketch reserves the final height and
+          the progressively typed copy is laid over it, so the pane is always
+          exactly as tall as the finished code no matter which phase the loop is
+          in. Only opacity animates. Taking the height from the real content
+          rather than a hardcoded pixel value means it stays correct if
+          DEMO_CODE or the font size ever changes.
+ 
+          overflow-hidden on the reserving copy matters: with whitespace-pre a
+          long line would otherwise widen the container and reintroduce
+          horizontal page scroll. */}
+      <div className="relative border-t border-[var(--border-main)] bg-[var(--bg-root)]">
+        <pre
+          aria-hidden="true"
+          className="invisible overflow-hidden text-[10.5px] sm:text-[11px] leading-relaxed p-4 font-mono whitespace-pre"
+        >
+          <code>{DEMO_CODE}</code>
+        </pre>
+        <motion.pre
+          animate={{ opacity: phase >= 2 ? 1 : 0 }}
+          transition={{ duration: 0.3 }}
+          className="absolute inset-0 text-[10.5px] sm:text-[11px] leading-relaxed p-4 font-mono text-[var(--text-main)] overflow-x-auto whitespace-pre"
+        >
+          <code>{typedCode}</code>
+        </motion.pre>
+      </div>
 
     </div>
   );

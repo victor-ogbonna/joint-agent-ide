@@ -136,6 +136,19 @@ let serialWsClients: Set<WebSocket> = new Set();
 dotenv.config();
 
 const app = express();
+
+// Caddy terminates TLS and proxies inward, so without this every request
+// arrives from Caddy's container address and req.ip is identical for every
+// visitor on earth — which silently turned the per-IP rate limits below into
+// one shared global bucket. Five waitlist signups from anyone and the sixth
+// real person was told "Too many attempts".
+//
+// The value is 1, not `true`: exactly one proxy sits in front (Caddy), so only
+// the hop it adds is trusted. Trusting the whole X-Forwarded-For chain would
+// let a caller spoof their address by sending their own header. The app
+// publishes no host port and is reachable only through Caddy on the compose
+// network, so that one hop is the only one that can ever be real.
+app.set("trust proxy", 1);
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 // The `verify` callback stashes the exact raw request bytes onto req.rawBody —

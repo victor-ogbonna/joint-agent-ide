@@ -10,7 +10,13 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // relying on the auth-gated rate limiting the rest of the API has.
 const submissionsByIp = new Map<string, { count: number; windowStart: number }>();
 const WINDOW_MS = 60 * 60 * 1000; // 1 hour
-const MAX_PER_WINDOW = 5;
+// Per IP, per hour. Generous on purpose: students and hobbyists share NAT on
+// campus and office networks, so a whole building can look like one address —
+// a low cap there blocks real signups rather than spam. Submitting the same
+// email twice is harmless anyway (the doc id IS the email, so a repeat just
+// updates the timestamp), which means the only thing worth limiting is a flood
+// of distinct addresses.
+const MAX_PER_WINDOW = 20;
 
 function isRateLimited(ip: string): boolean {
   const entry = submissionsByIp.get(ip);
