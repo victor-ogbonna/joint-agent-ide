@@ -72,6 +72,7 @@ function RootRoute() {
   const { user, loading, signOut } = useAuth();
   const [holding, setHolding] = useState(true);
   const [access, setAccess] = useState<'checking' | 'open' | 'locked'>('checking');
+  const [accessDenied, setAccessDenied] = useState(false);
 
   useEffect(() => {
     const t = setTimeout(() => setHolding(false), MIN_LAUNCH_MS);
@@ -100,6 +101,7 @@ function RootRoute() {
         if (cancelled) return;
         if (probe.status === 403) {
           await signOut();
+          setAccessDenied(true);
           setAccess('locked');
         } else {
           setAccess('open');
@@ -113,9 +115,10 @@ function RootRoute() {
 
   if (loading || holding || access === 'checking') return <LaunchScreen />;
 
-  // Locked: everyone who is not allowlisted sees the waitlist page, which
-  // already has every door into the product removed.
-  if (access === 'locked') return <HomePage waitlistMode />;
+  // Locked: everyone without a grant sees the waitlist page. inviteSignIn keeps
+  // a sign-in door open for accounts that have been granted access — without it
+  // a granted VC could never get in, which would make the grant meaningless.
+  if (access === 'locked') return <HomePage waitlistMode inviteSignIn accessDenied={accessDenied} />;
 
   return user ? <App /> : <HomePage />;
 }

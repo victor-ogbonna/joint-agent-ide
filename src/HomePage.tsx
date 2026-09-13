@@ -524,7 +524,18 @@ function WaitlistForm() {
 //
 // Sharing one component rather than duplicating the copy into a second page
 // means the pitch link can never drift out of sync with the real homepage.
-export default function HomePage({ waitlistMode = false }: { waitlistMode?: boolean }) {
+export default function HomePage({
+  waitlistMode = false,
+  // Set while the pre-launch lock is on. The page still hides Launch — the
+  // product is not open — but invited accounts need some door, otherwise a
+  // granted VC has no way to sign in and the grant is worthless. Deliberately
+  // NOT set on the /waitlist share link, which is handed to people who have no
+  // account and should see no sign-in at all.
+  inviteSignIn = false,
+  // True when someone just signed in, was refused, and was signed back out.
+  // Without this they bounce back to this page with no explanation.
+  accessDenied = false,
+}: { waitlistMode?: boolean; inviteSignIn?: boolean; accessDenied?: boolean }) {
   useDocumentScroll();
   const [authModal, setAuthModal] = useState<AuthMode | null>(null);
 
@@ -576,6 +587,14 @@ export default function HomePage({ waitlistMode = false }: { waitlistMode?: bool
             <Zap size={12} /> Launch<span className="hidden sm:inline">&nbsp;Joint-Agent IDE</span>
           </button>
         </div>
+        )}
+        {waitlistMode && inviteSignIn && (
+          <button
+            onClick={() => setAuthModal("signin")}
+            className="text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text-main)] transition px-2 sm:px-3 py-1.5 whitespace-nowrap shrink-0"
+          >
+            Invited? <span className="text-[var(--accent-primary)]">Sign in</span>
+          </button>
         )}
         {waitlistMode && (
           <a
@@ -769,7 +788,19 @@ export default function HomePage({ waitlistMode = false }: { waitlistMode?: bool
       {/* Never mounted in waitlist mode — AuthModal is the only thing here that
           calls useAuth(), so keeping it out lets this page render outside the
           AuthProvider entirely. */}
-      {!waitlistMode && authModal && (
+      {accessDenied && (
+        <div className="fixed inset-x-0 top-0 z-40 px-4 pt-3 flex justify-center pointer-events-none">
+          <div className="pointer-events-auto max-w-md w-full rounded-xl border border-[var(--accent-primary)]/40 bg-[var(--bg-panel)] shadow-2xl px-4 py-3 text-center">
+            <p className="text-xs text-[var(--text-main)] leading-relaxed">
+              That account doesn't have early access yet. Joint-Agent IDE hasn't
+              launched — join the waitlist below and we'll let you in as soon as
+              a place is free.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {(!waitlistMode || inviteSignIn) && authModal && (
         <AuthModal mode={authModal} onClose={() => setAuthModal(null)} onSwitchMode={setAuthModal} />
       )}
     </div>
