@@ -1,6 +1,17 @@
 import React, { useState, useRef, useEffect } from "react";
 import { Terminal as TerminalIcon, CornerDownLeft, Circle, ChevronRight, X, Trash2, Copy, Check } from "lucide-react";
 import { TerminalLine } from "../types";
+import { useAuth } from "../contexts/AuthContext";
+
+// Shell-style prompt built from whoever is signed in: the first five characters
+// of the local part of their email, so it reads like a real machine prompt
+// without putting a full address on screen during a screen-share or demo.
+// The local part is used rather than the raw string so a very short address
+// cannot pull "@" and the domain into the name.
+function promptFor(email: string | null | undefined): string {
+  const local = (email || "").split("@")[0].trim().toLowerCase();
+  return `${local.slice(0, 5) || "guest"}@J-Agent`;
+}
 
 interface TerminalProps {
   lines: TerminalLine[];
@@ -10,6 +21,8 @@ interface TerminalProps {
 }
 
 export default function Terminal({ lines, onExecuteCommand, onClear, onClose }: TerminalProps) {
+  const { user } = useAuth();
+  const prompt = promptFor(user?.email);
   const [input, setInput] = useState("");
   const [copied, setCopied] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -124,7 +137,7 @@ export default function Terminal({ lines, onExecuteCommand, onClear, onClose }: 
         onSubmit={handleSubmit}
         className="bg-[var(--bg-root)] border-t border-[var(--border-main)] flex items-center px-3 py-2 shrink-0"
       >
-        <span className="text-[var(--term-input)] mr-2 font-mono text-xs select-none">guest@io-studio:~$</span>
+        <span className="text-[var(--term-input)] mr-2 font-mono text-xs select-none whitespace-nowrap">{prompt}:~$</span>
         <input
           type="text"
           value={input}
