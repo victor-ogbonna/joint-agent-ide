@@ -490,8 +490,8 @@ function WaitlistForm() {
         {SURVEY_URL && (
           <div className="max-w-sm text-center border-t border-[var(--border-main)] pt-3">
             <p className="text-xs text-[var(--text-muted)] leading-relaxed">
-              While you're here — what should we build first? Five minutes, and it
-              genuinely shapes what ships.
+              While you're here — what should we build first? Your answers
+              genuinely shape what ships.
             </p>
             <a
               href={SURVEY_URL}
