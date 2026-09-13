@@ -13,7 +13,14 @@ import path from "path";
 // below make a save durable by also pushing it to Render's own environment
 // variables, so it's still there after the next redeploy or free-tier sleep.
 // ----------------------------------------------------
-const ADMIN_CONFIG_PATH = path.join(process.cwd(), ".admin-config.json");
+// ADMIN_CONFIG_DIR points at a mounted volume in production. Without it the
+// file lands inside the container, where `docker compose up --build` destroys
+// it on every deploy — silently reverting the Paystack config, the launch lock
+// and every access grant, with no error to notice.
+const ADMIN_CONFIG_PATH = path.join(
+  process.env.ADMIN_CONFIG_DIR || process.cwd(),
+  ".admin-config.json"
+);
 
 export interface AdminConfig {
   geminiApiKey?: string;

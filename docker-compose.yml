@@ -25,6 +25,13 @@ services:
     environment:
       NODE_ENV: production
       PORT: "8080"
+      # Anything saved from the admin page lands here. Must be a mounted path —
+      # see the note in server/adminConfig.ts.
+      ADMIN_CONFIG_DIR: /app/data
+    volumes:
+      # Bind mount rather than a named volume so the state is visible on the
+      # host, easy to back up, and survives `docker compose down -v`.
+      - ./data:/app/data
     # Deliberately no `ports:` mapping — publishing 8080 to the host would let
     # anyone reach the app over plain HTTP on that port, bypassing Caddy and TLS
     # entirely. Only Caddy can reach it, over the internal network below.

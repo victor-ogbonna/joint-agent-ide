@@ -71,9 +71,25 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
   app.post("/api/admin/paystack-config", requireAdmin, async (req, res) => {
     const { secretKey, publicKey, planCode } = req.body || {};
     const patch: Record<string, string> = {};
-    if (typeof secretKey === "string" && secretKey.trim()) patch.paystackSecretKey = secretKey.trim();
-    if (typeof publicKey === "string" && publicKey.trim()) patch.paystackPublicKey = publicKey.trim();
-    if (typeof planCode === "string" && planCode.trim()) patch.paystackPlanCode = planCode.trim();
+
+    // Shape checks, because a wrong value here fails silently: the config still
+    // reads as "configured", checkout still opens, and every call to Paystack
+    // then fails for reasons that point nowhere near this field.
+    const sk = typeof secretKey === "string" ? secretKey.trim() : "";
+    const pk = typeof publicKey === "string" ? publicKey.trim() : "";
+    const pl = typeof planCode === "string" ? planCode.trim() : "";
+    if (sk && !/^sk_(test|live)_[A-Za-z0-9]+$/.test(sk)) {
+      return res.status(400).json({ error: "That doesn't look like a Paystack secret key — they start with sk_test_ or sk_live_." });
+    }
+    if (pk && !/^pk_(test|live)_[A-Za-z0-9]+$/.test(pk)) {
+      return res.status(400).json({ error: "That doesn't look like a Paystack public key — they start with pk_test_ or pk_live_." });
+    }
+    if (pl && !/^PLN_[A-Za-z0-9]+$/.test(pl)) {
+      return res.status(400).json({ error: "That doesn't look like a Paystack plan code — they start with PLN_." });
+    }
+    if (sk) patch.paystackSecretKey = sk;
+    if (pk) patch.paystackPublicKey = pk;
+    if (pl) patch.paystackPlanCode = pl;
     if (Object.keys(patch).length === 0) {
       return res.status(400).json({ error: "Provide at least one of secretKey, publicKey, planCode." });
     }
