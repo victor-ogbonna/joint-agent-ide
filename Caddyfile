@@ -1,13 +1,16 @@
 # Joint-Agent IDE — reverse proxy and automatic HTTPS.
 #
-# Live on afrojoint.xyz since 11 Sep 2026. Caddy requests and renews the
+# Primary domain is jointagentide.com (13 Sep 2026). afrojoint.xyz is still
+# served during the cutover so the site never goes dark while certificates are
+# issued and the Firebase/OAuth consoles are updated; it can be dropped from
+# this list once sign-in is confirmed working on the new domain. Caddy requests and renews the
 # Let's Encrypt certificate automatically — nothing to renew by hand.
 #
 # The A records for both names must resolve to this server, and Cloudflare's
 # proxy must stay OFF ("DNS only", grey cloud). With the orange proxy on,
 # Cloudflare terminates TLS itself and Caddy's certificate challenge fails.
 
-afrojoint.xyz, www.afrojoint.xyz {
+jointagentide.com, www.jointagentide.com, afrojoint.xyz, www.afrojoint.xyz {
 	# `app` resolves over the compose network; 8080 is never exposed to the host.
 	reverse_proxy app:8080 {
 		# The agent streams responses over server-sent events. Without this,

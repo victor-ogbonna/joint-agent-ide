@@ -44,12 +44,32 @@ export default function AdminPage() {
 
   const authHeaders = (t: string) => ({ Authorization: `Bearer ${t}`, "Content-Type": "application/json" });
 
+  // Admin sessions live in a Map in the server process, so every restart —
+  // including every deploy — forgets them while the browser still holds its
+  // token. Without this the page stays in a half-logged-in state and every
+  // card renders "Not authenticated" instead of asking for the password again.
+  const handleSessionExpired = () => {
+    sessionStorage.removeItem(TOKEN_KEY);
+    setToken(null);
+    setLoginError("Your admin session expired. Please sign in again.");
+  };
+
+  /** Returns null when the session is gone, having already reset to the login screen. */
+  const adminFetch = async (t: string, path: string, init?: RequestInit): Promise<Response | null> => {
+    const res = await fetch(path, { ...init, headers: authHeaders(t) });
+    if (res.status === 401) {
+      handleSessionExpired();
+      return null;
+    }
+    return res;
+  };
+
 
   const loadPaystackConfig = async (t: string) => {
     setLoadingPaystackConfig(true);
     try {
-      const res = await fetch("/api/admin/paystack-config", { headers: authHeaders(t) });
-      if (res.status === 401) return;
+      const res = await adminFetch(t, "/api/admin/paystack-config");
+      if (!res) return;
       const data = await res.json();
       setPaystackHasSecretKey(data.hasSecretKey);
       setPaystackMaskedSecretKey(data.maskedSecretKey);
@@ -66,7 +86,8 @@ export default function AdminPage() {
     setLoadingWaitlist(true);
     setWaitlistError(null);
     try {
-      const res = await fetch("/api/waitlist/entries", { headers: authHeaders(t) });
+      const res = await adminFetch(t, "/api/waitlist/entries");
+      if (!res) return;
       const data = await res.json();
       if (!res.ok) {
         setWaitlistError(data.error || "Could not load the waitlist.");
@@ -82,8 +103,8 @@ export default function AdminPage() {
 
   const loadLaunchStatus = async (t: string) => {
     try {
-      const res = await fetch("/api/admin/launch-status", { headers: authHeaders(t) });
-      if (!res.ok) return;
+      const res = await adminFetch(t, "/api/admin/launch-status");
+      if (!res || !res.ok) return;
       const data = await res.json();
       setLaunchLocked(data.launchLocked);
     } catch { /* leave as null; the toggle renders disabled */ }
@@ -93,11 +114,11 @@ export default function AdminPage() {
     if (!token) return;
     setTogglingLock(true);
     try {
-      const res = await fetch("/api/admin/launch-status", {
+      const res = await adminFetch(token, "/api/admin/launch-status", {
         method: "POST",
-        headers: authHeaders(token),
         body: JSON.stringify({ launchLocked: next })
       });
+      if (!res) return;
       const data = await res.json();
       if (res.ok) setLaunchLocked(data.launchLocked);
     } catch { /* keep the previous state on failure */ }
@@ -106,8 +127,8 @@ export default function AdminPage() {
 
   const loadAccessLists = async (t: string) => {
     try {
-      const res = await fetch("/api/admin/access-lists", { headers: authHeaders(t) });
-      if (!res.ok) return;
+      const res = await adminFetch(t, "/api/admin/access-lists");
+      if (!res || !res.ok) return;
       const d = await res.json();
       setProEmails(d.proAccessEmails || []);
       setEarlyEmails(d.earlyAccessEmails || []);
@@ -120,11 +141,11 @@ export default function AdminPage() {
     setSavingGrants(true);
     setGrantError(null);
     try {
-      const res = await fetch("/api/admin/access-lists", {
+      const res = await adminFetch(token, "/api/admin/access-lists", {
         method: "POST",
-        headers: authHeaders(token),
         body: JSON.stringify({ proAccessEmails: pro, earlyAccessEmails: early })
       });
+      if (!res) return;
       const d = await res.json();
       if (!res.ok) {
         setGrantError(d.error || "Could not save.");
@@ -224,11 +245,11 @@ export default function AdminPage() {
     setSavingPaystack(true);
     setPaystackSaveMessage(null);
     try {
-      const res = await fetch("/api/admin/paystack-config", {
+      const res = await adminFetch(token, "/api/admin/paystack-config", {
         method: "POST",
-        headers: authHeaders(token),
         body: JSON.stringify(body)
       });
+      if (!res) return;
       const data = await res.json();
       if (!res.ok) {
         setPaystackSaveMessage({ type: "error", text: data.error || "Failed to save Paystack config." });
