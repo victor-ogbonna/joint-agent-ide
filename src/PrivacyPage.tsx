@@ -17,6 +17,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 export default function PrivacyPage() {
+  useDocumentScroll();
   return (
     // h-full for the same reason as HomePage — #root is height:100% with
     // overflow:hidden, so a min-height here is clipped instead of scrolled.
