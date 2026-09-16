@@ -22,7 +22,7 @@ which is a different older project — always `cd ~/joint-agent-project` first).
 |---|---|
 | Production | **https://jointagentide.com** (Hetzner `138.201.91.112`, Docker + Caddy, auto HTTPS) |
 | Repo | `git@github.com:victor-ogbonna/joint-agent-ide.git`, branch `master` |
-| Last commit | `b80ceac Add the horizontal logo lockup` |
+| Last commit | `bdce627` — plan-mode rewrite, tool streaming, empty-prompt validation |
 | Pre-launch lock | **ON** — leave it on. Victor knows. Only granted accounts get in. |
 | Waitlist | 9 real signups. **Never pollute this** — clean up any test data. |
 | Users | 7 real user docs in Firestore. Same rule. |
@@ -65,135 +65,68 @@ Three hard-won rules:
 Server code changes need a restart; only `src/` hot-reloads.
 Admin sessions are in-memory, so every deploy logs Victor out of `/admin`.
 
-## Work to do
+## Already fixed and deployed (do not redo)
 
-### 1. Plan mode is far too verbose — the main complaint
+Verified against the deployed bundle, not the build log:
 
-`server.ts:537` holds the plan-mode instruction. It currently commands
-"**detailed**" steps, "**Ensure the user agrees**", "you **MUST** format
-clarifying questions as a bulleted list", and "code blocks as appropriate".
-The model obeys precisely, so "blink my LED for 5 seconds" produced a
-7-section document with a full code dump and **7 clarifying questions**.
+- **Plan mode is now concise.** `server.ts` plan instruction rewritten to scale
+  length to complexity, never print firmware in chat, and decide with stated
+  defaults rather than interrogate. Measured on Victor's exact complaint prompt
+  ("blink my esp32 inbuilt led for 5 seconds"): **1,200 words -> 103, seven
+  clarifying questions -> zero, code block -> none**, and the timing it quotes is
+  now internally consistent (500+500ms x 5 = 5s).
+- **It no longer asks for board facts it already has.** It receives board, MCU,
+  clock, RAM, flash and the exposed pin list from `describeBoardForPrompt`.
+  Settled decision: do NOT force a new project on login — the data was never
+  missing, the instruction to trust it was.
+- **Code quality instruction** added to BOTH code-generating prompts: real
+  comments explaining why, and honour a technique the user names (millis over
+  delay) instead of substituting. Verified: 24 comment lines in 62, millis()
+  used, no real delay() call.
+- **Tool-call streaming.** `server/deepseek.ts` emits `onToolProgress` as tool
+  arguments accumulate; `server.ts` forwards it as a `tool_progress` SSE event
+  throttled to 1.2s; `src/App.tsx` renders it. Three progress events on a real
+  generation, so code generation no longer shows a dead spinner.
+- **Empty/whitespace prompts** return 400 `EMPTY_PROMPT` before reaching the
+  model. They previously produced a ~1,000-character greeting billed to the user.
+- **Blank assistant bubbles** guarded — a `command` event with no text now falls
+  back to naming the command.
+- **Chat re-render storm fixed.** The markdown body is extracted into a memoised
+  `MessageMarkdown` in `src/components/AgentChat.tsx`, so a streaming reply no
+  longer re-parses every other message's markdown and KaTeX on every token.
+- **Proceed to Implement is now a one-shot.** It no longer calls
+  `setChatMode("implement")`, so the session stays in plan mode and a follow-up
+  question still gets a plan. Nothing implements until the button is pressed.
 
-Victor wants plan mode **kept, including for small prompts** (he values the
-clarification step) but made **concise**.
+## Still to do
 
-Required changes to that prompt:
-
-- **Scale depth to complexity.** A one-line request gets a few lines, not seven
-  sections. Nothing currently tells it to do this.
-- **Never print `main.cpp` code in the chat response.** It duplicates the editor,
-  doubles reading, and doubles the output tokens the user is billed for. Drop the
-  "Software Architecture" section entirely.
-- **Decide, don't interrogate.** Choose sensible defaults, state them in one
-  line, ask at most one question and only where a wrong guess wastes real time.
-- **Never ask about board specifics.** See §2 — it already has them.
-- Keep clarifying questions as a bulleted list, but few and genuinely necessary.
-
-### 2. The agent asks for board facts it already has
-
-`server/boards.ts:138` `describeBoardForPrompt()` already injects
-`ESP32 Dev Module (ESP32, 240MHz, 320KB RAM, 4096KB Flash). Pins include D2, D4, ...`
-into every request — board, MCU, clock, RAM, flash **and the exposed pin list**.
-
-Despite that, the agent asked the user *"Which GPIO is your board's onboard LED
-actually on?"* and *"Are you using the Arduino IDE or PlatformIO?"* (the platform
-**is** PlatformIO).
-
-**Decision already made — do not revisit:** do NOT force a new project on login.
-The data is already present. Fix the prompt to trust it and commit to a choice.
-This matters because the product's whole promise is that hardware trivia is not
-the user's problem.
-
-### 3. Generated plans contradict their own code
-
-Real example, verified by simulation: the plan's table claimed 500ms ON / 500ms
-OFF and "5 full on/off cycles", while its own generated code
-(`(millis()-start) % 500 < 250`) produces **250ms ON / 250ms OFF, 10 cycles** —
-wrong by 2x. It compiles fine, so the compiler cannot catch it.
-
-Less prose reduces this surface area, which is another argument for §1. Consider
-also instructing it not to state timing numbers it has not derived from the code
-it is writing.
-
-### 4. Code comments are sometimes missing entirely
-
-Victor reports generated code sometimes arrives with no comments. The prompt
-spends its budget on chat formatting rather than code quality. Add an explicit
-code-quality instruction covering comments.
-
-### 5. It doesn't always follow the prompt exactly
-
-Victor: *"sometimes when I say millis instead of delay, the agent should be
-smart."* If the user names an approach (`millis()` not `delay()`), honour it
-rather than substituting. Add an explicit instruction.
-
-### 6. "Proceed to Implement" must actually gate implementation
-
-Currently the flow can proceed before the user clicks it. Victor wants plan mode
-to stay in plan until the user explicitly clicks through, because they may want
-to ask follow-up questions first. Check `chatMode` handling in `src/App.tsx`
-around the `streamChatEndpoint` call (~line 1177) and the plan/implement toggle.
-
-### 7. Sidebar needs project / chat history
+### 1. Sidebar project / chat history — NOT STARTED, the big one
 
 The left sidebar should list previously created projects and past chats so a
-user can return to them. Nothing like this exists yet. Projects currently live
-in-session; check how `currentProjectIdRef` and project state work in
-`src/App.tsx` before designing storage (Firestore per-user is the natural home —
-`users/{uid}/projects`).
+user can return to them. Nothing exists yet. Projects are currently in-session
+only — read how `currentProjectIdRef` and project state work in `src/App.tsx`
+before designing storage. `users/{uid}/projects` in Firestore is the natural
+home; the admin-gated waitlist route in `server/waitlist.ts` is a good pattern
+for a per-user collection endpoint.
 
-### 8. Streaming feels jerky — measured, two causes
+### 2. Time-to-first-token is still 7-16 seconds
 
-Measured against the real API (not theory):
+Measured after the fixes: 7.4s (plan) and 10.4s (implement) before the first
+token. That is DeepSeek's own latency, not a bug in this code, and the
+`tool_progress` events only start once the tool call begins — so the opening
+silence remains. Consider an immediate client-side "thinking" indicator the
+moment the request is sent, rather than waiting for the first server event.
 
-| | |
-|---|---|
-| Time-to-first-token | **1.4s – 16.5s**, highly variable. 13.3s and 16.5s observed on ordinary prompts. |
-| Plain chat | streams smoothly — 245 events, median gap 0ms, p90 21ms |
-| **Code generation** | 3.5s of total silence, then 99 events in one burst, for 118 visible chars |
+### 3. Free tier burns faster than advertised
 
-Code generation goes through a DeepSeek tool call. `server/deepseek.ts:161`
-accumulates tool-call argument deltas silently until the stream ends, emitting
-nothing. So the core feature never streams — the user sees a spinner then a dump,
-and the only text is one canned line ("I've successfully generated the C++ code…").
+~22 exploratory prompts consumed **13,435 of the 50,000 lifetime token cap (27%)**.
+The site claims "roughly 15 complete projects". Raise with Victor rather than
+silently changing.
 
-Fix direction: emit progress events while tool arguments accumulate so the UI has
-something honest to show. Do **not** fake token-by-token output.
+### 4. It answers anything
 
-### 9. The chat list re-renders on every token
-
-`src/components/AgentChat.tsx:328` maps all messages, each rendering
-`<ReactMarkdown>` with `rehypeKatex`. There is **no `React.memo` and no `useMemo`
-anywhere in the file**. `src/App.tsx:1172` `updateAssistantMsg` does
-`prev.map(...)` per token, so every message re-renders and re-parses its markdown
-on every token — ~2,450 markdown parses for one 245-token reply with 10 messages
-on screen. Memoise the message component.
-
-### 10. Empty prompts are accepted and billed
-
-`""` and `"   \n  "` both return 200 and generate a ~1,000-char greeting, billed
-against the user's token cap. Add server-side validation rejecting empty/
-whitespace-only prompts before calling DeepSeek.
-
-### 11. Blank assistant bubbles are possible
-
-`src/App.tsx:1190` does `assistantContent = event.text` on a `command` event.
-A `command` event with no text produces an empty bubble. Observed once,
-non-deterministically. Guard it.
-
-### 12. Free tier burns faster than advertised
-
-~22 test prompts consumed **13,435 tokens — 27% of the 50,000 lifetime free cap**.
-The site claims "roughly 15 complete projects". Only true at ~5 exchanges per
-project; beginners iterate far more. Not a bug, but expect complaints — worth
-raising with Victor rather than silently changing.
-
-### 13. It answers anything
-
-"What is the capital of France? Also write me a poem about rain" produced Paris
-plus a four-stanza poem, billed to the user. A VC will try this. Decide with
-Victor whether to scope the agent to embedded topics.
+"Capital of France + a poem about rain" produced both, billed to the user. Decide
+with Victor whether to scope the agent to embedded topics.
 
 ## Verified working — don't break these
 
