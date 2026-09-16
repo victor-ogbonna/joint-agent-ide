@@ -22,7 +22,7 @@ which is a different older project — always `cd ~/joint-agent-project` first).
 |---|---|
 | Production | **https://jointagentide.com** (Hetzner `138.201.91.112`, Docker + Caddy, auto HTTPS) |
 | Repo | `git@github.com:victor-ogbonna/joint-agent-ide.git`, branch `master` |
-| Last commit | `bdce627` — plan-mode rewrite, tool streaming, empty-prompt validation |
+| Last commit | `7fc1568` — sidebar recent projects |
 | Pre-launch lock | **ON** — leave it on. Victor knows. Only granted accounts get in. |
 | Waitlist | 9 real signups. **Never pollute this** — clean up any test data. |
 | Users | 7 real user docs in Firestore. Same rule. |
@@ -100,14 +100,21 @@ Verified against the deployed bundle, not the build log:
 
 ## Still to do
 
-### 1. Sidebar project / chat history — NOT STARTED, the big one
+### 1. Chat history per project — partially done
 
-The left sidebar should list previously created projects and past chats so a
-user can return to them. Nothing exists yet. Projects are currently in-session
-only — read how `currentProjectIdRef` and project state work in `src/App.tsx`
-before designing storage. `users/{uid}/projects` in Firestore is the natural
-home; the admin-gated waitlist route in `server/waitlist.ts` is a good pattern
-for a per-user collection endpoint.
+**Done and live:** the sidebar now lists recent projects under a "Recent"
+heading below the three action buttons, marks the open one, caps at 12 with a
+"View all" link into the Browse modal, and refetches whenever the current
+project changes. It reuses `handleOpenProject` and the existing
+`listProjects()` — projects were already persisted to Firestore, so this was a
+listing change, not new storage.
+
+**Not done:** *chat* history. Conversations are still per-session and are lost
+on reload. `chatMessages` in `src/App.tsx` is local state and is never written
+to Firestore. If Victor wants past conversations back, persist them under the
+project (`users/{uid}/projects/{projectId}/messages` or a `messages` array on
+the project doc) and load them in `handleOpenProject`. Note the free-tier token
+cost of replaying long histories — `CHAT_HISTORY_WINDOW` is 16 in `server.ts`.
 
 ### 2. Time-to-first-token is still 7-16 seconds
 
