@@ -127,6 +127,7 @@ export type ChatStreamEvent =
   | { type: "text_delta"; text: string }
   | { type: "project_update"; text: string; projectUpdate: any }
   | { type: "command"; text: string; command: string }
+  | { type: "tool_progress"; text: string }
   | { type: "done" };
 
 // For /api/ai/chat specifically — reads the server-sent-events stream and

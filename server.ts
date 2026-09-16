@@ -528,13 +528,48 @@ Schematic wiring rules (CRITICAL for a correct, renderable circuit):
 
 CRITICAL: Since this project is making use of PlatformIO in the backend, you MUST ensure that every generated C++ code includes '#include <Arduino.h>' at the very top so that the code can be properly compiled and flashed.
 
+CODE QUALITY (the code IS the deliverable — the chat reply is not):
+- Comment the code properly, every time. Explain WHY a line exists, not what it literally does, and name each pin's role where it is configured. Beginners read this code to learn; uncommented code fails them.
+- If the user named a specific technique, API or style — millis() rather than delay(), interrupts rather than polling, a particular library — use EXACTLY that. Do not substitute something you consider better. If you think their choice is wrong, implement what they asked and note why you would differ in one short line.
+- Every timing value, pin number and interval must be consistent between the code, its comments, and anything you say about it in chat.
+
 If the user asks you to write, modify, update code or create a project, use the 'generate_project' tool. DO NOT use 'execute_terminal_command' to edit code (e.g. no sed, echo, or cat).
 If the user asks you to run a command (e.g., compile, list files, check the PlatformIO toolchain), use 'execute_terminal_command'.
 If answering a general question, just respond conversationally.`;
   }
 
   if (chatMode === "plan") {
-    systemInstruction += "\n\nCURRENT MODE: PLAN MODE.\nIn this mode, DO NOT call any function tools like 'generate_project' or 'execute_terminal_command'. Focus purely on planning the architecture, drafting detailed hardware/software implementation steps, and detailing features based on the user's description. Give insights on how it is going to operate after the project is completed. Ensure the user agrees with the plan.\nWhen asking the user clarifying questions, you MUST format them as a bulleted list where each bullet point ends with a question mark (?).\nDo NOT tell the user to switch to implement mode or mention clicking any buttons (like 'Proceed to Implement'). Just ask for their feedback or confirmation.\nFormat your response beautifully with markdown headings, tables, bullet points, and code blocks as appropriate for readability.";
+    // Scale, decide, and stay out of the editor's job. The previous version of
+    // this asked for "detailed" steps, "code blocks as appropriate", and to
+    // "ensure the user agrees" — so "blink my LED for 5 seconds" produced a
+    // seven-section document with a full main.cpp dump and seven clarifying
+    // questions. The model was obeying precisely; the instruction was wrong.
+    systemInstruction += `
+
+CURRENT MODE: PLAN MODE.
+Do NOT call any function tools ('generate_project', 'execute_terminal_command') in this mode.
+
+LENGTH — match the request, and err on the side of short:
+- A simple, single-behaviour request (blink an LED, read one sensor, one output): answer in UNDER 150 words. A short paragraph of what you will build, then the decisions you made. No headings needed at all.
+- A multi-peripheral or timing-critical project: you may use a few short headings, but stay under 400 words.
+- NEVER produce a long structured document for a simple request. Length is not thoroughness.
+
+NEVER PUT FIRMWARE CODE IN YOUR REPLY:
+- Do NOT include C++ / Arduino code blocks, function bodies, or a "Software Architecture" section. The code belongs in main.cpp, which the user sees in the editor after implementing. Putting it in chat duplicates the editor, doubles what the user has to read, and doubles the output tokens they are billed for.
+- You may name an approach in prose ("non-blocking millis() timing, so the loop stays free"), but show no code.
+
+DECIDE — DO NOT INTERROGATE:
+- The Microcontroller Reference above already gives you the board, its clock/RAM/flash and its exact exposed pin names. TRUST IT. You already know the board.
+- NEVER ask the user which board they are on, which pin the onboard LED is on, whether the LED is active HIGH or LOW, or whether they use Arduino IDE or PlatformIO. The platform is always PlatformIO. Asking the user for hardware facts is the exact friction this product exists to remove.
+- Pick sensible defaults and STATE them in one line each ("Onboard LED on GPIO 2, active HIGH. 500 ms on/off."). A stated default the user can correct beats a question they have to answer.
+- Ask AT MOST 2 clarifying questions, and only where a wrong guess would genuinely waste the user's time or produce the wrong project. If nothing is genuinely ambiguous, ask NOTHING and say what you will build.
+- When you do ask, format them as a bulleted list, each ending in '?'.
+
+ACCURACY:
+- Every number you state (timings, cycle counts, pin numbers, intervals) must match what the code you are about to write will actually do. Do not state a timing table you have not derived. If you are not going to compute it exactly, do not state it.
+
+Do NOT tell the user to switch modes or click any button. Just state the plan and invite confirmation.
+`;
   } else {
     systemInstruction += "\n\nCURRENT MODE: IMPLEMENT MODE.\nIn this mode, you MUST use the 'generate_project' tool if the user asks you to implement a project, write code, or create schematics.\nHowever, if the user asks a question, requests information, or provides feedback that DOES NOT require generating a project or code, you MUST respond conversationally with helpful text directly (do not just say 'Done'). Do NOT use the tool if a conversational text response is more appropriate.\nBefore generating, re-read every preference the user stated earlier in this conversation (including any 'Regarding: ... -> ...' answers) and make sure the code and schematic you produce honor every one of them exactly.";
   }
@@ -546,6 +581,16 @@ If answering a general question, just respond conversationally.`;
 app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
   const { messages, mcu, chatMode, boardId } = req.body;
   if (!messages) return res.status(400).json({ error: "Messages required." });
+
+  // Reject an empty submit before it reaches the model. Without this, pressing
+  // Enter on an empty box returns a ~1,000-character greeting that is billed
+  // against the user's token cap — they pay for their own typo.
+  const lastUserMsg = Array.isArray(messages)
+    ? [...messages].reverse().find((m: any) => m?.role === "user")
+    : null;
+  if (!lastUserMsg || typeof lastUserMsg.content !== "string" || !lastUserMsg.content.trim()) {
+    return res.status(400).json({ error: "Type something first.", code: "EMPTY_PROMPT" });
+  }
 
   // Streamed as Server-Sent Events so the UI can render text as it's
   // generated instead of waiting for the full response — the model can take
@@ -611,7 +656,25 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     const { toolCall, outputTokens } = await streamChat(
       dsMessages,
       chatMode === "plan" ? undefined : DEEPSEEK_IMPLEMENT_TOOLS,
-      { onText: (text) => send({ type: "text_delta", text }) }
+      {
+        onText: (text) => send({ type: "text_delta", text }),
+        // Throttled so a long tool call does not spam the stream — the user
+        // needs to know work is happening, not a byte counter.
+        onToolProgress: (() => {
+          let last = 0;
+          return (toolName: string) => {
+            const now = Date.now();
+            if (now - last < 1200) return;
+            last = now;
+            send({
+              type: "tool_progress",
+              text: toolName === "generate_project"
+                ? "Writing the firmware and schematic…"
+                : "Working…",
+            });
+          };
+        })(),
+      }
     );
 
     const call = toolCall;
@@ -665,6 +728,11 @@ Generate microcontroller code (C++) and a full schematic diagram for a: ${mcu.to
 Microcontroller Pinout Reference: ${mcuDescription}
 
 CRITICAL: Since this project is making use of PlatformIO in the backend, you MUST ensure that every generated C++ code includes '#include <Arduino.h>' at the very top so that the code can be properly compiled and flashed.
+
+CODE QUALITY (the code IS the deliverable — the chat reply is not):
+- Comment the code properly, every time. Explain WHY a line exists, not what it literally does, and name each pin's role where it is configured. Beginners read this code to learn; uncommented code fails them.
+- If the user named a specific technique, API or style — millis() rather than delay(), interrupts rather than polling, a particular library — use EXACTLY that. Do not substitute something you consider better. If you think their choice is wrong, implement what they asked and note why you would differ in one short line.
+- Every timing value, pin number and interval must be consistent between the code, its comments, and anything you say about it in chat.
 
 Supported Components for the circuit schematic:
 - 'led': Pins are ['anode', 'cathode']

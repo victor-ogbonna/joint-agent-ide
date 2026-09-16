@@ -80,6 +80,8 @@ async function postWithRetry(path: string, body: any, label: string): Promise<Re
 
 export interface StreamHandlers {
   onText: (delta: string) => void;
+  /** Called while a tool call's arguments accumulate, so the UI can show progress. */
+  onToolProgress?: (toolName: string, argsSoFar: number) => void;
 }
 
 export interface StreamResult {
@@ -159,6 +161,15 @@ export async function streamChat(
         partial[i] ||= { name: "", args: "" };
         if (tc.function?.name) partial[i].name = tc.function.name;
         if (tc.function?.arguments) partial[i].args += tc.function.arguments;
+      }
+
+      // Tool arguments stream in over several seconds and were accumulated in
+      // total silence, so the product's core feature — generating code — showed
+      // the user nothing at all until it finished. Report honest progress
+      // instead: this is a real signal that work is happening, not faked text.
+      if (delta.tool_calls?.length && handlers.onToolProgress) {
+        const acc = partial[0];
+        if (acc?.name) handlers.onToolProgress(acc.name, acc.args.length);
       }
     }
   }

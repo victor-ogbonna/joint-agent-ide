@@ -1188,10 +1188,19 @@ export default function App() {
             ensureStarted();
             updateAssistantMsg({ content: assistantContent, suggestedProjectUpdate: projectUpdate });
           } else if (event.type === "command") {
-            assistantContent = event.text;
+            // A command event can arrive with no text at all, which rendered as
+            // an empty bubble with no explanation of what just happened.
+            assistantContent = event.text?.trim()
+              ? event.text
+              : `Running \`${event.command}\` in the terminal.`;
             pendingCommand = event.command;
             ensureStarted();
             updateAssistantMsg({ content: assistantContent });
+          } else if (event.type === "tool_progress") {
+            // Emitted while the model streams tool-call arguments. Without it
+            // the user stares at a spinner for the whole of code generation.
+            ensureStarted();
+            if (!assistantContent) updateAssistantMsg({ content: event.text });
           }
         },
         { signal: abortControllerRef.current.signal }

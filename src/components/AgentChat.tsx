@@ -118,6 +118,64 @@ function PlanQuestionItem({
   );
 }
 
+
+// Memoised so a streaming reply does not re-parse every OTHER message.
+// The list previously re-rendered in full on every token — with ReactMarkdown +
+// KaTeX on each message that is thousands of markdown parses for one reply,
+// which is what made streaming feel jerky. Only the message whose content is
+// actually changing re-renders now.
+const MessageMarkdown = React.memo(function MessageMarkdown({
+  content, chatMode, pendingAnswers, onSaveAnswer,
+}: {
+  content: string;
+  chatMode: "plan" | "implement";
+  pendingAnswers: Record<string, string>;
+  onSaveAnswer: (question: string, answer: string) => void;
+}) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[rehypeKatex]}
+      components={{
+        li({ node, children, ...props }: any) {
+          const extractText = (nodes: any): string => {
+            let text = "";
+            React.Children.forEach(nodes, (child: any) => {
+              if (typeof child === "string") text += child;
+              else if (child && child.props && child.props.children) text += extractText(child.props.children);
+            });
+            return text;
+          };
+          const questionText = extractText(children).trim();
+          return (
+            <PlanQuestionItem
+              chatMode={chatMode}
+              liProps={props}
+              savedAnswer={pendingAnswers[questionText]}
+              onSaveAnswer={onSaveAnswer}
+            >
+              {children}
+            </PlanQuestionItem>
+          );
+        },
+        code({ node, inline, className, children, ...props }: any) {
+          const match = /language-(\w+)/.exec(className || "");
+          if (!inline && match) {
+            return (
+              <pre className="my-2 p-3 bg-[var(--bg-root)] rounded-md border border-[var(--border-main)] overflow-x-auto text-xs">
+                <code className={className} {...props}>{children}</code>
+              </pre>
+            );
+          }
+          return <code className={className} {...props}>{children}</code>;
+        },
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+});
+
 export default function AgentChat({
   messages,
   onSendMessage,
@@ -341,53 +399,12 @@ export default function AgentChat({
                 >
                   {/* Normal Text Content */}
                   <div className="prose prose-sm dark:prose-invert max-w-none break-words">
-                    <ReactMarkdown 
-                      remarkPlugins={[remarkGfm, remarkMath]} 
-                      rehypePlugins={[rehypeKatex]}
-                      components={{
-                        li({ node, children, ...props }: any) {
-                          const extractText = (nodes: any): string => {
-                            let text = "";
-                            React.Children.forEach(nodes, (child: any) => {
-                              if (typeof child === "string") text += child;
-                              else if (child && child.props && child.props.children) text += extractText(child.props.children);
-                            });
-                            return text;
-                          };
-                          const questionText = extractText(children).trim();
-                          return (
-                            <PlanQuestionItem
-                              chatMode={chatMode}
-                              liProps={props}
-                              savedAnswer={pendingAnswers[questionText]}
-                              onSaveAnswer={(question, answer) => setPendingAnswers((prev) => ({ ...prev, [question]: answer }))}
-                            >
-                              {children}
-                            </PlanQuestionItem>
-                          );
-                        },
-                        code({ node, inline, className, children, ...props }: any) {
-                          const match = /language-(\w+)/.exec(className || "");
-                          const isCodeBlock = !inline && match;
-                          if (isCodeBlock) {
-                            return (
-                              <pre className="my-2 p-3 bg-[var(--bg-root)] rounded-md border border-[var(--border-main)] overflow-x-auto text-xs">
-                                <code className={className} {...props}>
-                                  {children}
-                                </code>
-                              </pre>
-                            );
-                          }
-                          return (
-                            <code className={className} {...props}>
-                              {children}
-                            </code>
-                          );
-                        }
-                      }}
-                    >
-                      {msg.content}
-                    </ReactMarkdown>
+                    <MessageMarkdown
+                      content={msg.content}
+                      chatMode={chatMode}
+                      pendingAnswers={pendingAnswers}
+                      onSaveAnswer={(question, answer) => setPendingAnswers((prev) => ({ ...prev, [question]: answer }))}
+                    />
                   </div>
                   
                   {chatMode === "plan" && index === messages.length - 1 && msg.role === "assistant" && msg.isPlanResponse && (
@@ -396,7 +413,11 @@ export default function AgentChat({
                       <div className="flex gap-2">
                         <button
                           onClick={() => {
-                            setChatMode("implement");
+                            // Deliberately does NOT flip chatMode. The override
+                            // below implements THIS message only; the session
+                            // stays in plan mode so a follow-up question still
+                            // gets a plan, and nothing implements until the user
+                            // presses this button again.
                             const answerLines = Object.entries(pendingAnswers).map(([q, a]) => `Regarding: "${q}" -> ${a}`);
                             const message = answerLines.length > 0
                               ? `${answerLines.join("\n")}\nI have answered your questions above. Please proceed to implement the plan now.`
