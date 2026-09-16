@@ -567,7 +567,7 @@ export default function App() {
   };
 
   // Compile microcontroller code simulation
-  const handleCompile = async (overrideCode?: string): Promise<{ success: boolean, data?: any, errorText?: string }> => {
+  const handleCompile = async (overrideCode?: string): Promise<{ success: boolean, data?: any, errorText?: string, compileSucceeded?: boolean }> => {
     setIsCompiling(true);
     const codeToCompile = overrideCode || code;
     logToTerminal(`[COMPILER] Sending code to cloud build server for ${mcu.toUpperCase()}...`, "info");
@@ -588,9 +588,13 @@ export default function App() {
       } else {
         const errorText = data.error + (data.stderr ? "\n" + data.stderr : "");
         logToTerminal(`[COMPILER] Error: ${data.error}`, "error");
-        if (data.stderr) logToTerminal(data.stderr, "error");
+        // Show the tail of the real build output. Without this the only clue
+        // the user (or we) got was a generic sentence, which is why a working
+        // build looked like a code bug.
+        if (data.detail) logToTerminal(data.detail, "error");
+        else if (data.stderr) logToTerminal(data.stderr, "error");
         setIsCompiling(false);
-        return { success: false, errorText };
+        return { success: false, errorText, compileSucceeded: data.compileSucceeded === true };
       }
     } catch (err: any) {
       logToTerminal(`[COMPILER] Build failed: ${err.message}`, "error");
@@ -1086,6 +1090,16 @@ export default function App() {
     const MAX_ATTEMPTS = 5;
     let attempt = 0;
     let compileResult = await handleCompile(currentCode);
+
+    // A build that compiled but produced no artifact is an infrastructure
+    // fault, not a code fault. Rewriting the user's code cannot fix it, so the
+    // loop used to burn five AI rounds and five lots of the user's tokens
+    // "resolving" code that was never broken.
+    if (!compileResult.success && compileResult.compileSucceeded) {
+      logToTerminal("[SMART FLASH] Stopped — the code compiled cleanly, so auto-debug cannot help. This is a build-server issue; please try again or report it.", "error");
+      setIsSmartFlashing(false);
+      return;
+    }
 
     while (!compileResult.success && attempt < MAX_ATTEMPTS) {
       attempt++;

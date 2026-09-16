@@ -681,7 +681,19 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     await incrementTokenUsage(req.uid!, req.quota!.subscriptionStatus, outputTokens);
 
     if (call?.name === "generate_project") {
-      send({ type: "project_update", text: "I've successfully generated the C++ code and visual schematic layout for your request. The workspace has been updated.", projectUpdate: call.args });
+      // Claims only what actually happened. The old wording promised a "visual
+      // schematic layout" on every generation, including ones that produced no
+      // schematic at all, which read as the product lying about its own output.
+      {
+        const hasSchematic = Array.isArray((call.args as any)?.components) && (call.args as any).components.length > 0;
+        send({
+          type: "project_update",
+          text: hasSchematic
+            ? "Code and schematic are in the workspace."
+            : "Code is in the workspace.",
+          projectUpdate: call.args,
+        });
+      }
     } else if (call?.name === "execute_terminal_command") {
       send({ type: "command", text: `Executing command: \`${call.args.command}\``, command: call.args.command });
     }
@@ -1183,6 +1195,26 @@ lib_deps =
       binaryFile = path.join(tempDir, ".pio", "build", board.id, "firmware.hex");
     }
 
+    // PlatformIO writes into .pio/build/<env>/, and the env name is normally
+    // board.id — but if it ever differs, or the board emits a differently named
+    // artifact, the fixed path above misses a build that actually succeeded and
+    // the user gets "output binary not found" on working code. Fall back to
+    // searching the build tree before declaring failure.
+    if (!fs.existsSync(binaryFile)) {
+      const buildRoot = path.join(tempDir, ".pio", "build");
+      const wanted = mcu === "esp32" ? "firmware.bin" : "firmware.hex";
+      try {
+        for (const envDir of fs.readdirSync(buildRoot)) {
+          const candidate = path.join(buildRoot, envDir, wanted);
+          if (fs.existsSync(candidate)) {
+            console.warn(`[compile] artifact found under env "${envDir}", expected "${board.id}"`);
+            binaryFile = candidate;
+            break;
+          }
+        }
+      } catch { /* buildRoot missing means the build really did fail */ }
+    }
+
     if (fs.existsSync(binaryFile)) {
       const binaryData = fs.readFileSync(binaryFile, { encoding: 'base64' });
 
@@ -1206,7 +1238,14 @@ lib_deps =
 
       res.json({ success: true, binary: binaryData, format: mcu === "esp32" ? "bin" : "hex", stdout, ...additionalBinaries });
     } else {
-      res.status(500).json({ error: "Compilation succeeded but output binary not found.", stdout, stderr });
+      // compileSucceeded tells the client this is NOT a code problem, so it
+      // must not burn five AI debug rounds trying to "fix" working code.
+      const tail = (stderr || stdout || "").trim().split("\n").slice(-12).join("\n");
+      res.status(500).json({
+        error: "The build reported success but no firmware file was produced. This is a build-server problem, not a problem with your code.",
+        compileSucceeded: true,
+        stdout, stderr, detail: tail,
+      });
     }
   } catch (err: any) {
     res.status(500).json({ error: "Compilation failed.", stdout: err.stdout, stderr: err.stderr, message: err.message });
