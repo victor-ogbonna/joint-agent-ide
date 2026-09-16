@@ -21,7 +21,7 @@ import Web3Panel from "./components/Web3Panel";
 import ProjectsBrowser from "./components/ProjectsBrowser";
 import NewProjectModal from "./components/NewProjectModal";
 import { ESPLoader, Transport } from "esptool-js";
-import { createProject, getProject, updateProject, renameProject } from "./lib/projects";
+import { createProject, getProject, updateProject, renameProject, listProjects, ProjectSummary } from "./lib/projects";
 import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlock, primeLastKnownBlock, QuotaBlockedInfo } from "./lib/aiClient";
 
 const getBoardInfo = (vendorId: number | undefined, productId: number | undefined): { name: string, type: MCUType } | null => {
@@ -218,6 +218,11 @@ export default function App() {
   const [currentProjectName, setCurrentProjectName] = useState<string>("");
   const [isProjectNameEditing, setIsProjectNameEditing] = useState(false);
   const [showProjectsBrowser, setShowProjectsBrowser] = useState(false);
+  // Recent projects shown inline in the sidebar. Kept separate from the Browse
+  // modal's own fetch so the list is visible without opening anything, but it
+  // reuses handleOpenProject so there is only one code path for loading.
+  const [recentProjects, setRecentProjects] = useState<ProjectSummary[]>([]);
+  const [loadingRecent, setLoadingRecent] = useState(false);
   const [showNewProjectModal, setShowNewProjectModal] = useState(false);
   const [importedFileCode, setImportedFileCode] = useState<string | null>(null);
   const [importedFileName, setImportedFileName] = useState<string>("");
@@ -1321,6 +1326,22 @@ export default function App() {
     reader.readAsText(file);
   };
 
+  const refreshRecentProjects = React.useCallback(async () => {
+    if (!user) { setRecentProjects([]); return; }
+    setLoadingRecent(true);
+    try {
+      setRecentProjects(await listProjects(user.uid));
+    } catch {
+      // Non-fatal: the sidebar list is a convenience, Browse projects still works.
+    } finally {
+      setLoadingRecent(false);
+    }
+  }, [user]);
+
+  // Re-fetch when the user changes or they switch project — switching is the
+  // moment a project is created, renamed or saved, so this covers all of them.
+  useEffect(() => { refreshRecentProjects(); }, [refreshRecentProjects, currentProjectId]);
+
   const handleOpenProject = async (projectId: string) => {
     if (!user) return;
     handleStopGeneration(); // cancel any in-flight agent request from the project being left
@@ -1661,6 +1682,61 @@ export default function App() {
                   onChange={handleImportFileSelected}
                   className="hidden"
                 />
+
+                {/* Recent work. Sits directly under the project actions so a
+                    returning user can reopen something without going through a
+                    modal — the sidebar was otherwise empty space. */}
+                <div className="pt-3 mt-2 border-t border-[var(--border-main)]">
+                  <div className="px-3.5 pb-1.5 text-[9px] uppercase text-[var(--text-subtle)] font-bold tracking-[0.2em]">
+                    Recent
+                  </div>
+
+                  {loadingRecent && recentProjects.length === 0 && (
+                    <div className="px-3.5 py-1.5 text-[11px] text-[var(--text-subtle)]">Loading…</div>
+                  )}
+
+                  {!loadingRecent && recentProjects.length === 0 && (
+                    <p className="px-3.5 py-1.5 text-[10px] leading-relaxed text-[var(--text-subtle)]">
+                      Projects you save appear here.
+                    </p>
+                  )}
+
+                  {recentProjects.slice(0, 12).map((p) => {
+                    const isOpen = p.id === currentProjectId;
+                    return (
+                      <button
+                        key={p.id}
+                        onClick={() => { if (!isOpen) handleOpenProject(p.id); }}
+                        title={p.name}
+                        className={`w-[calc(100%-0.75rem)] text-left mx-1.5 px-2 py-1.5 flex items-center gap-2 text-[11px] rounded-md transition ${
+                          isOpen
+                            ? "bg-[var(--bg-hover)] text-[var(--text-main)]"
+                            : "text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] cursor-pointer"
+                        }`}
+                      >
+                        <FileCode
+                          size={13}
+                          className={isOpen ? "text-[var(--accent-primary)] shrink-0" : "text-[var(--text-subtle)] shrink-0"}
+                        />
+                        <span className="truncate flex-1">{p.name}</span>
+                        {isOpen && (
+                          <span className="text-[8px] uppercase tracking-wider text-[var(--accent-primary)] shrink-0">
+                            open
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+
+                  {recentProjects.length > 12 && (
+                    <button
+                      onClick={() => setShowProjectsBrowser(true)}
+                      className="w-[calc(100%-0.75rem)] text-left mx-1.5 px-2 py-1.5 text-[10px] text-[var(--text-subtle)] hover:text-[var(--text-main)] transition rounded-md"
+                    >
+                      View all {recentProjects.length}…
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="border-t border-[var(--border-main)] p-2 space-y-1.5 shrink-0">
