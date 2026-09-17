@@ -1,0 +1,12 @@
+User-agent: *
+Allow: /
+
+# /admin is password-gated, but there is no reason to invite crawlers to a
+# login page — it only creates a target and wastes crawl budget.
+Disallow: /admin
+
+# The post-signup page is meaningless out of context and would compete with
+# the homepage for the same terms.
+Disallow: /thanks
+
+Sitemap: https://jointagentide.com/sitemap.xml
