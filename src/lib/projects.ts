@@ -9,9 +9,20 @@ import { MCUType, SchematicComponent, SchematicConnection } from "../types";
 // used as the fallback for projects created before the board picker existed.
 const DEFAULT_BOARD_ID: Record<MCUType, string> = { esp32: "esp32dev", arduino: "uno" };
 
+/** One chat turn, trimmed to what is needed to redraw the conversation. */
+export interface StoredMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: number;
+  isPlanResponse?: boolean;
+}
+
 export interface ProjectData {
   name: string;
   code: string;
+  /** Conversation for this project. Capped on write — see MAX_STORED_MESSAGES. */
+  messages?: StoredMessage[];
   description: string;
   components: SchematicComponent[];
   connections: SchematicConnection[];
@@ -78,4 +89,27 @@ export async function renameProject(uid: string, projectId: string, name: string
 
 export async function deleteProject(uid: string, projectId: string): Promise<void> {
   await deleteDoc(projectDoc(uid, projectId));
+}
+
+/**
+ * Firestore documents are capped at 1 MB, and a long agent conversation with
+ * generated code in it gets there faster than you would think. Keep the most
+ * recent turns only — they are the ones with context worth restoring — and drop
+ * any single message too large to be worth storing.
+ */
+export const MAX_STORED_MESSAGES = 60;
+const MAX_MESSAGE_CHARS = 20000;
+
+export function trimMessagesForStorage(messages: StoredMessage[]): StoredMessage[] {
+  return messages
+    .slice(-MAX_STORED_MESSAGES)
+    .map((m) => ({
+      id: m.id,
+      role: m.role,
+      content: m.content.length > MAX_MESSAGE_CHARS
+        ? m.content.slice(0, MAX_MESSAGE_CHARS) + "\n\n[truncated]"
+        : m.content,
+      timestamp: m.timestamp,
+      ...(m.isPlanResponse ? { isPlanResponse: true } : {}),
+    }));
 }

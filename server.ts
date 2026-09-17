@@ -1188,12 +1188,16 @@ lib_deps =
       maxBuffer: 1024 * 1024 * 50
     });
 
-    let binaryFile = "";
-    if (mcu === "esp32") {
-      binaryFile = path.join(tempDir, ".pio", "build", board.id, "firmware.bin");
-    } else {
-      binaryFile = path.join(tempDir, ".pio", "build", board.id, "firmware.hex");
-    }
+    // Derive the artifact from the RESOLVED BOARD, never from the `mcu` string
+    // the client sent. Those two can disagree — if the UI's mcu state says
+    // "esp32" while the open project is an Arduino Uno, platformio.ini is built
+    // from board.id ("uno") and correctly emits firmware.hex, but a check on
+    // `mcu` goes looking for firmware.bin and reports a perfectly good build as
+    // "no firmware file produced". board.id is what actually drove the build,
+    // so it is the only trustworthy source here.
+    const isEsp32Build = board.family === "esp32";
+    const artifactName = isEsp32Build ? "firmware.bin" : "firmware.hex";
+    let binaryFile = path.join(tempDir, ".pio", "build", board.id, artifactName);
 
     // PlatformIO writes into .pio/build/<env>/, and the env name is normally
     // board.id — but if it ever differs, or the board emits a differently named
@@ -1202,7 +1206,7 @@ lib_deps =
     // searching the build tree before declaring failure.
     if (!fs.existsSync(binaryFile)) {
       const buildRoot = path.join(tempDir, ".pio", "build");
-      const wanted = mcu === "esp32" ? "firmware.bin" : "firmware.hex";
+      const wanted = artifactName;
       try {
         for (const envDir of fs.readdirSync(buildRoot)) {
           const candidate = path.join(buildRoot, envDir, wanted);
@@ -1219,7 +1223,7 @@ lib_deps =
       const binaryData = fs.readFileSync(binaryFile, { encoding: 'base64' });
 
       let additionalBinaries = {};
-      if (mcu === "esp32") {
+      if (isEsp32Build) {
         const bootloaderPath = path.join(tempDir, ".pio", "build", board.id, "bootloader.bin");
         const partitionsPath = path.join(tempDir, ".pio", "build", board.id, "partitions.bin");
 
@@ -1236,7 +1240,7 @@ lib_deps =
         }
       }
 
-      res.json({ success: true, binary: binaryData, format: mcu === "esp32" ? "bin" : "hex", stdout, ...additionalBinaries });
+      res.json({ success: true, binary: binaryData, format: isEsp32Build ? "bin" : "hex", stdout, ...additionalBinaries });
     } else {
       // compileSucceeded tells the client this is NOT a code problem, so it
       // must not burn five AI debug rounds trying to "fix" working code.

@@ -21,10 +21,11 @@ import Web3Panel from "./components/Web3Panel";
 import ProjectsBrowser from "./components/ProjectsBrowser";
 import NewProjectModal from "./components/NewProjectModal";
 import { ESPLoader, Transport } from "esptool-js";
-import { createProject, getProject, updateProject, renameProject, listProjects, ProjectSummary } from "./lib/projects";
+import { createProject, getProject, updateProject, renameProject, listProjects, ProjectSummary, trimMessagesForStorage } from "./lib/projects";
 import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlock, primeLastKnownBlock, QuotaBlockedInfo } from "./lib/aiClient";
 
-const getBoardInfo = (vendorId: number | undefined, productId: number | undefined): { name: string, type: MCUType } | null => {
+// type === null means "a serial bridge we cannot attribute to a chip family".
+const getBoardInfo = (vendorId: number | undefined, productId: number | undefined): { name: string, type: MCUType | null } | null => {
   if (!vendorId) return null;
 
   if (vendorId === 0x2341) {
@@ -37,9 +38,19 @@ const getBoardInfo = (vendorId: number | undefined, productId: number | undefine
   if (vendorId === 0x239A) return { name: "Arduino (Adafruit)", type: "arduino" };
   if (vendorId === 0x2A03) return { name: "Arduino", type: "arduino" };
 
-  if (vendorId === 0x10C4 || vendorId === 0x1A86 || vendorId === 0x0403 || vendorId === 0x303A) {
-    return { name: "ESP32", type: "esp32" };
-  }
+  // Espressif's own VID — native USB on S2/S3/C3. This one really is an ESP32.
+  if (vendorId === 0x303A) return { name: "ESP32", type: "esp32" };
+
+  // CH340 (0x1A86), CP2102 (0x10C4) and FTDI (0x0403) are generic USB-serial
+  // bridges. They sit on ESP32 devkits AND on virtually every Arduino Uno/Nano
+  // clone, so the VID says nothing about the chip behind it. This used to
+  // return ESP32 for all three, which labelled every Arduino clone an ESP32 and
+  // then overwrote the project's target — the build ran for 'uno', emitted
+  // firmware.hex, and the server went looking for firmware.bin.
+  // Report the bridge honestly and let the project's own board decide.
+  if (vendorId === 0x1A86) return { name: "USB serial device (CH340)", type: null };
+  if (vendorId === 0x10C4) return { name: "USB serial device (CP2102)", type: null };
+  if (vendorId === 0x0403) return { name: "USB serial device (FTDI)", type: null };
 
   return null;
 };
@@ -377,15 +388,16 @@ export default function App() {
         const vendorId = info.usbVendorId;
         if (vendorId !== 0x8086) {
           const board = getBoardInfo(vendorId, info.usbProductId);
-          const boardName = board ? board.name : "Generic Serial Device";
-          const boardType = board ? board.type : "esp32";
+          const boardName = board ? board.name : "Generic serial device";
 
           if (!autoConnectedLogRef.current) {
             logToTerminal(`[USB] ${boardName} was connected automatically.`, "info");
             autoConnectedLogRef.current = true;
           }
 
-          setMcu(boardType);
+          // Same rule as the manual connect path: never override the project's
+          // board from a USB id. Auto-connect is even less deliberate than
+          // clicking Connect, so it has less claim to change the build target.
           setMcuPluggedIn(true);
           setDetectedBoard(`Connected: ${boardName}${vendorId ? ` (VID: 0x${vendorId.toString(16).toUpperCase()})` : ""}`);
         }
@@ -442,15 +454,29 @@ export default function App() {
         }
 
         const vendorId = info.usbVendorId;
-        let board = getBoardInfo(info.usbVendorId, info.usbProductId);
-        const boardName = board ? board.name : "Generic Serial Device";
-        const boardType = board ? board.type : "esp32";
+        const board = getBoardInfo(info.usbVendorId, info.usbProductId);
+        const boardName = board ? board.name : "Generic serial device";
         const boardTitle = `Connected: ${boardName}${vendorId ? ` (VID: 0x${vendorId.toString(16).toUpperCase()})` : ""}`;
 
         setDetectedBoard(boardTitle);
-        setMcu(boardType as MCUType);
         setMcuPluggedIn(true);
-        logToTerminal(`[USB] Successfully connected to ${boardName}!`, "success");
+        logToTerminal(`[USB] Connected: ${boardName}.`, "success");
+
+        // The project's board is the user's explicit choice and drives the
+        // build. Detection only ever narrows it, never silently replaces it —
+        // a CH340 clone previously flipped an Arduino Uno project to ESP32 and
+        // broke every compile afterwards.
+        if (board?.type && board.type !== mcu) {
+          logToTerminal(
+            `[USB] That device reports as ${board.type.toUpperCase()}, but this project targets ${mcu.toUpperCase()}. Keeping the project's board — change it in the board selector if the project is wrong.`,
+            "info"
+          );
+        } else if (!board?.type) {
+          logToTerminal(
+            `[USB] This adapter can't identify the chip behind it, so builds will target this project's board (${mcu.toUpperCase()}).`,
+            "info"
+          );
+        }
       } catch (err: any) {
         if (err.name === 'NotFoundError' || err.message?.includes("No port selected") || err.message?.includes("User rejected")) {
           logToTerminal("[USB] Port selection cancelled by user.", "info");
@@ -1312,7 +1338,7 @@ export default function App() {
       setConnections(INITIAL_CONNECTIONS);
       setMcu(board.family);
       setBoardId(board.id);
-      setChatMessages([]); // otherwise the agent panel keeps showing the previous project's conversation
+      setChatMessages([]); // a brand new project starts with no conversation
       setShowNewProjectModal(false);
       setShowProjectsBrowser(false);
       logToTerminal(`[PROJECT] Created "${name}" for ${board.name}.`, "success");
@@ -1375,7 +1401,10 @@ export default function App() {
       setConnections(data.connections || []);
       setMcu(data.mcu || "esp32");
       setBoardId(data.boardId || (data.mcu === "arduino" ? "uno" : "esp32dev"));
-      setChatMessages([]); // otherwise the agent panel keeps showing the previous project's conversation
+      // Restore this project's own conversation. Previously this cleared the
+      // panel, so reopening a project lost every question and answer that led
+      // to the code — the user got a finished sketch with no history.
+      setChatMessages((data.messages || []) as any);
       setShowProjectsBrowser(false);
       logToTerminal(`[PROJECT] Opened "${data.name}".`, "success");
     } catch (err: any) {
@@ -1410,7 +1439,12 @@ export default function App() {
     setSaveStatus("saving");
     saveTimeoutRef.current = setTimeout(async () => {
       try {
-        await updateProject(user.uid, currentProjectId, { code, description, components, connections, mcu });
+        await updateProject(user.uid, currentProjectId, {
+          code, description, components, connections, mcu,
+          // Stored with the project so reopening it restores the conversation
+          // that produced the code, not just the code.
+          messages: trimMessagesForStorage(chatMessages as any),
+        });
         setSaveStatus("saved");
       } catch (err: any) {
         logToTerminal(`[PROJECT] Autosave failed: ${err.message}`, "error");
@@ -1419,7 +1453,10 @@ export default function App() {
     }, 1500);
     return () => { if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [code, description, components, connections, mcu, currentProjectId, user]);
+    // chatMessages included so a conversation that produced no code change
+    // still persists — asking a question and getting an answer is exactly the
+    // history the user wants back, and without this it was never written.
+  }, [code, description, components, connections, mcu, chatMessages, currentProjectId, user]);
 
   const handleSubscribe = async () => {
     if (!user?.email) return;
