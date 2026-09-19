@@ -201,6 +201,10 @@ export default function App() {
   const [boardId, setBoardId] = useState<string>("esp32dev");
   const [chatMode, setChatMode] = useState<"plan" | "implement">("plan"); // internal representation, hidden from user
   const [detectedBoard, setDetectedBoard] = useState<string | null>(null);
+  // What the USB id reports, as opposed to what the project targets. null when
+  // the adapter can't identify the chip (CH340 clones and the like), which is
+  // not a mismatch — it is simply unknown, so it must not block a flash.
+  const [detectedMcu, setDetectedMcu] = useState<MCUType | null>(null);
 
   const bootLoggedRef = useRef(false);
   const autoConnectedLogRef = useRef(false);
@@ -400,6 +404,7 @@ export default function App() {
           // board from a USB id. Auto-connect is even less deliberate than
           // clicking Connect, so it has less claim to change the build target.
           setMcuPluggedIn(true);
+          setDetectedMcu(board?.type ?? null);
           setDetectedBoard(`Connected: ${boardName}${vendorId ? ` (VID: 0x${vendorId.toString(16).toUpperCase()})` : ""}`);
         }
       }
@@ -411,6 +416,7 @@ export default function App() {
         autoConnectedLogRef.current = false;
         setMcuPluggedIn(false);
         setDetectedBoard(null);
+        setDetectedMcu(null);
       }
     };
 
@@ -460,6 +466,7 @@ export default function App() {
         const boardTitle = `Connected: ${boardName}${vendorId ? ` (VID: 0x${vendorId.toString(16).toUpperCase()})` : ""}`;
 
         setDetectedBoard(boardTitle);
+        setDetectedMcu(board?.type ?? null);
         setMcuPluggedIn(true);
         logToTerminal(`[USB] Connected: ${boardName}.`, "success");
 
@@ -469,8 +476,8 @@ export default function App() {
         // broke every compile afterwards.
         if (board?.type && board.type !== mcu) {
           logToTerminal(
-            `[USB] That device reports as ${board.type.toUpperCase()}, but this project targets ${mcu.toUpperCase()}. Keeping the project's board — change it in the board selector if the project is wrong.`,
-            "info"
+            `[USB] That device reports as ${board.type.toUpperCase()}, but this project targets ${mcu.toUpperCase()}. Flashing is blocked until they match — change the board in the selector, or plug in a ${mcu.toUpperCase()} board.`,
+            "error"
           );
         } else if (!board?.type) {
           logToTerminal(
@@ -507,6 +514,7 @@ export default function App() {
         selectedPortPathRef.current = p.path;
         const boardType = p.board?.type === 'arduino' ? 'arduino' : 'esp32';
         setDetectedBoard(`Connected: ${p.board?.name || 'Device'} (${p.path})`);
+        setDetectedMcu(p.board?.type === 'arduino' || p.board?.type === 'esp32' ? p.board.type : null);
         setMcu(boardType as MCUType);
         setMcuPluggedIn(true);
         logToTerminal(`[USB] Auto-selected ${p.board?.name || 'device'} on ${p.path}`, "success");
@@ -521,6 +529,7 @@ export default function App() {
         selectedPortPathRef.current = selected.path;
         const boardType = selected.board?.type === 'arduino' ? 'arduino' : 'esp32';
         setDetectedBoard(`Connected: ${selected.board?.name || 'Device'} (${selected.path})`);
+        setDetectedMcu(selected.board?.type === 'arduino' || selected.board?.type === 'esp32' ? selected.board.type : null);
         setMcu(boardType as MCUType);
         setMcuPluggedIn(true);
         logToTerminal(`[USB] Selected ${selected.board?.name} on ${selected.path}`, "success");
@@ -804,6 +813,25 @@ export default function App() {
       activePortRef.current = null;
     }
 
+    // The project's board decides the toolchain and the binary. If the thing
+    // actually plugged in is a different family, every downstream path is
+    // wrong: AVR firmware will not run on an ESP32, and esptool's DTR/RTS
+    // bootloader handshake means nothing to an ATmega. Refuse here, where the
+    // cause is obvious, rather than failing later inside a flasher with an
+    // error about control signals that says nothing about the real problem.
+    if (detectedMcu && detectedMcu !== mcu) {
+      logToTerminal(
+        `[FLASH] Board mismatch — this project targets ${mcu.toUpperCase()} but a ${detectedMcu.toUpperCase()} board is plugged in.`,
+        "error"
+      );
+      logToTerminal(
+        `[FLASH] Nothing was flashed. Either switch this project to ${detectedMcu.toUpperCase()} in the board selector, or connect a ${mcu.toUpperCase()} board.`,
+        "error"
+      );
+      setIsFlashing(false);
+      return { success: false, error: `Board mismatch: project targets ${mcu.toUpperCase()}, connected board is ${detectedMcu.toUpperCase()}.` };
+    }
+
     setIsFlashing(true);
     logToTerminal(`[FLASH] Initiating flash to ${detectedBoard}...`, "info");
 
@@ -851,6 +879,10 @@ export default function App() {
         logToTerminal(`[FLASH] ${err.message}`, "error");
         setIsFlashing(false);
         return { success: false, error: err.message };
+      } finally {
+        // Without this a failed attempt leaves the port claimed, and every
+        // later flash in the same session fails for a different reason.
+        if (avrPort) { try { await avrPort.close(); } catch { /* already closed */ } }
       }
     }
 
@@ -1249,7 +1281,12 @@ export default function App() {
         role: "assistant",
         content: assistantContent || "Done.",
         timestamp: Date.now(),
-        isPlanResponse: chatMode === "plan"
+        // effectiveMode, not chatMode: pressing "Proceed to Implement" sends
+        // modeOverride "implement" while deliberately leaving the session in
+        // plan mode, so chatMode is still "plan" here and the implementation
+        // reply was being tagged as a plan — which put the Proceed button back
+        // underneath it after the user had already pressed it.
+        isPlanResponse: effectiveMode === "plan"
       }]);
     };
     const updateAssistantMsg = (patch: Partial<ChatMessage>) => {
@@ -1630,6 +1667,7 @@ export default function App() {
               <button
                 onClick={() => {
                   setDetectedBoard(null);
+                  setDetectedMcu(null);
                   setMcuPluggedIn(false);
                   logToTerminal("[USB] Connection disconnected/forgotten. You can scan again.", "info");
                 }}
