@@ -120,30 +120,80 @@ export function parseIntelHex(hex: string): { data: Uint8Array; startAddress: nu
   return { data, startAddress: minAddr };
 }
 
-/** Reads exactly `count` bytes, or rejects once `timeoutMs` elapses. */
-async function readExactly(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  count: number,
-  timeoutMs: number
-): Promise<Uint8Array> {
-  const out: number[] = [];
-  const deadline = Date.now() + timeoutMs;
+/**
+ * A pumped, buffered view over the port's ReadableStream.
+ *
+ * This replaces a readExactly() that raced reader.read() against a timeout and
+ * returned `out.slice(0, count)`. Both halves of that were wrong, and together
+ * they made STK500v2 sync impossible on a Mega:
+ *
+ *   1. Bytes past `count` in a chunk were DISCARDED. A USB-serial bridge
+ *      hands over a whole frame in one chunk, so reading the 1-byte
+ *      MESSAGE_START threw away the other 16 bytes of the sign-on reply and
+ *      every subsequent read timed out waiting for bytes already binned.
+ *   2. When the timeout won the race, the read() request stayed QUEUED on the
+ *      reader. Real ReadableStreamDefaultReaders serve queued requests in
+ *      order, so that orphan consumed the next chunk and handed it to nobody —
+ *      one timeout poisoned every retry after it.
+ *
+ * Here a single pump loop owns read(); callers wait on the buffer instead, so
+ * nothing is dropped and nothing is left in flight.
+ */
+class SerialBuffer {
+  private buf: number[] = [];
+  private ended = false;
+  private err: Error | null = null;
+  private wake: (() => void) | null = null;
+  /** Resolves when the pump stops — awaited before releasing the lock. */
+  readonly pumping: Promise<void>;
 
-  while (out.length < count) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      throw new Error(`Timed out waiting for the board (got ${out.length} of ${count} bytes).`);
-    }
-    const result = await Promise.race([
-      reader.read(),
-      new Promise<null>((r) => setTimeout(() => r(null), remaining)),
-    ]);
-    if (!result) throw new Error(`Timed out waiting for the board (got ${out.length} of ${count} bytes).`);
-    const { value, done } = result as ReadableStreamReadResult<Uint8Array>;
-    if (done) throw new Error("Serial port closed during upload.");
-    if (value) out.push(...value);
+  constructor(private reader: ReadableStreamDefaultReader<Uint8Array>) {
+    this.pumping = this.pump();
   }
-  return new Uint8Array(out.slice(0, count));
+
+  private async pump(): Promise<void> {
+    try {
+      for (;;) {
+        const { value, done } = await this.reader.read();
+        if (done) { this.ended = true; break; }
+        if (value) for (let i = 0; i < value.length; i++) this.buf.push(value[i]);
+        this.signal();
+      }
+    } catch (e: any) {
+      this.err = e instanceof Error ? e : new Error(String(e));
+    }
+    this.signal();
+  }
+
+  private signal(): void {
+    const w = this.wake;
+    this.wake = null;
+    if (w) w();
+  }
+
+  /** Drop anything already received — used right after a reset pulse. */
+  discard(): void {
+    this.buf.length = 0;
+  }
+
+  /** Resolve with exactly `count` bytes, or reject once `timeoutMs` elapses. */
+  async read(count: number, timeoutMs: number): Promise<Uint8Array> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.buf.length < count) {
+      if (this.err) throw this.err;
+      if (this.ended) throw new Error("Serial port closed during upload.");
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error(`Timed out waiting for the board (got ${this.buf.length} of ${count} bytes).`);
+      }
+      // Capped so a wake-up that races the assignment below cannot stall us.
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => { clearTimeout(timer); resolve(); }, Math.min(remaining, 25));
+        this.wake = () => { clearTimeout(timer); resolve(); };
+      });
+    }
+    return new Uint8Array(this.buf.splice(0, count));
+  }
 }
 
 /**
@@ -152,19 +202,19 @@ async function readExactly(
  */
 async function command(
   writer: WritableStreamDefaultWriter<Uint8Array>,
-  reader: ReadableStreamDefaultReader<Uint8Array>,
+  rx: SerialBuffer,
   payload: number[],
   expectBytes = 0,
   timeoutMs = 2000
 ): Promise<Uint8Array> {
   await writer.write(new Uint8Array([...payload, CRC_EOP]));
 
-  const head = await readExactly(reader, 1, timeoutMs);
+  const head = await rx.read(1, timeoutMs);
   if (head[0] !== Resp.INSYNC) {
     throw new Error(`Board out of sync (expected 0x14, got 0x${head[0].toString(16)}).`);
   }
-  const body = expectBytes > 0 ? await readExactly(reader, expectBytes, timeoutMs) : new Uint8Array(0);
-  const tail = await readExactly(reader, 1, timeoutMs);
+  const body = expectBytes > 0 ? await rx.read(expectBytes, timeoutMs) : new Uint8Array(0);
+  const tail = await rx.read(1, timeoutMs);
   if (tail[0] !== Resp.OK) {
     throw new Error(`Board rejected a command (expected 0x10, got 0x${tail[0].toString(16)}).`);
   }
@@ -214,34 +264,46 @@ function v2Frame(seq: number, body: number[]): Uint8Array {
 /** Send one framed command and return its body (minus the echoed command byte). */
 async function v2Command(
   writer: WritableStreamDefaultWriter<Uint8Array>,
-  reader: ReadableStreamDefaultReader<Uint8Array>,
+  rx: SerialBuffer,
   seq: number,
   body: number[],
   timeoutMs = 3000
 ): Promise<Uint8Array> {
   await writer.write(v2Frame(seq, body));
 
+  // One deadline for the whole exchange. Giving each byte its own fresh
+  // timeout let a noisy line stall here for 256 x timeoutMs — over ten
+  // minutes on a page write — instead of failing and retrying.
+  const deadline = Date.now() + timeoutMs;
+  const left = () => Math.max(0, deadline - Date.now());
+
   // Resync on MESSAGE_START rather than assuming the next byte is ours — a
   // board that just reset can still have boot noise in the buffer.
   let guard = 0;
-  let b = await readExactly(reader, 1, timeoutMs);
+  let b = await rx.read(1, left());
   while (b[0] !== V2.MESSAGE_START) {
     if (++guard > 256) throw new Error("No STK500v2 frame start from the board.");
-    b = await readExactly(reader, 1, timeoutMs);
+    b = await rx.read(1, left());
   }
 
-  const seqByte = await readExactly(reader, 1, timeoutMs);
+  const seqByte = await rx.read(1, left());
   if (seqByte[0] !== (seq & 0xff)) {
     throw new Error(`Frame out of order (expected sequence ${seq & 0xff}, got ${seqByte[0]}).`);
   }
-  const lenBytes = await readExactly(reader, 2, timeoutMs);
+  const lenBytes = await rx.read(2, left());
   const len = (lenBytes[0] << 8) | lenBytes[1];
-  const token = await readExactly(reader, 1, timeoutMs);
+  const token = await rx.read(1, left());
   if (token[0] !== V2.TOKEN) throw new Error("Malformed STK500v2 frame (bad token).");
 
-  const payload = await readExactly(reader, len, timeoutMs);
-  await readExactly(reader, 1, timeoutMs); // checksum — framing already validated above
+  const payload = await rx.read(len, left());
+  await rx.read(1, left()); // checksum — framing already validated above
 
+  // The bootloader echoes the command it answered. A mismatch means we are
+  // reading somebody else's frame, which is worth failing loudly rather than
+  // interpreting as a status.
+  if (payload.length >= 1 && payload[0] !== body[0]) {
+    throw new Error(`Board answered command 0x${payload[0].toString(16)} but we sent 0x${body[0].toString(16)}.`);
+  }
   if (payload.length >= 2 && payload[1] !== V2.STATUS_CMD_OK) {
     throw new Error(`Board rejected command 0x${payload[0].toString(16)} (status 0x${payload[1].toString(16)}).`);
   }
@@ -250,7 +312,7 @@ async function v2Command(
 
 async function flashStk500v2(
   writer: WritableStreamDefaultWriter<Uint8Array>,
-  reader: ReadableStreamDefaultReader<Uint8Array>,
+  rx: SerialBuffer,
   port: any,
   data: Uint8Array,
   startAddress: number,
@@ -264,7 +326,7 @@ async function flashStk500v2(
   let signedOn = false;
   for (let attempt = 1; attempt <= 3 && !signedOn; attempt++) {
     try {
-      const reply = await v2Command(writer, reader, seq, [V2.CMD_SIGN_ON], 900);
+      const reply = await v2Command(writer, rx, seq, [V2.CMD_SIGN_ON], 900);
       // Reply is [CMD_SIGN_ON, status, len, ...signature]
       const sig = new TextDecoder().decode(reply.slice(3)).replace(/\0+$/, "");
       log(`Bootloader responded${sig ? ` (${sig})` : ""}.`);
@@ -274,6 +336,7 @@ async function flashStk500v2(
       if (attempt < 3) {
         log(`Sync attempt ${attempt} failed, retrying…`);
         await resetBoard(port, resetDelayMs);
+        rx.discard();
       }
     }
   }
@@ -284,7 +347,7 @@ async function flashStk500v2(
   }
 
   // Values mirror what avrdude sends for wiring boards.
-  await v2Command(writer, reader, seq, [
+  await v2Command(writer, rx, seq, [
     V2.CMD_ENTER_PROGMODE_ISP,
     200, 100, 25, 32, 0, 0x53, 3, 0xac, 0x53, 0, 0,
   ]);
@@ -300,7 +363,7 @@ async function flashStk500v2(
     // Word address, and bit 31 marks it as an extended (>64 KB) address —
     // required on a Mega, whose flash runs past the 16-bit word boundary.
     const wordAddr = (startAddress + offset) >> 1;
-    await v2Command(writer, reader, seq, [
+    await v2Command(writer, rx, seq, [
       V2.CMD_LOAD_ADDRESS,
       ((wordAddr >> 24) & 0xff) | 0x80,
       (wordAddr >> 16) & 0xff,
@@ -309,12 +372,27 @@ async function flashStk500v2(
     ]);
     next();
 
-    await v2Command(writer, reader, seq, [
+    // The bootloader writes with `do { ... size -= 2 } while (size)`, so an
+    // odd length underflows the counter and scribbles 32K words across the
+    // chip. Pad a short final page to an even length with erased-flash 0xFF.
+    let payload = chunk;
+    if (payload.length % 2 !== 0) {
+      const padded = new Uint8Array(payload.length + 1);
+      padded.set(payload);
+      padded[payload.length] = 0xff;
+      payload = padded;
+    }
+
+    await v2Command(writer, rx, seq, [
       V2.CMD_PROGRAM_FLASH_ISP,
-      (chunk.length >> 8) & 0xff,
-      chunk.length & 0xff,
-      0xc1, 10, 0, 0, 0, 0, 0, 0, 0, 0,
-      ...chunk,
+      (payload.length >> 8) & 0xff,
+      payload.length & 0xff,
+      // mode, delay, the three ISP command bytes, two poll values — exactly
+      // seven, because stk500boot.c reads the page from msgBuffer+10 and does
+      // not parse these at all. The COUNT is what matters; get it wrong and
+      // the sketch lands offset by the difference. Values mirror avrdude.
+      0xc1, 6, 0x40, 0x4c, 0x20, 0x00, 0x00,
+      ...payload,
     ], 5000);
     next();
 
@@ -322,7 +400,7 @@ async function flashStk500v2(
     if (pct !== lastPct && pct % 10 === 0) { log(`Writing… ${pct}%`); lastPct = pct; }
   }
 
-  await v2Command(writer, reader, seq, [V2.CMD_LEAVE_PROGMODE_ISP, 1, 1]);
+  await v2Command(writer, rx, seq, [V2.CMD_LEAVE_PROGMODE_ISP, 1, 1]);
   log(`Done — ${data.length} bytes written across ${totalPages} pages.`);
 }
 
@@ -370,16 +448,20 @@ export async function flashAvr({
 
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
+  let rx: SerialBuffer | null = null;
 
   try {
     reader = port.readable.getReader();
     writer = port.writable.getWriter();
+    rx = new SerialBuffer(reader!);
 
     log("Resetting board into bootloader…");
     await resetBoard(port, resetDelayMs);
+    // Whatever the previous sketch printed on its way out is not our reply.
+    rx.discard();
 
     if (transport === "stk500v2") {
-      await flashStk500v2(writer!, reader!, port, data, startAddress, pageSize, resetDelayMs, log);
+      await flashStk500v2(writer!, rx!, port, data, startAddress, pageSize, resetDelayMs, log);
       return;
     }
 
@@ -387,12 +469,13 @@ export async function flashAvr({
     let synced = false;
     for (let attempt = 1; attempt <= 3 && !synced; attempt++) {
       try {
-        await command(writer!, reader!, [Cmd.GET_SYNC], 0, 500);
+        await command(writer!, rx!, [Cmd.GET_SYNC], 0, 500);
         synced = true;
       } catch {
         if (attempt < 3) {
           log(`Sync attempt ${attempt} failed, retrying…`);
           await resetBoard(port, resetDelayMs);
+          rx!.discard();
         }
       }
     }
@@ -403,7 +486,7 @@ export async function flashAvr({
     }
     log("Bootloader responded.");
 
-    await command(writer!, reader!, [Cmd.ENTER_PROGMODE]);
+    await command(writer!, rx!, [Cmd.ENTER_PROGMODE]);
 
     const totalPages = Math.ceil(data.length / pageSize);
     let lastPct = -1;
@@ -414,9 +497,9 @@ export async function flashAvr({
 
       // STK500 addresses flash in WORDS, not bytes.
       const wordAddr = (startAddress + offset) >> 1;
-      await command(writer!, reader!, [Cmd.LOAD_ADDRESS, wordAddr & 0xff, (wordAddr >> 8) & 0xff]);
+      await command(writer!, rx!, [Cmd.LOAD_ADDRESS, wordAddr & 0xff, (wordAddr >> 8) & 0xff]);
 
-      await command(writer!, reader!, [
+      await command(writer!, rx!, [
         Cmd.PROG_PAGE,
         (chunk.length >> 8) & 0xff,
         chunk.length & 0xff,
@@ -428,9 +511,13 @@ export async function flashAvr({
       if (pct !== lastPct && pct % 10 === 0) { log(`Writing… ${pct}%`); lastPct = pct; }
     }
 
-    await command(writer!, reader!, [Cmd.LEAVE_PROGMODE]);
+    await command(writer!, rx!, [Cmd.LEAVE_PROGMODE]);
     log(`Done — ${data.length} bytes written across ${totalPages} pages.`);
   } finally {
+    // cancel() ends the pump's in-flight read; without this releaseLock()
+    // throws over a pending request and buries whatever actually went wrong.
+    try { await reader?.cancel(); } catch { /* already gone */ }
+    try { await rx?.pumping; } catch { /* pump already stopped */ }
     try { reader?.releaseLock(); } catch { /* already released */ }
     try { writer?.releaseLock(); } catch { /* already released */ }
     try { await port.close(); } catch { /* already closed */ }
