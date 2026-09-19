@@ -21,6 +21,7 @@ import Web3Panel from "./components/Web3Panel";
 import ProjectsBrowser from "./components/ProjectsBrowser";
 import NewProjectModal from "./components/NewProjectModal";
 import { ESPLoader, Transport } from "esptool-js";
+import { flashAvr } from "./lib/avrFlash";
 import { createProject, getProject, updateProject, renameProject, listProjects, ProjectSummary, trimMessagesForStorage } from "./lib/projects";
 import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlock, primeLastKnownBlock, QuotaBlockedInfo } from "./lib/aiClient";
 
@@ -809,14 +810,51 @@ export default function App() {
     const codeToFlash = overrideCode || code;
 
     // Decide flash strategy:
-    // - Firefox/Safari: ALWAYS use backend PlatformIO CLI
-    // - Chrome + Arduino: Use backend PlatformIO CLI (avrdude needed)
-    // - Chrome + ESP32: Try esptool-js first, fallback to backend
-    const useBackendFlash = !hasWebSerial || mcu === "arduino";
-
-    if (useBackendFlash) {
+    // - Firefox/Safari: backend PlatformIO CLI (no Web Serial in those browsers)
+    // - Chrome + Arduino: STK500v1 in the browser (src/lib/avrFlash.ts)
+    // - Chrome + ESP32: esptool-js in the browser
+    //
+    // Arduino used to fall through to the backend, which runs `pio run -t
+    // upload` and looks for the board on the SERVER's USB ports. The server is
+    // in a datacentre with no serial devices, so that path could never reach a
+    // user's board — Arduino flashing simply did not work for anybody.
+    if (!hasWebSerial) {
       return await handleBackendFlash(codeToFlash);
-    } else {
+    }
+
+    if (mcu === "arduino") {
+      let avrPort: any = null;
+      try {
+        let compiled = binaryData;
+        if (!compiled) {
+          const compiledResult = await handleCompile(overrideCode);
+          if (!compiledResult.success) { setIsFlashing(false); return { success: false, error: compiledResult.errorText || "Compile failed." }; }
+          compiled = compiledResult.data;
+        }
+        if (!compiled?.binary) throw new Error("No firmware produced by the build.");
+
+        const ports = await (navigator as any).serial.getPorts();
+        avrPort = ports.length > 0 ? ports[0] : await (navigator as any).serial.requestPort();
+
+        logToTerminal("[FLASH] Uploading to AVR board over Web Serial (STK500)...", "info");
+        await flashAvr({
+          hex: atob(compiled.binary),
+          boardId,
+          port: avrPort,
+          onProgress: (m) => logToTerminal(`[FLASH] ${m}`, "info"),
+        });
+
+        logToTerminal("[FLASH] Upload complete — the board is running your code.", "success");
+        setIsFlashing(false);
+        return { success: true };
+      } catch (err: any) {
+        logToTerminal(`[FLASH] ${err.message}`, "error");
+        setIsFlashing(false);
+        return { success: false, error: err.message };
+      }
+    }
+
+    {
       // Chrome + ESP32: try Web Serial esptool-js
       let transport: any = null;
       try {
