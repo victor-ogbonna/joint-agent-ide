@@ -22,9 +22,9 @@ which is a different older project — always `cd ~/joint-agent-project` first).
 |---|---|
 | Production | **https://jointagentide.com** (Hetzner `138.201.91.112`, Docker + Caddy, auto HTTPS) |
 | Repo | `git@github.com:victor-ogbonna/joint-agent-ide.git`, branch `master` |
-| Last commit | `7fc1568` — sidebar recent projects |
+| Last commit | `cd97e6b` — in-app feedback |
 | Pre-launch lock | **ON** — leave it on. Victor knows. Only granted accounts get in. |
-| Waitlist | 9 real signups. **Never pollute this** — clean up any test data. |
+| Waitlist | 56 real signups. **Never pollute this** — clean up any test data. |
 | Users | 7 real user docs in Firestore. Same rule. |
 | Paystack | Live keys, plan `PLN_t62cgm1fovgz0he`, ₦9,300/mo. UI shows "$7" deliberately — reverting to a USD plan once his Zenith domiciliary account clears. |
 
@@ -97,6 +97,36 @@ Verified against the deployed bundle, not the build log:
 - **Proceed to Implement is now a one-shot.** It no longer calls
   `setChatMode("implement")`, so the session stays in plan mode and a follow-up
   question still gets a plan. Nothing implements until the button is pressed.
+
+## Added since (all deployed and verified against the live bundle)
+
+- **Board search is ranked, not filtered.** It was a substring match over
+  name/mcu/vendor, so "mega" matched ATmega328P and returned 189 of 224 AVR
+  boards with Arduino Uno first. `scoreBoard` in `NewProjectModal.tsx` now
+  scores by where the match lands; first-party vendor breaks ties. Searching on
+  the wrong family tab auto-switches on zero matches and otherwise offers a
+  "switch tab" line.
+- **Board selection is derived, not stored.** The old fallback was
+  `familyBoards[0]` (Arduino Uno), so after a search nothing was highlighted
+  while Create quietly said "Create on Arduino Uno". A click is now remembered
+  with the query it was made under.
+- **USB detection reports a catalogue board id.** Arduino's own VID (0x2341)
+  distinguishes Uno from Mega 2560; New Project preselects it. Generic bridges
+  (CH340/CP2102/FTDI) still identify nothing.
+- **Welcome dialog on sign-in** — new project vs a recent one. Fires once per
+  uid per page load.
+- **Terminal clears on project create.**
+- **Chat markdown rhythm tightened** via `.chat-prose` in `index.css`.
+- **In-app feedback.** `server/feedback.ts` + `FeedbackWidget.tsx`. Feedback row
+  at the bottom of the left rail (floating button on narrow layouts only — a
+  floating button on wide layouts landed on top of Serial Plotter). Writes to
+  Firestore FIRST, then tries to email, so nothing is ever lost. Listed in
+  `/admin`. **To turn on email delivery**, add to `.env` ON THE SERVER:
+  `RESEND_API_KEY=...` and `FEEDBACK_TO_EMAIL=...` (optionally
+  `FEEDBACK_FROM_EMAIL=...`), then restart. No code change needed; `/admin`
+  shows whether it is on.
+- **"autonomously"** added to the meta description, og:description,
+  twitter:description and JSON-LD.
 
 ## Still to do
 
