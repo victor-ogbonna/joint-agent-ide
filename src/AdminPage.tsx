@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useDocumentScroll } from "./useDocumentScroll";
-import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw, UserPlus, Trash2 } from "lucide-react";
+import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw, UserPlus, Trash2, MessageSquarePlus, Mail, MailX } from "lucide-react";
 
 const TOKEN_KEY = "jointagent_admin_token";
 
@@ -30,6 +30,12 @@ export default function AdminPage() {
   const [loadingWaitlist, setLoadingWaitlist] = useState(false);
   const [waitlistError, setWaitlistError] = useState<string | null>(null);
   const [copiedEmails, setCopiedEmails] = useState(false);
+
+  type FeedbackEntry = { id: string; email: string; kind: string; message: string; boardId: string; mcu: string; page: string; createdAt: string | null };
+  const [feedback, setFeedback] = useState<FeedbackEntry[]>([]);
+  const [loadingFeedback, setLoadingFeedback] = useState(false);
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
+  const [feedbackEmailOn, setFeedbackEmailOn] = useState(false);
 
   const [launchLocked, setLaunchLocked] = useState<boolean | null>(null);
   const [togglingLock, setTogglingLock] = useState(false);
@@ -79,6 +85,26 @@ export default function AdminPage() {
       setPaystackSaveMessage({ type: "error", text: "Could not reach the server." });
     } finally {
       setLoadingPaystackConfig(false);
+    }
+  };
+
+  const loadFeedback = async (t: string) => {
+    setLoadingFeedback(true);
+    setFeedbackError(null);
+    try {
+      const res = await adminFetch(t, "/api/feedback/entries");
+      if (!res) return;
+      const data = await res.json();
+      if (!res.ok) {
+        setFeedbackError(data.error || "Could not load feedback.");
+        return;
+      }
+      setFeedback(data.entries || []);
+      setFeedbackEmailOn(Boolean(data.emailConfigured));
+    } catch {
+      setFeedbackError("Could not reach the server.");
+    } finally {
+      setLoadingFeedback(false);
     }
   };
 
@@ -192,6 +218,7 @@ export default function AdminPage() {
     if (token) {
       loadPaystackConfig(token);
       loadWaitlist(token);
+      loadFeedback(token);
       loadLaunchStatus(token);
       loadAccessLists(token);
     }
@@ -603,6 +630,79 @@ export default function AdminPage() {
 
           <p className="text-[10px] text-[var(--text-subtle)] leading-relaxed border-t border-[var(--border-main)] pt-3">
             Newest first, up to 500. Paste the copied list into the BCC field when you email the waitlist — never the To field, or every subscriber sees the others' addresses.
+          </p>
+        </div>
+
+        <div className="bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl p-5 space-y-4 mt-4">
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 bg-orange-500/10 rounded-md text-orange-600">
+              <MessageSquarePlus size={14} />
+            </div>
+            <h2 className="font-display font-bold text-sm">Feedback</h2>
+            <span className="ml-auto font-mono text-xs text-[var(--text-main)]">
+              {loadingFeedback ? "\u2026" : feedback.length}
+            </span>
+            <button
+              type="button"
+              onClick={() => token && loadFeedback(token)}
+              disabled={loadingFeedback}
+              title="Refresh"
+              className="text-[var(--text-muted)] hover:text-[var(--text-main)] disabled:opacity-50 transition"
+            >
+              <RefreshCw size={13} className={loadingFeedback ? "animate-spin" : ""} />
+            </button>
+          </div>
+
+          <div className={`flex items-start gap-1.5 text-[11px] ${feedbackEmailOn ? "text-[var(--text-muted)]" : "text-amber-500"}`}>
+            {feedbackEmailOn ? <Mail size={12} className="mt-0.5 shrink-0" /> : <MailX size={12} className="mt-0.5 shrink-0" />}
+            <span>
+              {feedbackEmailOn
+                ? "Email notifications are on \u2014 new feedback is also sent to your inbox."
+                : "Email notifications are off. Everything still lands here. Set RESEND_API_KEY and FEEDBACK_TO_EMAIL in .env on the server to also get them by email."}
+            </span>
+          </div>
+
+          {feedbackError && (
+            <div className="flex items-start gap-1.5 text-xs text-red-400">
+              <AlertCircle size={13} className="mt-0.5 shrink-0" />
+              <span>{feedbackError}</span>
+            </div>
+          )}
+
+          {!loadingFeedback && !feedbackError && feedback.length === 0 && (
+            <p className="text-xs text-[var(--text-muted)]">
+              No feedback yet. It arrives from the button at the bottom-left of the IDE.
+            </p>
+          )}
+
+          {feedback.length > 0 && (
+            <div className="max-h-96 overflow-y-auto space-y-2 pr-1">
+              {feedback.map((f) => (
+                <div key={f.id} className="border border-[var(--border-main)] rounded-lg p-3 space-y-1.5">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                      f.kind === "bug" ? "bg-red-500/10 text-red-400"
+                        : f.kind === "idea" ? "bg-blue-500/10 text-blue-400"
+                        : "bg-[var(--bg-surface)] text-[var(--text-muted)]"
+                    }`}>{f.kind}</span>
+                    <a href={`mailto:${f.email}`} className="text-[11px] font-mono text-[var(--accent-secondary)] hover:underline truncate">{f.email}</a>
+                    <span className="ml-auto text-[10px] text-[var(--text-subtle)] shrink-0">
+                      {f.createdAt ? new Date(f.createdAt).toLocaleString() : ""}
+                    </span>
+                  </div>
+                  <p className="text-xs text-[var(--text-main)] whitespace-pre-wrap break-words leading-relaxed">{f.message}</p>
+                  {(f.boardId || f.page) && (
+                    <p className="text-[10px] text-[var(--text-subtle)] font-mono">
+                      {[f.boardId, f.mcu, f.page].filter(Boolean).join(" \u00b7 ")}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <p className="text-[10px] text-[var(--text-subtle)] leading-relaxed border-t border-[var(--border-main)] pt-3">
+            Newest first, up to 300. Click an address to reply. Feedback is stored the moment it is sent, so nothing is lost even while email notifications are off.
           </p>
         </div>
       </main>

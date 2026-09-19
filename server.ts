@@ -18,6 +18,7 @@ import { readAccessLists, sanitiseEmailList } from './server/access';
 import { requireAuthAndQuota, requireFirebaseAuth, incrementTokenUsage, FREE_TOKEN_CAP, PAID_TOKEN_CAP, getOrCreateUserDoc } from './server/quota';
 import { registerPaystackRoutes } from './server/paystack';
 import { registerWaitlistRoutes } from './server/waitlist';
+import { registerFeedbackRoutes } from './server/feedback';
 import { registerFirebaseAuthProxy } from './server/firebaseAuthProxy';
 import { detectLibDeps } from './server/libraryDeps';
 import { loadBoardCatalog, getBoardCatalog, getBoardById, boardFamily, resolveBoard, describeBoardForPrompt, describeFamilyForPrompt, BoardInfo } from './server/boards';
@@ -342,6 +343,7 @@ app.post("/api/admin/access-lists", requireAdmin, async (req, res) => {
 
 registerPaystackRoutes(app, requireAdmin);
 registerWaitlistRoutes(app, requireAdmin);
+registerFeedbackRoutes(app, requireFirebaseAuth, requireAdmin);
 
 // Lets the frontend check where a signed-in user stands relative to their
 // token cap — used both to seed the UI on load and by a blocked user's

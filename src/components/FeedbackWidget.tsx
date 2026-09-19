@@ -1,0 +1,151 @@
+import React, { useState } from "react";
+import { MessageSquarePlus, X, Bug, Lightbulb, MessageCircle, Loader2, Check } from "lucide-react";
+import { auth } from "../lib/firebase";
+
+type Kind = "bug" | "idea" | "other";
+
+const KINDS: Array<{ id: Kind; label: string; icon: React.ReactNode }> = [
+  { id: "bug", label: "Bug", icon: <Bug size={12} /> },
+  { id: "idea", label: "Idea", icon: <Lightbulb size={12} /> },
+  { id: "other", label: "Other", icon: <MessageCircle size={12} /> },
+];
+
+interface FeedbackWidgetProps {
+  boardId?: string;
+  mcu?: string;
+  /**
+   * "sidebar" renders a row in the left rail's bottom group, matching Terminal
+   * / Serial Monitor / Serial Plotter. A floating circle in the same corner sat
+   * directly on top of Serial Plotter, so the rail owns the trigger whenever it
+   * is visible and "fab" is only for narrow layouts where the rail is hidden.
+   */
+  variant?: "fab" | "sidebar";
+}
+
+export default function FeedbackWidget({ boardId, mcu, variant = "fab" }: FeedbackWidgetProps) {
+  const [open, setOpen] = useState(false);
+  const [kind, setKind] = useState<Kind>("bug");
+  const [message, setMessage] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState("");
+
+  const close = () => {
+    setOpen(false);
+    // Reset only after a successful send — a failed one keeps what they wrote
+    // so a network blip doesn't make them retype it.
+    if (sent) { setSent(false); setMessage(""); setError(""); }
+  };
+
+  const send = async () => {
+    const text = message.trim();
+    if (!text || sending) return;
+    setSending(true);
+    setError("");
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error("Please sign in first.");
+      const res = await fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ kind, message: text, boardId, mcu, page: window.location.pathname }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Could not send that — please try again.");
+      setSent(true);
+      setMessage("");
+    } catch (err: any) {
+      setError(err.message || "Could not send that — please try again.");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <>
+      {open && (
+        <div className={`fixed ${variant === "sidebar" ? "bottom-24" : "bottom-16"} left-4 z-50 w-[19rem] max-w-[calc(100vw-2rem)] bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl shadow-2xl overflow-hidden`}>
+          <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-[var(--border-main)]">
+            <span className="text-xs font-semibold text-[var(--text-main)]">Send feedback</span>
+            <button type="button" onClick={close} title="Close" className="text-[var(--text-muted)] hover:text-[var(--text-main)]">
+              <X size={14} />
+            </button>
+          </div>
+
+          {sent ? (
+            <div className="p-5 text-center space-y-2">
+              <div className="w-8 h-8 mx-auto rounded-full bg-green-500/10 text-green-500 flex items-center justify-center">
+                <Check size={16} />
+              </div>
+              <p className="text-xs text-[var(--text-main)] font-medium">Thanks — that reached us.</p>
+              <button type="button" onClick={close} className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text-main)] transition">Close</button>
+            </div>
+          ) : (
+            <div className="p-3.5 space-y-2.5">
+              <div className="flex bg-[var(--bg-root)] p-[3px] rounded-lg border border-[var(--border-main)]">
+                {KINDS.map((k) => (
+                  <button
+                    key={k.id}
+                    type="button"
+                    onClick={() => setKind(k.id)}
+                    className={`flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold transition ${kind === k.id ? "text-white" : "text-[var(--text-muted)] hover:text-[var(--text-main)]"}`}
+                    style={kind === k.id ? { background: "var(--gradient-hero)" } : undefined}
+                  >
+                    {k.icon} {k.label}
+                  </button>
+                ))}
+              </div>
+
+              <textarea
+                autoFocus
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                rows={4}
+                maxLength={4000}
+                placeholder={kind === "bug" ? "What happened, and what did you expect?" : kind === "idea" ? "What would you like it to do?" : "Tell us anything."}
+                className="w-full bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-lg px-2.5 py-2 text-xs text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] transition resize-none"
+              />
+
+              {error && <p className="text-[11px] text-red-500">{error}</p>}
+
+              <button
+                type="button"
+                onClick={send}
+                disabled={sending || !message.trim()}
+                className="w-full flex items-center justify-center gap-1.5 text-white text-xs font-semibold py-2 rounded-lg transition disabled:opacity-50"
+                style={{ background: "var(--gradient-accent)" }}
+              >
+                {sending ? <Loader2 size={14} className="animate-spin" /> : "Send"}
+              </button>
+              <p className="text-[10px] text-[var(--text-subtle)] leading-snug">
+                Your account email and current board are attached so we can follow up.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {variant === "sidebar" ? (
+        <button
+          type="button"
+          onClick={() => (open ? close() : setOpen(true))}
+          title="Send feedback"
+          className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${open ? "bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium" : "text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]"}`}
+        >
+          <MessageSquarePlus size={13} /> Feedback
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={() => (open ? close() : setOpen(true))}
+          title="Send feedback"
+          aria-label="Send feedback"
+          className="fixed bottom-4 left-4 z-50 w-9 h-9 rounded-full flex items-center justify-center text-white shadow-lg hover:scale-105 active:scale-95 transition"
+          style={{ background: "var(--gradient-accent)", boxShadow: "var(--shadow-glow)" }}
+        >
+          {open ? <X size={16} /> : <MessageSquarePlus size={16} />}
+        </button>
+      )}
+    </>
+  );
+}

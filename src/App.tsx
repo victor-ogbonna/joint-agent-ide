@@ -21,6 +21,7 @@ import Web3Panel from "./components/Web3Panel";
 import ProjectsBrowser from "./components/ProjectsBrowser";
 import NewProjectModal from "./components/NewProjectModal";
 import WelcomeModal from "./components/WelcomeModal";
+import FeedbackWidget from "./components/FeedbackWidget";
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
 import { createProject, getProject, updateProject, renameProject, listProjects, ProjectSummary, trimMessagesForStorage } from "./lib/projects";
@@ -1937,6 +1938,7 @@ export default function App() {
                 <button onClick={() => { setIsSerialPlotterOpen(!isSerialPlotterOpen); if (isNarrow) setMobilePane("editor"); }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isSerialPlotterOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
                   <Activity size={13} /> Serial Plotter
                 </button>
+                <FeedbackWidget variant="sidebar" boardId={boardId} mcu={mcu} />
               </div>
             </aside>
           </Panel>
@@ -2286,6 +2288,9 @@ export default function App() {
           onNewProject={() => { setShowProjectsBrowser(false); setShowNewProjectModal(true); }}
         />
       )}
+
+      {/* The rail carries the trigger on wide layouts; this is the mobile fallback. */}
+      {user && isNarrow && <FeedbackWidget boardId={boardId} mcu={mcu} />}
 
       {showWelcome && user && (
         <WelcomeModal
