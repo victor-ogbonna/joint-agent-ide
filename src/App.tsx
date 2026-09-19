@@ -27,6 +27,42 @@ import { flashAvr } from "./lib/avrFlash";
 import { createProject, getProject, updateProject, renameProject, listProjects, ProjectSummary, trimMessagesForStorage } from "./lib/projects";
 import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlock, primeLastKnownBlock, QuotaBlockedInfo } from "./lib/aiClient";
 
+/**
+ * Choose which granted serial port is the board.
+ *
+ * Every caller used to take `getPorts()[0]`, which is simply the port granted
+ * FIRST — not the one the user just chose. On a machine that exposes an
+ * internal Intel serial device (0x8086, which this file already has to
+ * special-case in two other places) that is not the Arduino at all: the
+ * flasher opened the wrong device, pulsed DTR at nothing, and timed out
+ * waiting for a bootloader that was never on the other end. It looked
+ * identical to a dead board.
+ *
+ * Preference order: the port the user actually connected, then a port whose
+ * USB id we recognise as a microcontroller, then any non-Intel port, then ask.
+ */
+const pickBoardPort = async (preferred: any): Promise<any> => {
+  if (preferred) return preferred;
+  const ports: any[] = await (navigator as any).serial.getPorts();
+  const infoOf = (p: any) => { try { return p.getInfo() || {}; } catch { return {}; } };
+  const candidates = ports.filter((p) => infoOf(p).usbVendorId !== 0x8086);
+  const known = candidates.find((p) => {
+    const i = infoOf(p);
+    return Boolean(getBoardInfo(i.usbVendorId, i.usbProductId));
+  });
+  return known || candidates[0] || (await (navigator as any).serial.requestPort());
+};
+
+const describePort = (port: any): string => {
+  try {
+    const i = port.getInfo() || {};
+    if (!i.usbVendorId) return "unidentified serial device";
+    const b = getBoardInfo(i.usbVendorId, i.usbProductId);
+    const ids = `VID 0x${i.usbVendorId.toString(16).toUpperCase()}, PID 0x${(i.usbProductId ?? 0).toString(16).toUpperCase()}`;
+    return b ? `${b.name} (${ids})` : ids;
+  } catch { return "unidentified serial device"; }
+};
+
 // type === null means "a serial bridge we cannot attribute to a chip family".
 // boardId, when present, is a PlatformIO board id from /api/boards. Only set it
 // where the VID/PID pins down one exact board — a generic serial bridge or a
@@ -405,6 +441,7 @@ export default function App() {
         const info = e.target.getInfo();
         const vendorId = info.usbVendorId;
         if (vendorId !== 0x8086) {
+          webSerialPortRef.current = e.target;
           const board = getBoardInfo(vendorId, info.usbProductId);
           const boardName = board ? board.name : "Generic serial device";
 
@@ -453,6 +490,10 @@ export default function App() {
 
   // Store selected backend port path for Firefox/Safari
   const selectedPortPathRef = useRef<string | null>(null);
+  // The actual Web Serial port object the user picked. Previously only the
+  // backend's string path was kept, so every browser-side operation fell back
+  // to getPorts()[0].
+  const webSerialPortRef = useRef<any>(null);
   const serialWsRef = useRef<WebSocket | null>(null);
   const hasWebSerial = "serial" in navigator;
 
@@ -464,6 +505,7 @@ export default function App() {
       try {
         logToTerminal("[USB] Web Serial API supported. Prompting for port...", "info");
         const port = await (navigator as any).serial.requestPort();
+        webSerialPortRef.current = port;
         await port.open({ baudRate: 115200 });
         const info = await port.getInfo();
         await port.close();
@@ -701,13 +743,9 @@ export default function App() {
 
     try {
       if ("serial" in navigator) {
-        const ports = await (navigator as any).serial.getPorts();
-        let port;
-        if (ports.length > 0) {
-          port = ports[0];
-        } else {
-          port = await (navigator as any).serial.requestPort();
-        }
+        const port = await pickBoardPort(webSerialPortRef.current);
+        webSerialPortRef.current = port;
+        logToTerminal(`[RETRIEVE] Target port: ${describePort(port)}.`, "info");
 
         if (mcu === "esp32") {
           logToTerminal("[RETRIEVE] Port selected. Preparing to read firmware from ESP32...", "info");
@@ -878,9 +916,10 @@ export default function App() {
         }
         if (!compiled?.binary) throw new Error("No firmware produced by the build.");
 
-        const ports = await (navigator as any).serial.getPorts();
-        avrPort = ports.length > 0 ? ports[0] : await (navigator as any).serial.requestPort();
+        avrPort = await pickBoardPort(webSerialPortRef.current);
+        webSerialPortRef.current = avrPort;
 
+        logToTerminal(`[FLASH] Target port: ${describePort(avrPort)}.`, "info");
         logToTerminal("[FLASH] Uploading to AVR board over Web Serial (STK500)...", "info");
         await flashAvr({
           hex: atob(compiled.binary),
@@ -919,9 +958,10 @@ export default function App() {
           compiled = compiledResult.data;
         }
 
-        const ports = await (navigator as any).serial.getPorts();
-        let port = ports.length > 0 ? ports[0] : await (navigator as any).serial.requestPort();
+        const port = await pickBoardPort(webSerialPortRef.current);
+        webSerialPortRef.current = port;
 
+        logToTerminal(`[FLASH] Target port: ${describePort(port)}.`, "info");
         logToTerminal("[FLASH] Using Web Serial API for ESP32 flashing...", "info");
         transport = new Transport(port, true);
         const term = {
@@ -1711,6 +1751,7 @@ export default function App() {
                   setDetectedBoardId(null);
                   setDetectedMcu(null);
                   setMcuPluggedIn(false);
+                  webSerialPortRef.current = null;
                   logToTerminal("[USB] Connection disconnected/forgotten. You can scan again.", "info");
                 }}
                 className="p-0.5 rounded hover:bg-red-500/10 text-[var(--text-muted)] hover:text-red-400 transition"

@@ -141,6 +141,9 @@ export function parseIntelHex(hex: string): { data: Uint8Array; startAddress: nu
  */
 class SerialBuffer {
   private buf: number[] = [];
+  /** Every byte the port has produced, across discards. Purely diagnostic:
+   *  "0 bytes" and "some bytes" are completely different faults. */
+  received = 0;
   private ended = false;
   private err: Error | null = null;
   private wake: (() => void) | null = null;
@@ -156,7 +159,10 @@ class SerialBuffer {
       for (;;) {
         const { value, done } = await this.reader.read();
         if (done) { this.ended = true; break; }
-        if (value) for (let i = 0; i < value.length; i++) this.buf.push(value[i]);
+        if (value) {
+          this.received += value.length;
+          for (let i = 0; i < value.length; i++) this.buf.push(value[i]);
+        }
         this.signal();
       }
     } catch (e: any) {
@@ -219,6 +225,23 @@ async function command(
     throw new Error(`Board rejected a command (expected 0x10, got 0x${tail[0].toString(16)}).`);
   }
   return body;
+}
+
+/**
+ * Sync failed — say which of the two very different faults it was, because the
+ * fix is completely different. Silence means we are not connected to the
+ * board at all (wrong port, charge-only cable, no auto-reset). Bytes that
+ * never formed a valid reply means we ARE talking to something, but it is not
+ * speaking this protocol.
+ */
+function heardNothing(received: number): string {
+  return received === 0
+    ? "Could not reach the bootloader — the port sent nothing at all (0 bytes). " +
+      "That usually means this is not the board's port, the cable is charge-only, " +
+      "or the board is not auto-resetting. Unplug and replug the board, then use " +
+      "Detect Board and pick the Arduino in the chooser."
+    : `Could not reach the bootloader — the port sent ${received} bytes but none formed a valid ` +
+      "reply. Close any serial monitor holding the port and try again.";
 }
 
 /**
@@ -341,9 +364,7 @@ async function flashStk500v2(
     }
   }
   if (!signedOn) {
-    throw new Error(
-      "Could not reach the bootloader. Check the cable carries data (not charge-only) and that no serial monitor is holding the port."
-    );
+    throw new Error(heardNothing(rx.received));
   }
 
   // Values mirror what avrdude sends for wiring boards.
@@ -480,9 +501,7 @@ export async function flashAvr({
       }
     }
     if (!synced) {
-      throw new Error(
-        "Could not reach the bootloader. Check the cable carries data (not charge-only) and that no serial monitor is holding the port."
-      );
+      throw new Error(heardNothing(rx!.received));
     }
     log("Bootloader responded.");
 
