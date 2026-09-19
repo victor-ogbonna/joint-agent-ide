@@ -17,6 +17,15 @@ export interface BoardInfo {
   vendor: string;
   platform: string;
   family: BoardFamily;
+  /**
+   * Bootloader protocol and speed, read from the board's own PlatformIO JSON.
+   * `pio boards --json-output` does not expose these, but the browser flasher
+   * needs them: Uno-style boards speak stk500v1 while a Mega speaks stk500v2,
+   * and the two are not compatible — sending v1 to a Mega gets no reply at all.
+   * Hardcoding a handful of boards was wrong; every board carries its own.
+   */
+  uploadProtocol?: string;
+  uploadSpeed?: number;
 }
 
 // Scope decision: only these two platforms are pre-cached and compile fully
@@ -49,6 +58,25 @@ export async function loadBoardCatalog(): Promise<void> {
       maxBuffer: 1024 * 1024 * 20,
     });
     const raw = JSON.parse(stdout);
+
+    // Merge in upload parameters straight from each board's JSON definition.
+    const uploadById = new Map<string, { protocol?: string; speed?: number }>();
+    for (const platform of Object.keys(PLATFORM_FAMILY)) {
+      const dir = path.join(process.cwd(), ".platformio", "platforms", platform, "boards");
+      let files: string[] = [];
+      try { files = fs.readdirSync(dir); } catch { continue; }
+      for (const file of files) {
+        if (!file.endsWith(".json")) continue;
+        try {
+          const def = JSON.parse(fs.readFileSync(path.join(dir, file), "utf-8"));
+          uploadById.set(file.replace(/\.json$/, ""), {
+            protocol: def?.upload?.protocol,
+            speed: def?.upload?.speed,
+          });
+        } catch { /* a malformed board file should not take the whole catalog down */ }
+      }
+    }
+
     catalog = raw
       .filter((b: any) => PLATFORM_FAMILY.hasOwnProperty(b.platform))
       .map((b: any) => ({
@@ -61,6 +89,8 @@ export async function loadBoardCatalog(): Promise<void> {
         vendor: b.vendor || "",
         platform: b.platform,
         family: PLATFORM_FAMILY[b.platform],
+        uploadProtocol: uploadById.get(b.id)?.protocol,
+        uploadSpeed: uploadById.get(b.id)?.speed,
       }))
       .sort((a: BoardInfo, b: BoardInfo) => {
         // Pin each family's default board first — e.g. "Espressif ESP32 Dev
@@ -74,7 +104,8 @@ export async function loadBoardCatalog(): Promise<void> {
       });
     catalogById = new Map(catalog.map((b) => [b.id, b]));
     loaded = true;
-    console.log(`[Boards] Loaded ${catalog.length} boards (espressif32 + atmelavr).`);
+    const withUpload = catalog.filter((b) => b.uploadProtocol).length;
+    console.log(`[Boards] Loaded ${catalog.length} boards (espressif32 + atmelavr); ${withUpload} carry upload parameters.`);
   } catch (err) {
     console.error("[Boards] Failed to load board catalog:", err);
   }

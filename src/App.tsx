@@ -867,7 +867,11 @@ export default function App() {
         logToTerminal("[FLASH] Uploading to AVR board over Web Serial (STK500)...", "info");
         await flashAvr({
           hex: atob(compiled.binary),
-          boardId,
+          // From the compile response, so the flash parameters come from the
+          // same board resolution that produced this binary.
+          uploadProtocol: compiled.uploadProtocol,
+          uploadSpeed: compiled.uploadSpeed,
+          chip: compiled.chip,
           port: avrPort,
           onProgress: (m) => logToTerminal(`[FLASH] ${m}`, "info"),
         });

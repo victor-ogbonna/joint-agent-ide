@@ -1240,7 +1240,20 @@ lib_deps =
         }
       }
 
-      res.json({ success: true, binary: binaryData, format: isEsp32Build ? "bin" : "hex", stdout, ...additionalBinaries });
+      // Ship the board's own upload parameters with the artifact. The browser
+      // flasher needs protocol and speed, and taking them from the same
+      // resolution that produced this binary means they can never disagree
+      // with what was actually built.
+      res.json({
+        success: true,
+        binary: binaryData,
+        format: isEsp32Build ? "bin" : "hex",
+        uploadProtocol: board.uploadProtocol,
+        uploadSpeed: board.uploadSpeed,
+        chip: board.mcu,
+        stdout,
+        ...additionalBinaries,
+      });
     } else {
       // compileSucceeded tells the client this is NOT a code problem, so it
       // must not burn five AI debug rounds trying to "fix" working code.
