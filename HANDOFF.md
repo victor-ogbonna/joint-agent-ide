@@ -22,7 +22,7 @@ which is a different older project — always `cd ~/joint-agent-project` first).
 |---|---|
 | Production | **https://jointagentide.com** (Hetzner `138.201.91.112`, Docker + Caddy, auto HTTPS) |
 | Repo | `git@github.com:victor-ogbonna/joint-agent-ide.git`, branch `master` |
-| Last commit | `cd97e6b` — in-app feedback |
+| Last commit | `43b2809` — AVR flashing fix |
 | Pre-launch lock | **ON** — leave it on. Victor knows. Only granted accounts get in. |
 | Waitlist | 56 real signups. **Never pollute this** — clean up any test data. |
 | Users | 7 real user docs in Firestore. Same rule. |
@@ -127,6 +127,46 @@ Verified against the deployed bundle, not the build log:
   shows whether it is on.
 - **"autonomously"** added to the meta description, og:description,
   twitter:description and JSON-LD.
+
+## AVR flashing — fixed, but UNTESTED ON REAL SILICON
+
+Mega 2560 failed at sync every time; the Uno path was broken the same way and
+only appeared to work when the USB bridge happened to deliver one byte at a
+time. Three defects, all in `src/lib/avrFlash.ts`:
+
+1. `readExactly()` returned `out.slice(0, count)` with **no carry-over buffer**,
+   so every byte of a chunk past `count` was discarded. A bridge delivers a
+   whole frame in one chunk, so reading the 1-byte frame marker binned the rest
+   of the 17-byte sign-on reply.
+2. It raced `reader.read()` against a timeout. A real
+   `ReadableStreamDefaultReader` **queues** read requests and serves them in
+   order, so the orphaned request ate the next chunk and gave it to nobody —
+   one timeout poisoned every retry.
+   Both replaced by `SerialBuffer`: one pump loop owns `read()`.
+3. `CMD_PROGRAM_FLASH_ISP` sent a **13-byte header**; `stk500boot.c` reads page
+   data from a fixed `msgBuffer+10`, so every page landed 3 bytes late. Now 10.
+   That loop is `do { ... size -= 2 } while (size)`, which underflows on an odd
+   length, so short final pages are padded to even.
+
+**Ground truth lives on disk** — the real Mega bootloader source is at
+`~/.platformio/packages/framework-arduino-avr/bootloaders/stk500v2/stk500boot.c`.
+Read it before changing protocol code; it beats recalling avrdude. It also
+confirms `boot_timeout` is ~7 seconds, so sync failures are never a timing
+problem, and `_FIX_ISSUE_505_` is defined, so incrementing sequence numbers is
+fine.
+
+Two things deliberately NOT changed, both proposed and then refuted: leaving
+DTR/RTS asserted after reset (avrdude's `wiring.c` does the same), and the
+0x80 extended-address bit in `CMD_LOAD_ADDRESS` (the bootloader's `<<1`
+discards it, which is why avrdude sends it too).
+
+**`npm run test:flash`** drives the real flasher against transcriptions of both
+bootloaders at four USB chunk sizes and diffs the flash image against the input
+hex. It fails 7 of 8 cases on the pre-fix code, reproducing the exact reported
+error. Run it after ANY change to the flasher.
+
+**Still unverified on hardware.** Victor has a Mega 2560 and an Uno; both need a
+live test. Ask for the terminal log either way.
 
 ## Still to do
 
