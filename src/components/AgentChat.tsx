@@ -398,7 +398,7 @@ export default function AgentChat({
                   }`}
                 >
                   {/* Normal Text Content */}
-                  <div className="prose prose-sm dark:prose-invert max-w-none break-words">
+                  <div className="prose prose-sm dark:prose-invert max-w-none break-words chat-prose">
                     <MessageMarkdown
                       content={msg.content}
                       chatMode={chatMode}
@@ -595,7 +595,7 @@ export default function AgentChat({
           />
           {/* "Mode" is dead weight on a phone — dropping it hands the width
               back to the textarea, which is the cramped element here. */}
-          Plan<span className="hidden sm:inline">&nbsp;Mode</span>
+          <span className="whitespace-nowrap">Plan<span className="hidden sm:inline"> Mode</span></span>
         </label>
         <button
           className={`p-2 rounded-md transition shrink-0 flex items-center justify-center ${isRecording ? 'text-red-500 bg-red-500/10' : 'text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]'}`}

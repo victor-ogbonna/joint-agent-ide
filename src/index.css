@@ -729,3 +729,23 @@ pre[class*="language-"] {
 .prose a:hover {
   border-bottom-color: var(--accent-primary);
 }
+
+/* Chat bubbles are 12px text in a narrow column. Tailwind Typography's
+   prose-sm rhythm is sized for an article, so a multi-section plan came out
+   looking spread apart. Tighten the vertical spacing inside chat only --
+   the privacy page and other long-form prose keep the article rhythm. */
+.chat-prose > :first-child { margin-top: 0; }
+.chat-prose > :last-child { margin-bottom: 0; }
+.chat-prose :where(p, ul, ol, blockquote, pre, table) {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+.chat-prose :where(h1, h2, h3, h4, h5, h6) {
+  margin-top: 0.85em;
+  margin-bottom: 0.3em;
+  line-height: 1.3;
+}
+.chat-prose :where(ul, ol) { padding-left: 1.15em; }
+.chat-prose :where(li) { margin-top: 0.15em; margin-bottom: 0.15em; }
+.chat-prose :where(li > p) { margin-top: 0.2em; margin-bottom: 0.2em; }
+.chat-prose :where(hr) { margin-top: 0.9em; margin-bottom: 0.9em; }

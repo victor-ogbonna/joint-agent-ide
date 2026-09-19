@@ -20,18 +20,23 @@ import AgentChat from "./components/AgentChat";
 import Web3Panel from "./components/Web3Panel";
 import ProjectsBrowser from "./components/ProjectsBrowser";
 import NewProjectModal from "./components/NewProjectModal";
+import WelcomeModal from "./components/WelcomeModal";
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
 import { createProject, getProject, updateProject, renameProject, listProjects, ProjectSummary, trimMessagesForStorage } from "./lib/projects";
 import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlock, primeLastKnownBlock, QuotaBlockedInfo } from "./lib/aiClient";
 
 // type === null means "a serial bridge we cannot attribute to a chip family".
-const getBoardInfo = (vendorId: number | undefined, productId: number | undefined): { name: string, type: MCUType | null } | null => {
+// boardId, when present, is a PlatformIO board id from /api/boards. Only set it
+// where the VID/PID pins down one exact board — a generic serial bridge or a
+// bare "Arduino" VID does not, and guessing there would preselect the wrong
+// build target. It is a default for the New Project dialog, never an override.
+const getBoardInfo = (vendorId: number | undefined, productId: number | undefined): { name: string, type: MCUType | null, boardId?: string } | null => {
   if (!vendorId) return null;
 
   if (vendorId === 0x2341) {
-    if (productId === 0x0010 || productId === 0x0042) return { name: "Arduino Mega 2560", type: "arduino" };
-    if (productId === 0x0043 || productId === 0x0001) return { name: "Arduino Uno", type: "arduino" };
+    if (productId === 0x0010 || productId === 0x0042) return { name: "Arduino Mega 2560", type: "arduino", boardId: "megaatmega2560" };
+    if (productId === 0x0043 || productId === 0x0001) return { name: "Arduino Uno", type: "arduino", boardId: "uno" };
     return { name: "Arduino", type: "arduino" };
   }
 
@@ -201,6 +206,8 @@ export default function App() {
   const [boardId, setBoardId] = useState<string>("esp32dev");
   const [chatMode, setChatMode] = useState<"plan" | "implement">("plan"); // internal representation, hidden from user
   const [detectedBoard, setDetectedBoard] = useState<string | null>(null);
+  // The catalogue board id behind detectedBoard, when USB identified one exactly.
+  const [detectedBoardId, setDetectedBoardId] = useState<string | null>(null);
   // What the USB id reports, as opposed to what the project targets. null when
   // the adapter can't identify the chip (CH340 clones and the like), which is
   // not a mismatch — it is simply unknown, so it must not block a flash.
@@ -238,6 +245,11 @@ export default function App() {
   // modal's own fetch so the list is visible without opening anything, but it
   // reuses handleOpenProject so there is only one code path for loading.
   const [recentProjects, setRecentProjects] = useState<ProjectSummary[]>([]);
+  // Shown once per sign-in: "start new" vs "continue previous". Keyed on uid in
+  // a ref so a re-render never reopens it, but signing in as someone else does.
+  const [showWelcome, setShowWelcome] = useState(false);
+  const [recentFetched, setRecentFetched] = useState(false);
+  const welcomeShownForRef = useRef<string | null>(null);
   const [loadingRecent, setLoadingRecent] = useState(false);
   const [showNewProjectModal, setShowNewProjectModal] = useState(false);
   const [importedFileCode, setImportedFileCode] = useState<string | null>(null);
@@ -406,6 +418,7 @@ export default function App() {
           setMcuPluggedIn(true);
           setDetectedMcu(board?.type ?? null);
           setDetectedBoard(`Connected: ${boardName}${vendorId ? ` (VID: 0x${vendorId.toString(16).toUpperCase()})` : ""}`);
+          setDetectedBoardId(board?.boardId ?? null);
         }
       }
     };
@@ -416,6 +429,7 @@ export default function App() {
         autoConnectedLogRef.current = false;
         setMcuPluggedIn(false);
         setDetectedBoard(null);
+        setDetectedBoardId(null);
         setDetectedMcu(null);
       }
     };
@@ -456,6 +470,7 @@ export default function App() {
         if (info.usbVendorId === 0x8086) {
           logToTerminal(`[USB] Error: Selected port is an internal Intel hub.`, "error");
           setDetectedBoard(null);
+          setDetectedBoardId(null);
           setMcuPluggedIn(false);
           return;
         }
@@ -466,6 +481,7 @@ export default function App() {
         const boardTitle = `Connected: ${boardName}${vendorId ? ` (VID: 0x${vendorId.toString(16).toUpperCase()})` : ""}`;
 
         setDetectedBoard(boardTitle);
+        setDetectedBoardId(board?.boardId ?? null);
         setDetectedMcu(board?.type ?? null);
         setMcuPluggedIn(true);
         logToTerminal(`[USB] Connected: ${boardName}.`, "success");
@@ -1418,6 +1434,10 @@ export default function App() {
       setMcu(board.family);
       setBoardId(board.id);
       setChatMessages([]); // a brand new project starts with no conversation
+      // The terminal is per-project too: build output, flash logs and serial
+      // traffic from the previous board were carrying over and reading as if
+      // they belonged to the project just created.
+      setTerminalLines([]);
       setShowNewProjectModal(false);
       setShowProjectsBrowser(false);
       logToTerminal(`[PROJECT] Created "${name}" for ${board.name}.`, "success");
@@ -1454,12 +1474,28 @@ export default function App() {
       // Non-fatal: the sidebar list is a convenience, Browse projects still works.
     } finally {
       setLoadingRecent(false);
+      setRecentFetched(true);
     }
   }, [user]);
 
   // Re-fetch when the user changes or they switch project — switching is the
   // moment a project is created, renamed or saved, so this covers all of them.
   useEffect(() => { refreshRecentProjects(); }, [refreshRecentProjects, currentProjectId]);
+
+  // Wait for the first project fetch before deciding what the welcome dialog
+  // should offer — opening it early would show "start your first project" to
+  // someone who has twelve.
+  useEffect(() => {
+    if (!user) {
+      welcomeShownForRef.current = null;
+      setRecentFetched(false);
+      setShowWelcome(false);
+      return;
+    }
+    if (!recentFetched || welcomeShownForRef.current === user.uid) return;
+    welcomeShownForRef.current = user.uid;
+    setShowWelcome(true);
+  }, [user, recentFetched]);
 
   const handleOpenProject = async (projectId: string) => {
     if (!user) return;
@@ -1671,6 +1707,7 @@ export default function App() {
               <button
                 onClick={() => {
                   setDetectedBoard(null);
+                  setDetectedBoardId(null);
                   setDetectedMcu(null);
                   setMcuPluggedIn(false);
                   logToTerminal("[USB] Connection disconnected/forgotten. You can scan again.", "info");
@@ -2250,12 +2287,27 @@ export default function App() {
         />
       )}
 
+      {showWelcome && user && (
+        <WelcomeModal
+          displayName={user.displayName?.split(" ")[0] || ""}
+          projects={recentProjects}
+          loading={loadingRecent}
+          onNewProject={() => { setShowWelcome(false); setShowNewProjectModal(true); }}
+          onOpenProject={(id) => { setShowWelcome(false); handleOpenProject(id); }}
+          onBrowseAll={() => { setShowWelcome(false); setShowProjectsBrowser(true); }}
+          onClose={() => setShowWelcome(false)}
+        />
+      )}
+
       {showNewProjectModal && (
         <NewProjectModal
           onClose={() => { setShowNewProjectModal(false); setImportedFileCode(null); setImportedFileName(""); }}
           onCreate={(name, board) => handleCreateProject(name, board, importedFileCode || undefined)}
           initialName={importedFileName}
           mode={importedFileCode ? "import" : "create"}
+          detectedBoardId={detectedBoardId}
+          detectedFamily={detectedMcu}
+          detectedName={detectedBoard}
         />
       )}
 
