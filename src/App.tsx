@@ -1125,18 +1125,50 @@ export default function App() {
           write: (data: string) => logToTerminal(`[FLASH] ${data}`, "info"),
         };
         const loader = new ESPLoader({ transport, baudrate: 115200, terminal: term });
+
+        /**
+         * Put the chip in download mode ourselves, in ONE line-state write.
+         *
+         * esptool's ClassicReset does setDTR(true) then setRTS(false) as two
+         * separate writes. On a devkit's cross-coupled auto-reset circuit that
+         * passes through a state where DTR and RTS are both high — neither EN
+         * nor IO0 driven — so EN is released while IO0 is still high. A desktop
+         * serial driver gets through that glitch in microseconds and the
+         * capacitor on EN never charges, so it goes unnoticed. Over WebUSB from
+         * a phone each write is milliseconds: EN fully rises and the chip boots
+         * the application instead of the ROM loader. That is precisely why this
+         * worked on desktop and not on mobile.
+         *
+         * setSignals sets both lines in a single write, so going straight from
+         * (EN low) to (IO0 low, EN released) never visits the glitch state.
+         */
+        const enterDownloadMode = async () => {
+          await port.setSignals({ dataTerminalReady: false, requestToSend: false });
+          await new Promise((r) => setTimeout(r, 50));
+          await port.setSignals({ dataTerminalReady: false, requestToSend: true });   // EN low: in reset
+          await new Promise((r) => setTimeout(r, 120));
+          await port.setSignals({ dataTerminalReady: true, requestToSend: false });   // IO0 low + EN released, one write
+          await new Promise((r) => setTimeout(r, 60));
+          await port.setSignals({ dataTerminalReady: false, requestToSend: false });  // release both
+          await new Promise((r) => setTimeout(r, 60));
+        };
+
         try {
-          await loader.main();
-        } catch (connectErr: any) {
-          // The auto-reset circuit is the fragile part: it depends on the
-          // devkit wiring DTR/RTS to EN/IO0, and on control-transfer timing
-          // that is far less predictable over WebUSB on a phone than over a
-          // desktop serial driver. A board held in download mode by hand needs
-          // no reset at all, so offer that before giving up.
-          logToTerminal(`[FLASH] ${connectErr.message}. Retrying without the auto-reset...`, "info");
-          logToTerminal("[FLASH] Hold the BOOT (or FLASH) button NOW and keep holding it.", "info");
-          await new Promise((r) => setTimeout(r, 3000));
+          await port.open({ baudRate: 115200 });
+          await enterDownloadMode();
+          // The chip is already where it needs to be; do not let esptool
+          // re-run the waveform that fails here.
           await loader.main("no_reset");
+        } catch (connectErr: any) {
+          logToTerminal(`[FLASH] ${connectErr.message}. Trying esptool's own reset...`, "info");
+          try {
+            await loader.main();
+          } catch (secondErr: any) {
+            logToTerminal(`[FLASH] ${secondErr.message}. Last try — hold BOOT now.`, "info");
+            logToTerminal("[FLASH] Hold the BOOT (or FLASH) button and keep holding it.", "info");
+            await new Promise((r) => setTimeout(r, 3000));
+            await loader.main("no_reset");
+          }
         }
 
         // Convert base64 to Uint8Array for esptool-js writeFlash

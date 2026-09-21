@@ -72,6 +72,8 @@ export class WebUsbSerialPort {
   private controller: ReadableStreamDefaultController<Uint8Array> | null = null;
   private dtr = false;
   private rts = false;
+  /** Last configured baud, so re-opening at the same rate is a no-op. */
+  private baudRate = 0;
 
   readable: ReadableStream<Uint8Array> | null = null;
   writable: WritableStream<Uint8Array> | null = null;
@@ -95,8 +97,17 @@ export class WebUsbSerialPort {
     // before its finally ran) would otherwise get "The port is already open"
     // surfaced as esptool's generic "Failed to connect with the device" —
     // blaming the board for a state problem on this side.
+    // Already open: reconfigure the baud if it changed and keep everything
+    // else. Tearing the port down and rebuilding it re-inits the bridge and
+    // drops DTR/RTS — which would undo a reset the caller just applied, and
+    // esptool-js opens the port itself AFTER we have put the chip into
+    // download mode.
     if (this.readable) {
-      try { await this.close(); } catch { /* fall through and re-open */ }
+      if (baudRate !== this.baudRate) {
+        await this.configure(baudRate);
+        this.baudRate = baudRate;
+      }
+      return;
     }
     if (!this.device.opened) await this.device.open();
     if (!this.device.configuration) await this.device.selectConfiguration(1);
@@ -116,6 +127,7 @@ export class WebUsbSerialPort {
     }
 
     await this.configure(baudRate);
+    this.baudRate = baudRate;
     this.startPump();
     this.writable = new WritableStream<Uint8Array>({
       write: async (chunk) => { await this.device.transferOut(this.epOut, chunk); },
