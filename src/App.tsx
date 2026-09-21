@@ -23,7 +23,7 @@ import NewProjectModal from "./components/NewProjectModal";
 import WelcomeModal from "./components/WelcomeModal";
 import FeedbackWidget from "./components/FeedbackWidget";
 import GithubPanel from "./components/GithubPanel";
-import WebConsolePanel from "./components/WebConsolePanel";
+import WebPreviewPanel from "./components/WebPreviewPanel";
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
 import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts, describeVisibleUsbDevices } from "./lib/webusbSerial";
@@ -349,7 +349,7 @@ export default function App() {
   const [showWelcome, setShowWelcome] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [githubOpen, setGithubOpen] = useState(false);
-  const [webConsoleOpen, setWebConsoleOpen] = useState(false);
+  const [webPreviewOpen, setWebPreviewOpen] = useState(false);
   const [recentFetched, setRecentFetched] = useState(false);
   const welcomeShownForRef = useRef<string | null>(null);
   const [loadingRecent, setLoadingRecent] = useState(false);
@@ -2245,8 +2245,8 @@ export default function App() {
                 <button onClick={() => { setIsTerminalOpen(!isTerminalOpen); if (isNarrow) setMobilePane("editor"); }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isTerminalOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
                   <TerminalIcon size={13} /> Terminal
                 </button>
-                <button onClick={() => setWebConsoleOpen(true)} className="w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]">
-                  <Globe size={13} /> Web Console
+                <button onClick={() => setWebPreviewOpen(true)} className="w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]">
+                  <Globe size={13} /> Web Preview
                 </button>
                 <button onClick={() => { setIsSerialMonitorOpen(!isSerialMonitorOpen); if (isNarrow) setMobilePane("editor"); }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isSerialMonitorOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
                   <Monitor size={13} /> Serial Monitor
@@ -2618,9 +2618,10 @@ export default function App() {
         />
       )}
 
-      {webConsoleOpen && (
-        <WebConsolePanel
-          onClose={() => setWebConsoleOpen(false)}
+      {webPreviewOpen && (
+        <WebPreviewPanel
+          onClose={() => setWebPreviewOpen(false)}
+          code={code}
           lines={terminalLines.map((l) => l.text)}
         />
       )}

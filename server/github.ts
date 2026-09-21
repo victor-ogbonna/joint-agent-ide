@@ -19,9 +19,28 @@ export function isGithubConfigured(): boolean {
   return Boolean(process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET);
 }
 
-function redirectUri(): string {
-  const base = (process.env.APP_URL || "").replace(/\/+$/, "");
-  return `${base}/api/github/callback`;
+/**
+ * Where GitHub sends the user back.
+ *
+ * Derived from the REQUEST rather than from APP_URL. A stale placeholder in
+ * .env (APP_URL="MY_APP_URL" shipped in .env.example) produced
+ * "redirect_uri=MY_APP_URL/api/github/callback" and GitHub rejected the whole
+ * flow with "The redirect_uri is not associated with this application" — a
+ * failure with no relationship to the thing the user had just configured.
+ * The host that served this request is the host GitHub must return to, so ask
+ * it directly. APP_URL is honoured only when it is actually a URL.
+ */
+function redirectUri(req: express.Request): string {
+  const configured = (process.env.APP_URL || "").trim().replace(/\/+$/, "");
+  if (/^https?:\/\/[^\s/]+/i.test(configured)) return `${configured}/api/github/callback`;
+  // `trust proxy` is set, so req.protocol reflects Caddy's X-Forwarded-Proto.
+  // Anything that is not a local dev host is served over TLS, and GitHub
+  // matches the redirect_uri EXACTLY — including the scheme — so do not let a
+  // missing forwarded header downgrade it to http and fail the match.
+  const host = req.get("host") || "";
+  const isLocal = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(host);
+  const proto = isLocal ? req.protocol : "https";
+  return `${proto}://${host}/api/github/callback`;
 }
 
 /** Key for both state signing and token encryption. */
@@ -128,7 +147,7 @@ export function registerGithubRoutes(
     }
     const url = new URL("https://github.com/login/oauth/authorize");
     url.searchParams.set("client_id", String(process.env.GITHUB_CLIENT_ID));
-    url.searchParams.set("redirect_uri", redirectUri());
+    url.searchParams.set("redirect_uri", redirectUri(req));
     url.searchParams.set("scope", SCOPES);
     url.searchParams.set("state", signState(req.uid));
     res.json({ url: url.toString() });
@@ -161,7 +180,7 @@ export function registerGithubRoutes(
           client_id: process.env.GITHUB_CLIENT_ID,
           client_secret: process.env.GITHUB_CLIENT_SECRET,
           code,
-          redirect_uri: redirectUri(),
+          redirect_uri: redirectUri(req),
         }),
       });
       const data = await tokenRes.json();
