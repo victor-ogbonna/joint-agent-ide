@@ -341,18 +341,39 @@ export async function describeVisibleUsbDevices(): Promise<string> {
 /**
  * Ask the user to pick a board, then wrap it in the Web Serial surface.
  *
- * Deliberately `acceptAllDevices` rather than a vendor-id filter list. A filter
- * that does not happen to name your exact bridge produces Chrome's "No
- * compatible devices found" with an empty list, which is indistinguishable
- * from nothing being plugged in — and no list of vendor ids is ever complete.
- * Show everything the phone can see and validate the choice afterwards, where
- * we can say something useful about it.
+ * Shows EVERY device the phone can see, then validates the choice afterwards
+ * where we can say something useful about it. A vendor-id list is never
+ * complete, and a filter that misses your bridge gives Chrome's "No compatible
+ * devices found" over an empty chooser — indistinguishable from nothing being
+ * plugged in.
+ *
+ * The magic spelling is `filters: [{}]`. Note:
+ *   - `acceptAllDevices` is a WEB BLUETOOTH option. WebUSB does not have it and
+ *     silently ignores it (verified against Chrome).
+ *   - `filters: []` — an EMPTY LIST — matches nothing, because the chooser
+ *     shows devices matching ANY filter and there are none. That is the exact
+ *     bug this replaces.
+ *   - `filters: [{}]` — one filter with no constraints — matches everything,
+ *     since the spec's match algorithm only tests fields that are present.
  */
 export async function requestUsbSerialPort(): Promise<WebUsbSerialPort> {
-  const device = await (navigator as any).usb.requestDevice({
-    filters: [],
-    acceptAllDevices: true,
-  });
+  let device: any;
+  try {
+    device = await (navigator as any).usb.requestDevice({ filters: [{}] });
+  } catch (e: any) {
+    // A build that rejects a property-less filter still gets a usable chooser.
+    if (e?.name === "TypeError") {
+      device = await (navigator as any).usb.requestDevice({ filters: USB_DEVICE_FILTERS });
+    } else if (e?.name === "NotFoundError") {
+      throw new Error(
+        "No USB device was selected. If the list was empty, the phone is not seeing the board: " +
+        "check that the OTG adapter is plugged in, that the cable carries data rather than only power, " +
+        "and that the board's power LED is on."
+      );
+    } else {
+      throw e;
+    }
+  }
   const kind = driverFor(device);
   if (!kind) {
     const id = `0x${device.vendorId.toString(16).padStart(4, "0")}:0x${device.productId.toString(16).padStart(4, "0")}`;
