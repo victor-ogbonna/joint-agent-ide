@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useDocumentScroll } from "./useDocumentScroll";
-import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw, UserPlus, Trash2, MessageSquarePlus, Mail, MailX } from "lucide-react";
+import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw, UserPlus, Trash2, MessageSquarePlus, Mail, MailX, Paperclip } from "lucide-react";
 
 const TOKEN_KEY = "jointagent_admin_token";
 
@@ -31,7 +31,7 @@ export default function AdminPage() {
   const [waitlistError, setWaitlistError] = useState<string | null>(null);
   const [copiedEmails, setCopiedEmails] = useState(false);
 
-  type FeedbackEntry = { id: string; email: string; kind: string; message: string; boardId: string; mcu: string; page: string; createdAt: string | null };
+  type FeedbackEntry = { id: string; email: string; kind: string; message: string; boardId: string; mcu: string; page: string; attachmentCount?: number; createdAt: string | null };
   const [feedback, setFeedback] = useState<FeedbackEntry[]>([]);
   const [loadingFeedback, setLoadingFeedback] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
@@ -86,6 +86,23 @@ export default function AdminPage() {
     } finally {
       setLoadingPaystackConfig(false);
     }
+  };
+
+  // The route is admin-gated by a bearer token, so it cannot be a plain link —
+  // fetch it with the header and hand the blob to the browser.
+  const downloadAttachment = async (t: string, id: string, index: number) => {
+    try {
+      const res = await adminFetch(t, `/api/feedback/${id}/attachments/${index}`);
+      if (!res || !res.ok) return;
+      const blob = await res.blob();
+      const cd = res.headers.get("content-disposition") || "";
+      const name = /filename="([^"]+)"/.exec(cd)?.[1] || `attachment-${index}`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } catch { /* nothing useful to show for a failed download */ }
   };
 
   const loadFeedback = async (t: string) => {
@@ -691,6 +708,20 @@ export default function AdminPage() {
                     </span>
                   </div>
                   <p className="text-xs text-[var(--text-main)] whitespace-pre-wrap break-words leading-relaxed">{f.message}</p>
+                  {(f.attachmentCount || 0) > 0 && (
+                    <div className="flex flex-wrap gap-1.5 pt-0.5">
+                      {Array.from({ length: f.attachmentCount || 0 }, (_, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          onClick={() => token && downloadAttachment(token, f.id, i)}
+                          className="flex items-center gap-1 text-[10px] text-[var(--accent-secondary)] hover:underline border border-[var(--border-main)] rounded px-1.5 py-0.5"
+                        >
+                          <Paperclip size={10} /> file {i + 1}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   {(f.boardId || f.page) && (
                     <p className="text-[10px] text-[var(--text-subtle)] font-mono">
                       {[f.boardId, f.mcu, f.page].filter(Boolean).join(" \u00b7 ")}
