@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Sparkles, Upload, MessageSquarePlus} from "lucide-react";
+import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Sparkles, Upload, MessageSquarePlus, Github} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip } from "recharts";
@@ -22,6 +22,7 @@ import ProjectsBrowser from "./components/ProjectsBrowser";
 import NewProjectModal from "./components/NewProjectModal";
 import WelcomeModal from "./components/WelcomeModal";
 import FeedbackWidget from "./components/FeedbackWidget";
+import GithubPanel from "./components/GithubPanel";
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
 import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts, describeVisibleUsbDevices } from "./lib/webusbSerial";
@@ -346,6 +347,7 @@ export default function App() {
   // a ref so a re-render never reopens it, but signing in as someone else does.
   const [showWelcome, setShowWelcome] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [githubOpen, setGithubOpen] = useState(false);
   const [recentFetched, setRecentFetched] = useState(false);
   const welcomeShownForRef = useRef<string | null>(null);
   const [loadingRecent, setLoadingRecent] = useState(false);
@@ -1997,6 +1999,13 @@ export default function App() {
                   <Upload size={13} className="text-[var(--text-muted)]" />
                   <span>Import Arduino Project</span>
                 </button>
+                <button
+                  onClick={() => setGithubOpen(true)}
+                  className="w-[calc(100%-0.75rem)] text-left mx-1.5 px-2 py-1.5 flex items-center gap-2 text-[11px] text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] cursor-pointer transition rounded-md"
+                >
+                  <Github size={13} className="text-[var(--text-muted)]" />
+                  <span>Push to GitHub</span>
+                </button>
                 <input
                   ref={importFileInputRef}
                   type="file"
@@ -2460,6 +2469,17 @@ export default function App() {
           mcu={mcu}
           open={feedbackOpen}
           onOpenChange={setFeedbackOpen}
+        />
+      )}
+
+      {githubOpen && user && (
+        <GithubPanel
+          onClose={() => setGithubOpen(false)}
+          projectName={currentProjectName || "joint-agent-project"}
+          code={code}
+          description={description}
+          boardLabel={boardNames.get(boardId) || (mcu || "").toUpperCase()}
+          schematicJson={JSON.stringify({ components, connections }, null, 2)}
         />
       )}
 
