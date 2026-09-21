@@ -524,7 +524,7 @@ export default function App() {
       }
     };
 
-    const handleDisconnect = (e: any) => {
+    const handleDisconnect = (_e: any) => {
       if (mcuPluggedInRef.current) {
         logToTerminal("[USB] Device disconnected.", "error");
         autoConnectedLogRef.current = false;
@@ -532,22 +532,33 @@ export default function App() {
         setDetectedBoard(null);
         setDetectedBoardId(null);
         setDetectedMcu(null);
+        webSerialPortRef.current = null;
       }
     };
 
-    if ("serial" in navigator) {
-      (navigator as any).serial.addEventListener("connect", handleConnect);
-      (navigator as any).serial.addEventListener("disconnect", handleDisconnect);
-
-      // Check already paired devices
-
+    // Both transports, because a board reached over WebUSB (every Android
+    // phone) fires its unplug on navigator.usb. Listening only on
+    // navigator.serial left the green "connected" chip up forever after the
+    // cable came out.
+    const serial = (navigator as any).serial;
+    const usb = (navigator as any).usb;
+    if (serial) {
+      serial.addEventListener("connect", handleConnect);
+      serial.addEventListener("disconnect", handleDisconnect);
+    }
+    if (usb) {
+      // A USBDevice has no getInfo(), so it cannot go through handleConnect —
+      // and an arriving device is not something to auto-adopt anyway. Only the
+      // departure matters here.
+      usb.addEventListener("disconnect", handleDisconnect);
     }
 
     return () => {
-      if ("serial" in navigator) {
-        (navigator as any).serial.removeEventListener("connect", handleConnect);
-        (navigator as any).serial.removeEventListener("disconnect", handleDisconnect);
+      if (serial) {
+        serial.removeEventListener("connect", handleConnect);
+        serial.removeEventListener("disconnect", handleDisconnect);
       }
+      if (usb) usb.removeEventListener("disconnect", handleDisconnect);
     };
   }, []);
 
@@ -574,6 +585,21 @@ export default function App() {
    * no longer dead-ends on whichever API happened to be present.
    */
   const requestBoardPort = async (): Promise<any> => {
+    // Android exposes navigator.serial but never lists a port on it, so
+    // trying Web Serial first there guarantees an empty chooser the user has
+    // to dismiss before the real one appears. Ask WebUSB first instead.
+    const androidFirst = /Android/.test(navigator.userAgent) && hasWebUsb;
+
+    if (androidFirst) {
+      try {
+        return await requestUsbSerialPort();
+      } catch (err: any) {
+        if (!hasWebSerial || err?.name !== "NotFoundError") throw err;
+        logToTerminal("[USB] No WebUSB device chosen. Trying Web Serial...", "info");
+        return await (navigator as any).serial.requestPort();
+      }
+    }
+
     if (hasWebSerial) {
       try {
         return await (navigator as any).serial.requestPort();
@@ -601,7 +627,8 @@ export default function App() {
       const usbDevices = hasWebUsb ? (await (navigator as any).usb.getDevices()).length : 0;
       logToTerminal(
         `[USB] Browser support: Web Serial=${hasWebSerial ? "yes" : "no"}, WebUSB=${hasWebUsb ? "yes" : "no"} ` +
-        `| already authorised: ${serialPorts} serial, ${usbDevices} USB`,
+        `| already authorised: ${serialPorts} serial, ${usbDevices} USB` +
+        `${window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? " | reduced-motion on" : ""}`,
         "info"
       );
     } catch { /* diagnostics must never block a scan */ }
@@ -1096,7 +1123,19 @@ export default function App() {
           write: (data: string) => logToTerminal(`[FLASH] ${data}`, "info"),
         };
         const loader = new ESPLoader({ transport, baudrate: 115200, terminal: term });
-        await loader.main();
+        try {
+          await loader.main();
+        } catch (connectErr: any) {
+          // The auto-reset circuit is the fragile part: it depends on the
+          // devkit wiring DTR/RTS to EN/IO0, and on control-transfer timing
+          // that is far less predictable over WebUSB on a phone than over a
+          // desktop serial driver. A board held in download mode by hand needs
+          // no reset at all, so offer that before giving up.
+          logToTerminal(`[FLASH] ${connectErr.message}. Retrying without the auto-reset...`, "info");
+          logToTerminal("[FLASH] Hold the BOOT (or FLASH) button NOW and keep holding it.", "info");
+          await new Promise((r) => setTimeout(r, 3000));
+          await loader.main("no_reset");
+        }
 
         // Convert base64 to Uint8Array for esptool-js writeFlash
         const base64ToUint8Array = (base64: string) => {

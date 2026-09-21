@@ -763,8 +763,14 @@ pre[class*="language-"] {
   0%, 60%, 100% { opacity: 0.2; }
   30%           { opacity: 1; }
 }
+/* Reduced motion still needs to know the build is running — "is it working or
+   is it stuck" is information, not decoration, and killing the animation
+   outright is what made this invisible on phones, where Reduce Motion is
+   commonly on (Android turns it on with battery saver). Keep a slow, low
+   amplitude opacity fade: no movement, no transform, nothing vestibular. */
 @media (prefers-reduced-motion: reduce) {
-  .term-ellipsis > span { animation: none; opacity: 1; }
+  .term-ellipsis > span { animation-duration: 2.4s; opacity: 0.55; }
+  @keyframes term-dot { 0%, 60%, 100% { opacity: 0.55; } 30% { opacity: 1; } }
 }
 
 /* ---------------------------------------------------------------------------

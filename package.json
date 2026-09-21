@@ -11,7 +11,8 @@
     "lint": "tsc --noEmit",
     "test:flash": "node test/avrFlash.sim.mjs",
     "test:webusb": "node test/webusb.sim.mjs",
-    "test": "npm run test:flash && npm run test:webusb"
+    "test": "npm run test:flash && npm run test:webusb && npm run test:esp32",
+    "test:esp32": "node test/esp32.sim.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

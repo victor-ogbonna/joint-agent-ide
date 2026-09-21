@@ -90,7 +90,14 @@ export class WebUsbSerialPort {
   }
 
   async open({ baudRate = 115200 }: { baudRate?: number } = {}): Promise<void> {
-    if (this.readable) throw new Error("The port is already open.");
+    // Re-open rather than throw. esptool-js opens the port itself, and a
+    // caller that opened it first (board detection, or an attempt that died
+    // before its finally ran) would otherwise get "The port is already open"
+    // surfaced as esptool's generic "Failed to connect with the device" —
+    // blaming the board for a state problem on this side.
+    if (this.readable) {
+      try { await this.close(); } catch { /* fall through and re-open */ }
+    }
     if (!this.device.opened) await this.device.open();
     if (!this.device.configuration) await this.device.selectConfiguration(1);
 
