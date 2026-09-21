@@ -324,12 +324,42 @@ export function ftdiDivisor(baud: number): number {
   return value & 0xffff;
 }
 
-/** Ask the user to pick a board, then wrap it in the Web Serial surface. */
+/** What the browser can currently see, for diagnosing an empty picker. */
+export async function describeVisibleUsbDevices(): Promise<string> {
+  if (!isWebUsbAvailable()) return "WebUSB is not available in this browser.";
+  try {
+    const devices: any[] = await (navigator as any).usb.getDevices();
+    if (!devices.length) return "No USB devices have been authorised yet.";
+    return devices
+      .map((d) => `0x${d.vendorId.toString(16).padStart(4, "0")}:0x${d.productId.toString(16).padStart(4, "0")}${driverFor(d) ? "" : " (no driver)"}`)
+      .join(", ");
+  } catch {
+    return "Could not enumerate USB devices.";
+  }
+}
+
+/**
+ * Ask the user to pick a board, then wrap it in the Web Serial surface.
+ *
+ * Deliberately `acceptAllDevices` rather than a vendor-id filter list. A filter
+ * that does not happen to name your exact bridge produces Chrome's "No
+ * compatible devices found" with an empty list, which is indistinguishable
+ * from nothing being plugged in — and no list of vendor ids is ever complete.
+ * Show everything the phone can see and validate the choice afterwards, where
+ * we can say something useful about it.
+ */
 export async function requestUsbSerialPort(): Promise<WebUsbSerialPort> {
-  const device = await (navigator as any).usb.requestDevice({ filters: USB_DEVICE_FILTERS });
+  const device = await (navigator as any).usb.requestDevice({
+    filters: [],
+    acceptAllDevices: true,
+  });
   const kind = driverFor(device);
   if (!kind) {
-    throw new Error("That USB device is not a serial bridge this platform can drive.");
+    const id = `0x${device.vendorId.toString(16).padStart(4, "0")}:0x${device.productId.toString(16).padStart(4, "0")}`;
+    throw new Error(
+      `That device (${id}) does not present a USB-serial interface this platform can drive. ` +
+      `Supported bridges are CDC-ACM (genuine Arduino, native-USB ESP32), CH340, CP210x and FTDI.`
+    );
   }
   return new WebUsbSerialPort(device, kind);
 }

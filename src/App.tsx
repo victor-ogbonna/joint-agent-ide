@@ -24,7 +24,7 @@ import WelcomeModal from "./components/WelcomeModal";
 import FeedbackWidget from "./components/FeedbackWidget";
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
-import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts } from "./lib/webusbSerial";
+import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts, describeVisibleUsbDevices } from "./lib/webusbSerial";
 import { createProject, getProject, updateProject, renameProject, listProjects, ProjectSummary, trimMessagesForStorage } from "./lib/projects";
 import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlock, primeLastKnownBlock, QuotaBlockedInfo } from "./lib/aiClient";
 
@@ -576,12 +576,13 @@ export default function App() {
 
     if (canReachBoard) {
       try {
-        logToTerminal(
-          hasWebSerial
-            ? "[USB] Web Serial supported. Prompting for port..."
-            : "[USB] Using WebUSB. Prompting for device...",
-          "info"
-        );
+        if (hasWebSerial) {
+          logToTerminal("[USB] Web Serial supported. Prompting for port...", "info");
+        } else {
+          logToTerminal("[USB] Using WebUSB. Prompting for device...", "info");
+          logToTerminal(`[USB] Already authorised: ${await describeVisibleUsbDevices()}`, "info");
+          logToTerminal("[USB] If the list is empty, the phone is not seeing the board — check the OTG adapter and that the cable carries data.", "info");
+        }
         const port = await requestBoardPort();
         webSerialPortRef.current = port;
         await port.open({ baudRate: 115200 });
