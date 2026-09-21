@@ -24,6 +24,7 @@ import WelcomeModal from "./components/WelcomeModal";
 import FeedbackWidget from "./components/FeedbackWidget";
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
+import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts } from "./lib/webusbSerial";
 import { createProject, getProject, updateProject, renameProject, listProjects, ProjectSummary, trimMessagesForStorage } from "./lib/projects";
 import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlock, primeLastKnownBlock, QuotaBlockedInfo } from "./lib/aiClient";
 
@@ -41,16 +42,20 @@ import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlo
  * Preference order: the port the user actually connected, then a port whose
  * USB id we recognise as a microcontroller, then any non-Intel port, then ask.
  */
-const pickBoardPort = async (preferred: any): Promise<any> => {
+const pickBoardPort = async (
+  preferred: any,
+  granted: () => Promise<any[]>,
+  request: () => Promise<any>
+): Promise<any> => {
   if (preferred) return preferred;
-  const ports: any[] = await (navigator as any).serial.getPorts();
+  const ports: any[] = await granted();
   const infoOf = (p: any) => { try { return p.getInfo() || {}; } catch { return {}; } };
   const candidates = ports.filter((p) => infoOf(p).usbVendorId !== 0x8086);
   const known = candidates.find((p) => {
     const i = infoOf(p);
     return Boolean(getBoardInfo(i.usbVendorId, i.usbProductId));
   });
-  return known || candidates[0] || (await (navigator as any).serial.requestPort());
+  return known || candidates[0] || (await request());
 };
 
 const describePort = (port: any): string => {
@@ -75,7 +80,7 @@ const describePort = (port: any): string => {
  * what is actually true instead.
  */
 function describeSerialSupport(): { supported: boolean; reason: string; advice: string } {
-  if (typeof navigator !== "undefined" && "serial" in navigator) {
+  if (typeof navigator !== "undefined" && ("serial" in navigator || "usb" in navigator)) {
     return { supported: true, reason: "", advice: "" };
   }
   const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
@@ -90,14 +95,16 @@ function describeSerialSupport(): { supported: boolean; reason: string; advice: 
     return {
       supported: false,
       reason: "Apple requires every browser on iPhone and iPad to use its WebKit engine, and WebKit does not implement Web Serial or WebUSB.",
-      advice: "Flashing from an iPhone or iPad is not possible from a web page today — not in Safari, and not in Chrome for iOS either, because it is WebKit underneath. Everything else here works: write, compile and save. To flash, open this project on a computer in Chrome or Edge.",
+      advice: "Flashing from an iPhone or iPad is not possible from a web page today — not in Safari, and not in Chrome for iOS either, because it is WebKit underneath. Everything else here works: write, compile and save. To flash, open this project on a computer, or on an Android phone in Chrome.",
     };
   }
   if (isAndroid) {
+    // Reachable only in an Android browser with neither API — Firefox, or a
+    // webview. Chrome for Android has WebUSB and is handled above.
     return {
       supported: false,
-      reason: "Chrome on Android does not expose Web Serial.",
-      advice: "Writing, compiling and saving all work here. Flashing from an Android phone needs WebUSB, which this platform does not implement yet. For now, open the project on a computer in Chrome or Edge to flash.",
+      reason: "This Android browser exposes neither Web Serial nor WebUSB.",
+      advice: "Open this page in Chrome for Android, which can flash over WebUSB with a USB-C OTG adapter.",
     };
   }
   if (isFirefox) {
@@ -550,15 +557,32 @@ export default function App() {
   const webSerialPortRef = useRef<any>(null);
   const serialWsRef = useRef<WebSocket | null>(null);
   const hasWebSerial = "serial" in navigator;
+  // Chrome on Android has no Web Serial but does have WebUSB, which is enough:
+  // src/lib/webusbSerial.ts drives the bridge chip directly and presents the
+  // same surface, so the STK500 and ESP32 code runs unchanged on a phone.
+  const hasWebUsb = isWebUsbAvailable();
+  const canReachBoard = hasWebSerial || hasWebUsb;
+
+  /** Ask the user to authorise a board, on whichever transport exists. */
+  const requestBoardPort = async (): Promise<any> =>
+    hasWebSerial ? await (navigator as any).serial.requestPort() : await requestUsbSerialPort();
+
+  /** Boards already authorised in a previous session. */
+  const grantedBoardPorts = async (): Promise<any[]> =>
+    hasWebSerial ? await (navigator as any).serial.getPorts() : await getGrantedUsbSerialPorts();
 
   const handleAutoDetect = async () => {
     logToTerminal("[USB] Scanning for connected microcontrollers...", "info");
 
-    if (hasWebSerial) {
-      // ===== Chrome/Edge path: use Web Serial API =====
+    if (canReachBoard) {
       try {
-        logToTerminal("[USB] Web Serial API supported. Prompting for port...", "info");
-        const port = await (navigator as any).serial.requestPort();
+        logToTerminal(
+          hasWebSerial
+            ? "[USB] Web Serial supported. Prompting for port..."
+            : "[USB] Using WebUSB. Prompting for device...",
+          "info"
+        );
+        const port = await requestBoardPort();
         webSerialPortRef.current = port;
         await port.open({ baudRate: 115200 });
         const info = await port.getInfo();
@@ -607,8 +631,8 @@ export default function App() {
         await handleBackendDetect();
       }
     } else {
-      // No Web Serial: explain honestly rather than probing the server, which
-      // has no USB devices and only ever produced a misleading dead end.
+      // Neither transport: explain honestly rather than probing the server,
+      // which has no USB devices and only ever produced a misleading dead end.
       const { reason, advice } = describeSerialSupport();
       logToTerminal(`[USB] This browser cannot reach a board. ${reason}`, "error");
       logToTerminal(`[USB] ${advice}`, "info");
@@ -803,7 +827,7 @@ export default function App() {
 
     try {
       if ("serial" in navigator) {
-        const port = await pickBoardPort(webSerialPortRef.current);
+        const port = await pickBoardPort(webSerialPortRef.current, grantedBoardPorts, requestBoardPort);
         webSerialPortRef.current = port;
         logToTerminal(`[RETRIEVE] Target port: ${describePort(port)}.`, "info");
 
@@ -961,7 +985,7 @@ export default function App() {
     // upload` and looks for the board on the SERVER's USB ports. The server is
     // in a datacentre with no serial devices, so that path could never reach a
     // user's board — Arduino flashing simply did not work for anybody.
-    if (!hasWebSerial) {
+    if (!canReachBoard) {
       const { reason, advice } = describeSerialSupport();
       logToTerminal(`[FLASH] Cannot flash from this browser. ${reason}`, "error");
       logToTerminal(`[FLASH] ${advice}`, "info");
@@ -980,7 +1004,7 @@ export default function App() {
         }
         if (!compiled?.binary) throw new Error("No firmware produced by the build.");
 
-        avrPort = await pickBoardPort(webSerialPortRef.current);
+        avrPort = await pickBoardPort(webSerialPortRef.current, grantedBoardPorts, requestBoardPort);
         webSerialPortRef.current = avrPort;
 
         logToTerminal(`[FLASH] Target port: ${describePort(avrPort)}.`, "info");
@@ -1022,7 +1046,7 @@ export default function App() {
           compiled = compiledResult.data;
         }
 
-        const port = await pickBoardPort(webSerialPortRef.current);
+        const port = await pickBoardPort(webSerialPortRef.current, grantedBoardPorts, requestBoardPort);
         webSerialPortRef.current = port;
 
         logToTerminal(`[FLASH] Target port: ${describePort(port)}.`, "info");

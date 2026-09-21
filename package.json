@@ -9,7 +9,9 @@
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test:flash": "node test/avrFlash.sim.mjs"
+    "test:flash": "node test/avrFlash.sim.mjs",
+    "test:webusb": "node test/webusb.sim.mjs",
+    "test": "npm run test:flash && npm run test:webusb"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
