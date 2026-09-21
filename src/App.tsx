@@ -594,7 +594,10 @@ export default function App() {
 
     if (androidFirst) {
       try {
-        return await requestUsbSerialPort();
+        logToTerminal("[USB] Opening the WebUSB chooser…", "info");
+        const p = await requestUsbSerialPort();
+        logToTerminal("[USB] Transport: WebUSB.", "info");
+        return p;
       } catch (err: any) {
         if (!hasWebSerial || err?.name !== "NotFoundError") throw err;
         logToTerminal("[USB] No WebUSB device chosen. Trying Web Serial...", "info");
@@ -604,14 +607,19 @@ export default function App() {
 
     if (hasWebSerial) {
       try {
-        return await (navigator as any).serial.requestPort();
+        logToTerminal("[USB] Opening the Web Serial chooser…", "info");
+        const p = await (navigator as any).serial.requestPort();
+        logToTerminal("[USB] Transport: Web Serial.", "info");
+        return p;
       } catch (err: any) {
         const empty = err?.name === "NotFoundError";
         if (!empty || !hasWebUsb) throw err;
         logToTerminal("[USB] Web Serial offered no ports. Trying WebUSB instead...", "info");
       }
     }
-    return await requestUsbSerialPort();
+    const p = await requestUsbSerialPort();
+    logToTerminal("[USB] Transport: WebUSB.", "info");
+    return p;
   };
 
   /** Boards already authorised in a previous session. */
@@ -637,10 +645,10 @@ export default function App() {
 
     if (canReachBoard) {
       try {
-        if (hasWebSerial) {
-          logToTerminal("[USB] Web Serial supported. Prompting for port...", "info");
-        } else {
-          logToTerminal("[USB] Using WebUSB. Prompting for device...", "info");
+        if (!hasWebSerial) {
+          // Reported what the browser HAS, not which transport actually ran —
+          // which made every mobile log ambiguous about the thing being
+          // debugged. requestBoardPort now names the transport it used.
           logToTerminal(`[USB] Already authorised: ${await describeVisibleUsbDevices()}`, "info");
           logToTerminal("[USB] If the list is empty, the phone is not seeing the board — check the OTG adapter and that the cable carries data.", "info");
         }
