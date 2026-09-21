@@ -152,8 +152,51 @@ async function run(label, { preOpen = false } = {}) {
   }
 }
 
+/**
+ * After flashing, the chip must be reset with IO0 HIGH so it boots the new
+ * sketch. esptool's after('hard_reset') only calls setRTS(false), which is a
+ * no-op when ClassicReset already left RTS false — so the board stays in the
+ * ROM bootloader until it is power-cycled. Assert that the app's own reset
+ * really produces a normal-boot release.
+ */
+async function runPostFlashReset(label) {
+  const rom = new Esp32Rom();
+  const port = new WebUsbSerialPort(mockCh340(rom), "ch34x");
+  const transport = new Transport(port, false);
+  await port.open({ baudRate: 115200 });
+
+  // Pretend a flash just finished: the connect sequence leaves DTR and RTS
+  // both deasserted, with the chip sitting in download mode.
+  await transport.setDTR(false);
+  await transport.setRTS(true);
+  await transport.setDTR(true);
+  await transport.setRTS(false);          // -> DOWNLOAD mode
+  const afterFlash = rom.downloadMode;
+
+  // esptool's own idea of a hard reset, for comparison.
+  await transport.setRTS(false);
+  const afterEsptoolHardReset = rom.downloadMode;
+
+  // What the app now does instead.
+  await transport.setDTR(false);
+  await transport.setRTS(true);
+  await new Promise((r) => setTimeout(r, 20));
+  await transport.setRTS(false);
+  const afterOurReset = rom.downloadMode;
+
+  await port.close();
+  const ok = afterFlash === true && afterEsptoolHardReset === true && afterOurReset === false;
+  report(
+    `${label} -> in download after flash: ${afterFlash}; ` +
+    `after esptool hard_reset: ${afterEsptoolHardReset} (unchanged = the bug); ` +
+    `after our reset: ${afterOurReset}${afterOurReset === false ? " (runs the sketch)" : " (STILL STUCK)"}`,
+    ok
+  );
+}
+
 console.log("esptool-js through the WebUSB adapter (simulated CH340 + ESP32 ROM)");
 await run("clean port                ");
 await run("port left open by caller  ", { preOpen: true });
+await runPostFlashReset("post-flash reset          ");
 console.log(failures ? `\n${failures} failing case(s)` : "\nAll cases passed.");
 process.exit(failures ? 1 : 0);

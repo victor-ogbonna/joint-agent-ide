@@ -673,7 +673,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
             send({
               type: "tool_progress",
               text: toolName === "generate_project"
-                ? "Writing the firmware and schematic…"
+                ? "Writing the firmware…"
                 : "Working…",
             });
           };

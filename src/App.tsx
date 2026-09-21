@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Sparkles, Upload, MessageSquarePlus, Github} from "lucide-react";
+import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Sparkles, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip } from "recharts";
@@ -23,10 +23,11 @@ import NewProjectModal from "./components/NewProjectModal";
 import WelcomeModal from "./components/WelcomeModal";
 import FeedbackWidget from "./components/FeedbackWidget";
 import GithubPanel from "./components/GithubPanel";
+import WebConsolePanel from "./components/WebConsolePanel";
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
 import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts, describeVisibleUsbDevices } from "./lib/webusbSerial";
-import { createProject, getProject, updateProject, renameProject, listProjects, ProjectSummary, trimMessagesForStorage } from "./lib/projects";
+import { createProject, getProject, updateProject, renameProject, listProjects, deleteProject, ProjectSummary, trimMessagesForStorage } from "./lib/projects";
 import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlock, primeLastKnownBlock, QuotaBlockedInfo } from "./lib/aiClient";
 
 /**
@@ -348,6 +349,7 @@ export default function App() {
   const [showWelcome, setShowWelcome] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [githubOpen, setGithubOpen] = useState(false);
+  const [webConsoleOpen, setWebConsoleOpen] = useState(false);
   const [recentFetched, setRecentFetched] = useState(false);
   const welcomeShownForRef = useRef<string | null>(null);
   const [loadingRecent, setLoadingRecent] = useState(false);
@@ -1166,7 +1168,22 @@ export default function App() {
           }
         });
 
-        await loader.after();
+        // esptool's own after('hard_reset') is a no-op here: HardReset does
+        // nothing but setRTS(false), which assumes RTS is still asserted from
+        // the connect sequence — but ClassicReset ends with RTS already false.
+        // No edge, no reset, so the chip stays in the ROM bootloader and the
+        // freshly written sketch does not run until the board is power-cycled.
+        // Drive a real reset: IO0 high so it boots the application, then pulse
+        // EN low and release.
+        logToTerminal("[FLASH] Resetting the board to run your code…", "info");
+        try {
+          await transport.setDTR(false);          // IO0 high -> normal boot
+          await transport.setRTS(true);           // EN low  -> held in reset
+          await new Promise((r) => setTimeout(r, 120));
+          await transport.setRTS(false);          // EN high -> run the new sketch
+        } catch (resetErr: any) {
+          logToTerminal(`[FLASH] Could not auto-reset (${resetErr.message}). Press the EN/RST button to start your code.`, "info");
+        }
         await transport.disconnect();
         transport = null;
         logToTerminal("==========================================================", "success");
@@ -1682,6 +1699,33 @@ export default function App() {
     reader.readAsText(file);
   };
 
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
+
+  /** Delete from the sidebar. Deleting the OPEN project has to clear the
+   *  workspace too, or the editor keeps showing a project that no longer
+   *  exists and the next autosave silently recreates it. */
+  const handleDeleteProject = async (projectId: string, name: string) => {
+    if (!user) return;
+    if (!window.confirm(`Delete "${name}"? This can't be undone.`)) return;
+    setDeletingProjectId(projectId);
+    try {
+      await deleteProject(user.uid, projectId);
+      if (projectId === currentProjectId) {
+        skipNextAutosaveRef.current = true;
+        setCurrentProjectId(null);
+        setCurrentProjectName("");
+        setChatMessages([]);
+        setTerminalLines([]);
+      }
+      logToTerminal(`[PROJECT] Deleted "${name}".`, "info");
+      await refreshRecentProjects();
+    } catch (err: any) {
+      logToTerminal(`[PROJECT] Could not delete "${name}": ${err.message}`, "error");
+    } finally {
+      setDeletingProjectId(null);
+    }
+  };
+
   const refreshRecentProjects = React.useCallback(async () => {
     if (!user) { setRecentProjects([]); return; }
     setLoadingRecent(true);
@@ -2120,8 +2164,8 @@ export default function App() {
                   {recentProjects.slice(0, 12).map((p) => {
                     const isOpen = p.id === currentProjectId;
                     return (
+                      <div key={p.id} className="relative group flex items-center">
                       <button
-                        key={p.id}
                         onClick={() => { if (!isOpen) handleOpenProject(p.id); }}
                         title={`${p.name} — ${boardNames.get(p.boardId) || (p.mcu || "").toUpperCase()}`}
                         className={`w-[calc(100%-0.75rem)] text-left mx-1.5 px-2 py-1.5 flex items-center gap-2 text-[11px] rounded-md transition ${
@@ -2144,11 +2188,25 @@ export default function App() {
                           </span>
                         </span>
                         {isOpen && (
-                          <span className="text-[8px] uppercase tracking-wider text-[var(--accent-primary)] shrink-0">
+                          <span className="text-[8px] uppercase tracking-wider text-[var(--accent-primary)] shrink-0 mr-5">
                             open
                           </span>
                         )}
                       </button>
+                      {/* A sibling, not a child: a button inside a button is
+                          invalid and the click would not reach it. Always
+                          visible on touch, where there is no hover. */}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleDeleteProject(p.id, p.name); }}
+                        disabled={deletingProjectId === p.id}
+                        title={`Delete ${p.name}`}
+                        className="absolute right-2.5 p-1 rounded text-[var(--text-subtle)] hover:text-red-400 hover:bg-red-500/10 transition opacity-100 sm:opacity-0 sm:group-hover:opacity-100 disabled:opacity-50"
+                      >
+                        {deletingProjectId === p.id
+                          ? <Loader2 size={11} className="animate-spin" />
+                          : <Trash2 size={11} />}
+                      </button>
+                      </div>
                     );
                   })}
 
@@ -2186,6 +2244,9 @@ export default function App() {
               <div className="border-t border-[var(--border-main)] p-1.5 space-y-0.5 mt-auto shrink-0">
                 <button onClick={() => { setIsTerminalOpen(!isTerminalOpen); if (isNarrow) setMobilePane("editor"); }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isTerminalOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
                   <TerminalIcon size={13} /> Terminal
+                </button>
+                <button onClick={() => setWebConsoleOpen(true)} className="w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]">
+                  <Globe size={13} /> Web Console
                 </button>
                 <button onClick={() => { setIsSerialMonitorOpen(!isSerialMonitorOpen); if (isNarrow) setMobilePane("editor"); }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isSerialMonitorOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
                   <Monitor size={13} /> Serial Monitor
@@ -2554,6 +2615,13 @@ export default function App() {
           mcu={mcu}
           open={feedbackOpen}
           onOpenChange={setFeedbackOpen}
+        />
+      )}
+
+      {webConsoleOpen && (
+        <WebConsolePanel
+          onClose={() => setWebConsoleOpen(false)}
+          lines={terminalLines.map((l) => l.text)}
         />
       )}
 

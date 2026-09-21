@@ -101,7 +101,9 @@ export default function ProjectsBrowser({ onClose, onOpenProject, onNewProject, 
                     <button
                       onClick={(e) => handleDelete(e, p.id)}
                       disabled={deletingId === p.id}
-                      className="p-1 text-[var(--text-muted)] hover:text-red-400 rounded opacity-0 group-hover:opacity-100 transition shrink-0"
+                      // Hover-reveal hides this completely on a touch screen, where there is
+                      // no hover — the delete control simply did not exist on a phone.
+                      className="p-1 text-[var(--text-muted)] hover:text-red-400 rounded opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition shrink-0"
                       title="Delete project"
                     >
                       {deletingId === p.id ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
