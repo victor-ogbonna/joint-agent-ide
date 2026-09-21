@@ -685,19 +685,15 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     await incrementTokenUsage(req.uid!, req.quota!.subscriptionStatus, outputTokens);
 
     if (call?.name === "generate_project") {
-      // Claims only what actually happened. The old wording promised a "visual
-      // schematic layout" on every generation, including ones that produced no
-      // schematic at all, which read as the product lying about its own output.
-      {
-        const hasSchematic = Array.isArray((call.args as any)?.components) && (call.args as any).components.length > 0;
-        send({
-          type: "project_update",
-          text: hasSchematic
-            ? "Code and schematic are in the workspace."
-            : "Code is in the workspace.",
-          projectUpdate: call.args,
-        });
-      }
+      // Claims only what actually happened. Schematic rendering is not shipped
+      // yet, so even when the model emits components there is nothing for the
+      // user to look at — announcing one read as the product lying about its
+      // own output. Restore the conditional wording when the viewer lands.
+      send({
+        type: "project_update",
+        text: "Code is in the workspace.",
+        projectUpdate: call.args,
+      });
     } else if (call?.name === "execute_terminal_command") {
       send({ type: "command", text: `Executing command: \`${call.args.command}\``, command: call.args.command });
     }

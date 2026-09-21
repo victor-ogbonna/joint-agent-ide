@@ -565,9 +565,26 @@ export default function App() {
   const hasWebUsb = isWebUsbAvailable();
   const canReachBoard = hasWebSerial || hasWebUsb;
 
-  /** Ask the user to authorise a board, on whichever transport exists. */
-  const requestBoardPort = async (): Promise<any> =>
-    hasWebSerial ? await (navigator as any).serial.requestPort() : await requestUsbSerialPort();
+  /**
+   * Ask the user to authorise a board.
+   *
+   * Web Serial first where it exists, but NOT exclusively: some Android builds
+   * expose navigator.serial while listing no ports at all, and on Android the
+   * real transport is WebUSB. Falling through means "the chooser was empty"
+   * no longer dead-ends on whichever API happened to be present.
+   */
+  const requestBoardPort = async (): Promise<any> => {
+    if (hasWebSerial) {
+      try {
+        return await (navigator as any).serial.requestPort();
+      } catch (err: any) {
+        const empty = err?.name === "NotFoundError";
+        if (!empty || !hasWebUsb) throw err;
+        logToTerminal("[USB] Web Serial offered no ports. Trying WebUSB instead...", "info");
+      }
+    }
+    return await requestUsbSerialPort();
+  };
 
   /** Boards already authorised in a previous session. */
   const grantedBoardPorts = async (): Promise<any[]> =>
@@ -575,6 +592,19 @@ export default function App() {
 
   const handleAutoDetect = async () => {
     logToTerminal("[USB] Scanning for connected microcontrollers...", "info");
+    // One line that says exactly what this browser can do. Without it a failed
+    // scan is unattributable: an empty chooser looks the same whether the API
+    // is missing, the phone is not in host mode, or Android's own driver has
+    // claimed the bridge chip.
+    try {
+      const serialPorts = hasWebSerial ? (await (navigator as any).serial.getPorts()).length : 0;
+      const usbDevices = hasWebUsb ? (await (navigator as any).usb.getDevices()).length : 0;
+      logToTerminal(
+        `[USB] Browser support: Web Serial=${hasWebSerial ? "yes" : "no"}, WebUSB=${hasWebUsb ? "yes" : "no"} ` +
+        `| already authorised: ${serialPorts} serial, ${usbDevices} USB`,
+        "info"
+      );
+    } catch { /* diagnostics must never block a scan */ }
 
     if (canReachBoard) {
       try {
@@ -1054,6 +1084,11 @@ export default function App() {
 
         logToTerminal(`[FLASH] Target port: ${describePort(port)}.`, "info");
         logToTerminal("[FLASH] Using Web Serial API for ESP32 flashing...", "info");
+        // esptool-js opens the port itself. If anything still holds it open —
+        // board detection, or a previous attempt that failed mid-flight — that
+        // open throws and surfaces as "Failed to connect with the device",
+        // which points the user at their hardware instead of at the real cause.
+        try { await port.close(); } catch { /* not open, the normal case */ }
         transport = new Transport(port, true);
         const term = {
           clean: () => { },
@@ -1113,8 +1148,19 @@ export default function App() {
           logToTerminal("[FLASH] Port selection cancelled.", "info");
           return { success: false, error: "Port selection cancelled." };
         }
-        logToTerminal(`[FLASH] Web Serial flash failed: ${err.message}. Falling back to backend PlatformIO...`, "info");
-        return await handleBackendFlash(codeToFlash);
+        // The backend fallback used to run here. It runs `pio run -t upload`
+        // on the SERVER, which is a datacentre container with no USB, so it
+        // could only ever fail with "Please specify upload_port" — burying the
+        // real, actionable error under twenty seconds and a udev-rules notice.
+        logToTerminal(`[FLASH] ${err.message}`, "error");
+        logToTerminal(
+          "[FLASH] The ESP32 did not enter download mode. Hold the BOOT (or FLASH) button, " +
+          "press and release EN/RST, keep BOOT held for a second, then flash again. " +
+          "If it still fails, unplug and replug the board, and close any serial monitor using the port.",
+          "info"
+        );
+        setIsFlashing(false);
+        return { success: false, error: err.message };
       }
     }
   };

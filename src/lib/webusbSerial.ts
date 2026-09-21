@@ -366,9 +366,11 @@ export async function requestUsbSerialPort(): Promise<WebUsbSerialPort> {
       device = await (navigator as any).usb.requestDevice({ filters: USB_DEVICE_FILTERS });
     } else if (e?.name === "NotFoundError") {
       throw new Error(
-        "No USB device was selected. If the list was empty, the phone is not seeing the board: " +
-        "check that the OTG adapter is plugged in, that the cable carries data rather than only power, " +
-        "and that the board's power LED is on."
+        "No USB device was selected. If the list was EMPTY, the phone is not exposing the board to the " +
+        "browser. Three causes, in order of likelihood: the OTG adapter or cable is power-only rather " +
+        "than data; the phone is not supplying enough current (a Mega draws more than an ESP32 devkit); " +
+        "or Android's own USB-serial driver has already claimed the bridge chip, which puts it out of " +
+        "WebUSB's reach entirely."
       );
     } else {
       throw e;
