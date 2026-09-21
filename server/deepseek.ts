@@ -13,7 +13,13 @@
 // ---------------------------------------------------------------------------
 
 const BASE_URL = "https://api.deepseek.com";
-export const DEEPSEEK_MODEL = "deepseek-v4-flash";
+// The canonical rolling name. "deepseek-v4-flash" was an undocumented alias
+// that the API silently resolves to this same model (verified against
+// /chat/completions, which echoes the model it actually served) — but only
+// "deepseek-flash" and "deepseek-v4-pro" are advertised by /models, so the
+// alias is the one that could be retired without warning.
+// Rolling means a newer flash release is picked up with no code change.
+export const DEEPSEEK_MODEL = "deepseek-flash";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";

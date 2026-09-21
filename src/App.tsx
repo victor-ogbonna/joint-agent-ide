@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Sparkles, Upload } from "lucide-react";
+import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Sparkles, Upload, MessageSquarePlus} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip } from "recharts";
@@ -105,7 +105,7 @@ const PAID_TOKEN_CAP = 400000;
 
 const INITIAL_CODE = `/**
  * Joint-Agent IoT Core Node
- * Autonomous Blockchain Loop
+ * Agentic Embedded Development Loop
  */
 #include <Arduino.h>
 
@@ -282,9 +282,13 @@ export default function App() {
   // modal's own fetch so the list is visible without opening anything, but it
   // reuses handleOpenProject so there is only one code path for loading.
   const [recentProjects, setRecentProjects] = useState<ProjectSummary[]>([]);
+  // boardId -> display name, for labelling saved projects. Fetched once and
+  // shared, so projects created before boards were labelled still resolve.
+  const [boardNames, setBoardNames] = useState<Map<string, string>>(new Map());
   // Shown once per sign-in: "start new" vs "continue previous". Keyed on uid in
   // a ref so a re-render never reopens it, but signing in as someone else does.
   const [showWelcome, setShowWelcome] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [recentFetched, setRecentFetched] = useState(false);
   const welcomeShownForRef = useRef<string | null>(null);
   const [loadingRecent, setLoadingRecent] = useState(false);
@@ -1523,6 +1527,20 @@ export default function App() {
   // moment a project is created, renamed or saved, so this covers all of them.
   useEffect(() => { refreshRecentProjects(); }, [refreshRecentProjects, currentProjectId]);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/boards")
+      .then((r) => r.json())
+      .then((d) => {
+        if (cancelled) return;
+        const m = new Map<string, string>();
+        for (const b of d.boards || []) m.set(b.id, b.name);
+        setBoardNames(m);
+      })
+      .catch(() => { /* labels degrade to the chip family, which is still useful */ });
+    return () => { cancelled = true; };
+  }, []);
+
   // Wait for the first project fetch before deciding what the welcome dialog
   // should offer — opening it early would show "start your first project" to
   // someone who has twelve.
@@ -1669,7 +1687,7 @@ export default function App() {
   };
 
   return (
-    <div className="h-full bg-[var(--bg-root)] text-[var(--text-main)] flex flex-col antialiased overflow-hidden">
+    <div className="app-shell h-full bg-[var(--bg-root)] text-[var(--text-main)] flex flex-col antialiased overflow-hidden">
       {/* Universal Header — Glassmorphism */}
       <header className="h-12 border-b border-[var(--border-main)] header-glass px-2 sm:px-4 flex items-center justify-between shrink-0 z-30">
         <div className="flex items-center gap-1.5 sm:gap-3">
@@ -1693,34 +1711,36 @@ export default function App() {
           <div className="flex bg-[var(--bg-root)] p-[3px] rounded-lg border border-[var(--border-main)] shrink-0">
             <button
               onClick={() => setAppMode("agentic")}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-[10px] font-semibold tracking-wide uppercase transition-all duration-200 ${appMode === "agentic" ? "bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] shadow-sm" : "text-[var(--text-muted)] hover:text-[var(--text-main)]"
+              className={`flex items-center gap-1.5 px-3 py-1.5 sm:py-1 min-h-[34px] sm:min-h-0 rounded-md text-[10px] font-semibold tracking-wide uppercase transition-all duration-200 ${appMode === "agentic" ? "bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] shadow-sm" : "text-[var(--text-muted)] hover:text-[var(--text-main)]"
                 }`}
             >
-              <Bot size={11} className={appMode === "agentic" ? "text-[var(--accent-primary)]" : ""} /> Agent
+              <Bot size={11} className={appMode === "agentic" ? "text-[var(--accent-primary)]" : ""} />
+              <span className="hidden sm:inline">Agent</span>
             </button>
             <button
               onClick={() => setAppMode("manual")}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-[10px] font-semibold tracking-wide uppercase transition-all duration-200 ${appMode === "manual" ? "bg-[var(--accent-secondary-soft)] text-[var(--accent-secondary)] shadow-sm" : "text-[var(--text-muted)] hover:text-[var(--text-main)]"
+              className={`flex items-center gap-1.5 px-3 py-1.5 sm:py-1 min-h-[34px] sm:min-h-0 rounded-md text-[10px] font-semibold tracking-wide uppercase transition-all duration-200 ${appMode === "manual" ? "bg-[var(--accent-secondary-soft)] text-[var(--accent-secondary)] shadow-sm" : "text-[var(--text-muted)] hover:text-[var(--text-main)]"
                 }`}
             >
-              <PenTool size={11} className={appMode === "manual" ? "text-[var(--accent-secondary)]" : ""} /> Manual
+              <PenTool size={11} className={appMode === "manual" ? "text-[var(--accent-secondary)]" : ""} />
+              <span className="hidden sm:inline">Manual</span>
             </button>
           </div>
         </div>
 
         {/* Global Controls */}
         <div className="flex items-center gap-2 min-w-0">
-        <div className="flex items-center gap-2 overflow-x-auto terminal-scrollbar pr-1">
+        <div className="flex items-center gap-2 min-w-0 pr-1">
 
           {currentProjectId && (
-            <div className="flex items-center gap-1.5 bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-lg px-2 py-1 shrink-0">
+            <div className="flex items-center gap-1.5 bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-lg px-2 py-1 min-w-0">
               <FileCode size={12} className="text-[var(--text-muted)] shrink-0" />
               <input
                 value={currentProjectName}
                 onChange={(e) => setCurrentProjectName(e.target.value)}
                 onBlur={(e) => handleRenameProject(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-                className="bg-transparent border-none outline-none text-[11px] font-medium text-[var(--text-main)] w-24 sm:w-36 min-w-0"
+                className="bg-transparent border-none outline-none text-[11px] font-medium text-[var(--text-main)] w-full max-w-24 sm:max-w-36 min-w-0 py-1.5 sm:py-0"
                 placeholder="Project name"
                 title="Click to rename this project"
               />
@@ -1732,18 +1752,18 @@ export default function App() {
 
           <button
             onClick={() => setTheme(theme === "light" ? "dark" : "light")}
-            className="toolbar-btn p-1.5 rounded-lg text-[var(--text-muted)] shrink-0"
+            className="toolbar-btn p-2.5 sm:p-1.5 rounded-lg text-[var(--text-muted)] shrink-0"
             title={theme === "light" ? "Switch to Dark Mode" : "Switch to Light Mode"}
           >
             {theme === "light" ? <Moon size={14} /> : <Sun size={14} />}
           </button>
 
           {(detectedBoard && mcuPluggedIn) ? (
-            <div className="flex items-center gap-2 bg-green-500/5 px-2.5 py-1 rounded-lg border border-green-500/20 shrink-0 animate-slide-up">
+            <div className="flex items-center gap-2 bg-green-500/5 px-2.5 py-1 rounded-lg border border-green-500/20 min-w-0 animate-slide-up">
               <div className="relative w-1.5 h-1.5 rounded-full bg-green-500 status-online"></div>
-              <span className="text-[10px] font-mono text-green-400 flex items-center gap-1 tracking-wide">
-                <Usb size={10} />
-                {detectedBoard}
+              <span className="text-[10px] font-mono text-green-400 flex items-center gap-1 tracking-wide min-w-0">
+                <Usb size={10} className="shrink-0" />
+                <span className="truncate">{detectedBoard}</span>
               </span>
               <button
                 onClick={() => {
@@ -1763,7 +1783,7 @@ export default function App() {
           ) : (
             <button
               onClick={handleAutoDetect}
-              className="btn-lift flex items-center gap-1.5 bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] px-2.5 py-1 rounded-lg border border-[var(--border-main)] text-[10px] font-medium text-[var(--text-muted)] hover:text-[var(--text-main)] transition shrink-0"
+              className="btn-lift flex items-center gap-1.5 bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] px-2.5 py-1.5 sm:py-1 min-h-[34px] sm:min-h-0 rounded-lg border border-[var(--border-main)] text-[10px] font-medium text-[var(--text-muted)] hover:text-[var(--text-main)] transition shrink-0"
             >
               <Cpu size={12} className="text-[var(--accent-secondary)]" />
               <span className="hidden sm:inline">Detect Board</span>
@@ -1780,7 +1800,7 @@ export default function App() {
           <div className="relative shrink-0">
             <button
               onClick={handleOpenProfileMenu}
-              className="toolbar-btn p-1.5 rounded-lg text-[var(--text-muted)] flex items-center gap-1.5"
+              className="toolbar-btn p-2.5 sm:p-1.5 rounded-lg text-[var(--text-muted)] flex items-center gap-1.5"
               title={user?.email || undefined}
             >
               {user?.photoURL ? (
@@ -1838,6 +1858,13 @@ export default function App() {
                       )}
                     </div>
                   )}
+                  <button
+                    onClick={() => { setIsMenuOpen(false); setFeedbackOpen(true); }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition rounded-md mx-1 sm:hidden"
+                  >
+                    <MessageSquarePlus size={14} className="text-[var(--text-muted)]" />
+                    Send feedback
+                  </button>
                   <button
                     onClick={() => { setIsMenuOpen(false); signOut(); }}
                     className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition rounded-md mx-1"
@@ -1917,7 +1944,7 @@ export default function App() {
                       <button
                         key={p.id}
                         onClick={() => { if (!isOpen) handleOpenProject(p.id); }}
-                        title={p.name}
+                        title={`${p.name} — ${boardNames.get(p.boardId) || (p.mcu || "").toUpperCase()}`}
                         className={`w-[calc(100%-0.75rem)] text-left mx-1.5 px-2 py-1.5 flex items-center gap-2 text-[11px] rounded-md transition ${
                           isOpen
                             ? "bg-[var(--bg-hover)] text-[var(--text-main)]"
@@ -1928,7 +1955,15 @@ export default function App() {
                           size={13}
                           className={isOpen ? "text-[var(--accent-primary)] shrink-0" : "text-[var(--text-subtle)] shrink-0"}
                         />
-                        <span className="truncate flex-1">{p.name}</span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate">{p.name}</span>
+                          {/* Which board this project targets. Without it a
+                              list of names gives no clue whether "Blink" was
+                              built for an Uno or an ESP32. */}
+                          <span className="block truncate text-[9px] text-[var(--text-subtle)] leading-tight">
+                            {boardNames.get(p.boardId) || (p.mcu || "").toUpperCase()}
+                          </span>
+                        </span>
                         {isOpen && (
                           <span className="text-[8px] uppercase tracking-wider text-[var(--accent-primary)] shrink-0">
                             open
@@ -2203,7 +2238,7 @@ export default function App() {
       {/* Narrow-screen pane switcher — replaces the side-by-side split, which
           has no usable width on a phone. Hidden entirely on desktop. */}
       {isNarrow && (
-        <nav className="shrink-0 flex border-t border-[var(--border-main)] bg-[var(--bg-panel)]">
+        <nav className="app-bottom-nav shrink-0 flex border-t border-[var(--border-main)] bg-[var(--bg-panel)]">
           {([
             { id: "files" as const, label: "Files", icon: FolderOpen },
             ...(appMode === "agentic" ? [{ id: "agent" as const, label: "Agent", icon: Bot }] : []),
@@ -2330,8 +2365,18 @@ export default function App() {
         />
       )}
 
-      {/* The rail carries the trigger on wide layouts; this is the mobile fallback. */}
-      {user && isNarrow && <FeedbackWidget boardId={boardId} mcu={mcu} />}
+      {/* The rail carries the trigger on wide layouts. On phones the rail is
+          hidden and a floating button landed on top of the files control, so
+          the trigger moves into the profile menu and only the panel renders. */}
+      {user && isNarrow && (
+        <FeedbackWidget
+          variant="headless"
+          boardId={boardId}
+          mcu={mcu}
+          open={feedbackOpen}
+          onOpenChange={setFeedbackOpen}
+        />
+      )}
 
       {showWelcome && user && (
         <WelcomeModal
@@ -2342,6 +2387,7 @@ export default function App() {
           onOpenProject={(id) => { setShowWelcome(false); handleOpenProject(id); }}
           onBrowseAll={() => { setShowWelcome(false); setShowProjectsBrowser(true); }}
           onClose={() => setShowWelcome(false)}
+          boardNames={boardNames}
         />
       )}
 

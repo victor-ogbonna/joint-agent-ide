@@ -10,6 +10,8 @@ interface WelcomeModalProps {
   onOpenProject: (projectId: string) => void;
   onBrowseAll: () => void;
   onClose: () => void;
+  /** boardId -> display name, so the list names the actual board. */
+  boardNames?: Map<string, string>;
 }
 
 const RECENT_SHOWN = 4;
@@ -27,7 +29,7 @@ const when = (ts: any): string => {
 };
 
 export default function WelcomeModal({
-  displayName, projects, loading, onNewProject, onOpenProject, onBrowseAll, onClose,
+  displayName, projects, loading, onNewProject, onOpenProject, onBrowseAll, onClose, boardNames,
 }: WelcomeModalProps) {
   const recent = projects.slice(0, RECENT_SHOWN);
 
@@ -77,7 +79,7 @@ export default function WelcomeModal({
                     <div className="min-w-0 flex-1">
                       <p className="text-xs text-[var(--text-main)] truncate">{p.name}</p>
                       <p className="text-[10px] text-[var(--text-muted)] truncate">
-                        {(p.mcu || "").toUpperCase()}{when(p.updatedAt) ? ` · ${when(p.updatedAt)}` : ""}
+                        {boardNames?.get(p.boardId) || (p.mcu || "").toUpperCase()}{when(p.updatedAt) ? ` · ${when(p.updatedAt)}` : ""}
                       </p>
                     </div>
                     <ArrowRight size={13} className="text-[var(--text-subtle)] shrink-0" />

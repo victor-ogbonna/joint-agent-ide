@@ -116,15 +116,33 @@ export default function Terminal({ lines, onExecuteCommand, onClear, onClose }: 
         ref={containerRef}
         className="flex-1 p-4 overflow-y-auto space-y-1.5 text-xs leading-normal terminal-scrollbar select-text bg-[var(--bg-root)]"
       >
-        {lines.map((line) => (
-          <div key={line.id} className="flex items-start gap-1.5">
-            <span className="text-[10px] text-[var(--text-muted)] select-none font-mono mt-0.5">{line.timestamp}</span>
-            {line.type === "input" && <ChevronRight size={14} className="text-[var(--term-input)] shrink-0 mt-0.5" />}
-            <pre className={`whitespace-pre-wrap font-mono flex-1 ${getLineColor(line.type)}`}>
-              {line.text}
-            </pre>
-          </div>
-        ))}
+        {lines.map((line, i) => {
+          // A trailing ellipsis on the LAST line means that step is still
+          // running — "Sending code to cloud build server..." can sit there
+          // for many seconds and a frozen line reads as a hung app. Animate
+          // those dots. As soon as the next line arrives this one is no
+          // longer last, so it goes static on its own with no extra state.
+          const isLast = i === lines.length - 1;
+          const m = isLast ? line.text.match(/^(.*?)(\.\.\.|\u2026)$/s) : null;
+          return (
+            <div key={line.id} className="flex items-start gap-1.5">
+              <span className="text-[10px] text-[var(--text-muted)] select-none font-mono mt-0.5">{line.timestamp}</span>
+              {line.type === "input" && <ChevronRight size={14} className="text-[var(--term-input)] shrink-0 mt-0.5" />}
+              <pre className={`whitespace-pre-wrap [overflow-wrap:anywhere] font-mono flex-1 min-w-0 ${getLineColor(line.type)}`}>
+                {m ? (
+                  <>
+                    {m[1]}
+                    <span className="term-ellipsis" aria-label="working">
+                      <span>.</span><span>.</span><span>.</span>
+                    </span>
+                  </>
+                ) : (
+                  line.text
+                )}
+              </pre>
+            </div>
+          );
+        })}
         {lines.length === 0 && (
           <div className="text-[var(--text-muted)] text-center py-8 text-[11px]">
             PlatformIO Core Toolchain Idle. Type <span className="text-[var(--term-input)]">help</span> to begin.

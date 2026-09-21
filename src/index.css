@@ -749,3 +749,54 @@ pre[class*="language-"] {
 .chat-prose :where(li) { margin-top: 0.15em; margin-bottom: 0.15em; }
 .chat-prose :where(li > p) { margin-top: 0.2em; margin-bottom: 0.2em; }
 .chat-prose :where(hr) { margin-top: 0.9em; margin-bottom: 0.9em; }
+
+/* Animated trailing ellipsis for an in-progress terminal line. The dots fade
+   in sequence so a long cloud build reads as "working", not "hung". Copying
+   the line still yields the literal "..." because these are real characters. */
+.term-ellipsis > span {
+  animation: term-dot 1.2s infinite;
+  opacity: 0.2;
+}
+.term-ellipsis > span:nth-child(2) { animation-delay: 0.2s; }
+.term-ellipsis > span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes term-dot {
+  0%, 60%, 100% { opacity: 0.2; }
+  30%           { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .term-ellipsis > span { animation: none; opacity: 1; }
+}
+
+/* ---------------------------------------------------------------------------
+   Mobile viewport sizing.
+
+   html/body/#root are height:100%, which resolves against a viewport that on
+   phone browsers includes the strip behind the URL bar. Combined with
+   overflow:hidden that pushes part of the shell — the header at the top, the
+   pane switcher at the bottom — outside what you can actually see, which is
+   why the agent header's icon looked cropped on a phone but never in a
+   desktop window resized to the same width.
+
+   100dvh tracks the VISIBLE height as browser chrome shows and hides. Scoped
+   away from .doc-scroll so the homepage/privacy pages keep scrolling the
+   document normally.
+--------------------------------------------------------------------------- */
+@supports (height: 100dvh) {
+  html:not(.doc-scroll),
+  html:not(.doc-scroll) body,
+  html:not(.doc-scroll) #root {
+    height: 100dvh;
+  }
+}
+
+/* With viewport-fit=cover the page extends under a notch and the home
+   indicator, so the shell has to inset itself back out. env() is 0 on
+   hardware without cutouts, so this is a no-op everywhere else. */
+.app-shell {
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+.app-bottom-nav {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}

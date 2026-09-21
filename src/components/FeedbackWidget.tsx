@@ -19,11 +19,19 @@ interface FeedbackWidgetProps {
    * directly on top of Serial Plotter, so the rail owns the trigger whenever it
    * is visible and "fab" is only for narrow layouts where the rail is hidden.
    */
-  variant?: "fab" | "sidebar";
+  variant?: "fab" | "sidebar" | "headless";
+  /** Controlled open state. "headless" renders the panel only — the trigger
+   *  lives elsewhere (the profile menu on phones, where a floating button sat
+   *  on top of the files control). */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
-export default function FeedbackWidget({ boardId, mcu, variant = "fab" }: FeedbackWidgetProps) {
-  const [open, setOpen] = useState(false);
+export default function FeedbackWidget({ boardId, mcu, variant = "fab", open: openProp, onOpenChange }: FeedbackWidgetProps) {
+  const [openSelf, setOpenSelf] = useState(false);
+  const controlled = openProp !== undefined;
+  const open = controlled ? openProp : openSelf;
+  const setOpen = (v: boolean) => { if (!controlled) setOpenSelf(v); onOpenChange?.(v); };
   const [kind, setKind] = useState<Kind>("bug");
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
@@ -125,7 +133,7 @@ export default function FeedbackWidget({ boardId, mcu, variant = "fab" }: Feedba
         </div>
       )}
 
-      {variant === "sidebar" ? (
+      {variant === "headless" ? null : variant === "sidebar" ? (
         <button
           type="button"
           onClick={() => (open ? close() : setOpen(true))}
