@@ -64,6 +64,56 @@ const describePort = (port: any): string => {
 };
 
 // type === null means "a serial bridge we cannot attribute to a chip family".
+/**
+ * Why this browser can or cannot talk to a board, in the user's terms.
+ *
+ * Flashing needs the Web Serial API, which today exists only in Chromium
+ * browsers on desktop operating systems. The previous fallback asked the
+ * SERVER for its serial ports — but the server is a datacentre container with
+ * no USB, so a phone user was told "No serial devices found. Connect a
+ * microcontroller and try again", which is advice that can never work. Say
+ * what is actually true instead.
+ */
+function describeSerialSupport(): { supported: boolean; reason: string; advice: string } {
+  if (typeof navigator !== "undefined" && "serial" in navigator) {
+    return { supported: true, reason: "", advice: "" };
+  }
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+  // iPadOS reports itself as a Mac, so the touch-point check is what separates
+  // an iPad from a MacBook running Safari.
+  const isIOS = /iPad|iPhone|iPod/.test(ua)
+    || (typeof navigator !== "undefined" && (navigator as any).platform === "MacIntel" && (navigator as any).maxTouchPoints > 1);
+  const isAndroid = /Android/.test(ua);
+  const isFirefox = /Firefox\//.test(ua);
+
+  if (isIOS) {
+    return {
+      supported: false,
+      reason: "Apple requires every browser on iPhone and iPad to use its WebKit engine, and WebKit does not implement Web Serial or WebUSB.",
+      advice: "Flashing from an iPhone or iPad is not possible from a web page today — not in Safari, and not in Chrome for iOS either, because it is WebKit underneath. Everything else here works: write, compile and save. To flash, open this project on a computer in Chrome or Edge.",
+    };
+  }
+  if (isAndroid) {
+    return {
+      supported: false,
+      reason: "Chrome on Android does not expose Web Serial.",
+      advice: "Writing, compiling and saving all work here. Flashing from an Android phone needs WebUSB, which this platform does not implement yet. For now, open the project on a computer in Chrome or Edge to flash.",
+    };
+  }
+  if (isFirefox) {
+    return {
+      supported: false,
+      reason: "Firefox does not implement Web Serial.",
+      advice: "Open this page in Chrome or Edge on the same computer to flash — your projects are saved to your account, so nothing is lost.",
+    };
+  }
+  return {
+    supported: false,
+    reason: "This browser does not implement Web Serial.",
+    advice: "Safari has no Web Serial support on any platform. On a Mac, open this page in Chrome or Edge and flashing works normally.",
+  };
+}
+
 // boardId, when present, is a PlatformIO board id from /api/boards. Only set it
 // where the VID/PID pins down one exact board — a generic serial bridge or a
 // bare "Arduino" VID does not, and guessing there would preselect the wrong
@@ -557,9 +607,15 @@ export default function App() {
         await handleBackendDetect();
       }
     } else {
-      // ===== Firefox/Safari path: use backend API =====
-      logToTerminal("[USB] Web Serial API not available (Firefox/Safari). Using backend serial detection...", "info");
-      await handleBackendDetect();
+      // No Web Serial: explain honestly rather than probing the server, which
+      // has no USB devices and only ever produced a misleading dead end.
+      const { reason, advice } = describeSerialSupport();
+      logToTerminal(`[USB] This browser cannot reach a board. ${reason}`, "error");
+      logToTerminal(`[USB] ${advice}`, "info");
+      // On a phone the terminal is inside another pane, so the explanation
+      // would land somewhere the user never looks. Bring it to them.
+      setIsTerminalOpen(true);
+      if (isNarrow) setMobilePane("editor");
     }
   };
 
@@ -906,7 +962,11 @@ export default function App() {
     // in a datacentre with no serial devices, so that path could never reach a
     // user's board — Arduino flashing simply did not work for anybody.
     if (!hasWebSerial) {
-      return await handleBackendFlash(codeToFlash);
+      const { reason, advice } = describeSerialSupport();
+      logToTerminal(`[FLASH] Cannot flash from this browser. ${reason}`, "error");
+      logToTerminal(`[FLASH] ${advice}`, "info");
+      setIsFlashing(false);
+      return { success: false, error: `Cannot flash from this browser. ${advice}` };
     }
 
     if (mcu === "arduino") {
