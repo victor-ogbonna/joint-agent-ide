@@ -22,7 +22,7 @@ which is a different older project — always `cd ~/joint-agent-project` first).
 |---|---|
 | Production | **https://jointagentide.com** (Hetzner `138.201.91.112`, Docker + Caddy, auto HTTPS) |
 | Repo | `git@github.com:victor-ogbonna/joint-agent-ide.git`, branch `master` |
-| Last commit | `43b2809` — AVR flashing fix |
+| Last commit | `198da88` — GitHub integration |
 | Pre-launch lock | **ON** — leave it on. Victor knows. Only granted accounts get in. |
 | Waitlist | 56 real signups. **Never pollute this** — clean up any test data. |
 | Users | 7 real user docs in Firestore. Same rule. |
@@ -167,6 +167,45 @@ error. Run it after ANY change to the flasher.
 
 **Still unverified on hardware.** Victor has a Mega 2560 and an Uno; both need a
 live test. Ask for the terminal log either way.
+
+## GitHub — built, needs ONE thing from Victor
+
+The whole flow is implemented (`server/github.ts`, `src/components/GithubPanel.tsx`)
+and degrades gracefully until it is configured. To switch it on:
+
+1. Create an OAuth App at https://github.com/settings/developers
+   - Homepage URL: `https://jointagentide.com`
+   - Authorization callback URL: `https://jointagentide.com/api/github/callback`
+2. Add to `.env` **on the server**: `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`
+   (optionally `GITHUB_TOKEN_SECRET`; it falls back to the client secret).
+3. `docker compose up -d --force-recreate` — it is server-side, so a restart is
+   required.
+
+Until then `/api/github/status` returns `configured:false` and the panel shows
+the setup instructions instead of a dead button. Tokens are AES-256-GCM
+encrypted at rest; the OAuth state is HMAC-signed with a 10-minute TTL.
+
+## Flashing transports
+
+- **Web Serial** (Chrome/Edge desktop, incl. macOS) — the original path.
+- **WebUSB** (`src/lib/webusbSerial.ts`) — for Chrome on Android, which has no
+  Web Serial. Drivers for CDC-ACM, CH340, CP210x, FTDI behind the same port
+  surface, so `flashAvr` and esptool-js are unchanged. Register details come
+  from the Linux drivers; the widely-copied CH341_BAUDBASE_FACTOR formula is
+  WRONG for current silicon.
+- **iPhone/iPad: impossible.** Every iOS browser is WebKit, which has neither
+  API. Not a bug to fix.
+
+`npm test` runs both simulators (`test:flash`, `test:webusb`). Run it after any
+change to a flasher.
+
+## DeepSeek
+
+The model is `deepseek-flash`, which IS DeepSeek-V4.1-Flash (released
+2026-09-10). It is a ROLLING name — a newer flash release is picked up with no
+code change. `deepseek-v4-flash` was an alias that temporarily routes to the
+same model. There is no `deepseek-v4.1-flash` model id; the API rejects it.
+From 2026-09-14 `deepseek-v4-pro` also routes to V4.1-Flash.
 
 ## Still to do
 
