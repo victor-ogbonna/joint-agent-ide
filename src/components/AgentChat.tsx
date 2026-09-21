@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { motion } from "motion/react";
-import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Square, Code } from "lucide-react";
+import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Square, Code, X} from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -195,6 +195,16 @@ export default function AgentChat({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const chatBottomRef = useRef<HTMLDivElement>(null);
   const [audioLevel, setAudioLevel] = useState(0);
+  // One value per bar, so the indicator is a waveform rather than five bars
+  // rising and falling as one.
+  const [audioBars, setAudioBars] = useState<number[]>([0, 0, 0, 0, 0]);
+  const [voiceError, setVoiceError] = useState("");
+  /** Loudest RMS seen while recording. The model will happily invent a
+   *  sentence out of silence — asking it not to helps but does not hold — so
+   *  whether anything was actually said is decided here, deterministically,
+   *  before any audio is sent or any tokens are spent. */
+  const peakLevelRef = useRef(0);
+  const SPEECH_RMS_FLOOR = 0.015;   // comfortably above a room's noise floor
   // Clarifying-question answers, saved locally by each PlanQuestionItem and
   // keyed by question text. Only sent (bundled together) when the user
   // clicks "Proceed to Implement" — never on a per-question Enter/Send.
@@ -230,10 +240,18 @@ export default function AgentChat({
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
       if (audioContextRef.current) audioContextRef.current.close();
       setAudioLevel(0);
+      setAudioBars([0, 0, 0, 0, 0]);
     } else {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        const mediaRecorder = new MediaRecorder(stream);
+        // Never assume the container. MediaRecorder's default is webm/opus on
+        // Chrome but mp4 on Safari and iOS, and the old code hardcoded
+        // "audio/webm" for both the Blob and the mimeType sent to the model —
+        // so on Apple hardware it described mp4 bytes as webm and transcription
+        // could only fail or hallucinate.
+        const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
+        const picked = candidates.find((t) => (window as any).MediaRecorder?.isTypeSupported?.(t));
+        const mediaRecorder = picked ? new MediaRecorder(stream, { mimeType: picked }) : new MediaRecorder(stream);
         mediaRecorderRef.current = mediaRecorder;
         audioChunksRef.current = [];
         
@@ -245,18 +263,40 @@ export default function AgentChat({
         audioContextRef.current = audioContext;
         analyserRef.current = analyser;
         
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-        
+        const freqData = new Uint8Array(analyser.frequencyBinCount);
+        const timeData = new Uint8Array(analyser.fftSize);
+        const smoothed = [0, 0, 0, 0, 0];
+
         const updateAudioLevel = () => {
           if (analyserRef.current) {
-            analyserRef.current.getByteFrequencyData(dataArray);
-            let sum = 0;
-            for (let i = 0; i < dataArray.length; i++) {
-              sum += dataArray[i];
+            // Loudness from the time domain as RMS. Averaging the whole
+            // frequency spectrum — what this did before — is dominated by the
+            // empty high bins, so the meter barely moved however loudly
+            // anyone spoke.
+            analyserRef.current.getByteTimeDomainData(timeData);
+            let sumSquares = 0;
+            for (let i = 0; i < timeData.length; i++) {
+              const v = (timeData[i] - 128) / 128;
+              sumSquares += v * v;
             }
-            const average = sum / dataArray.length;
-            const level = Math.min(1, average / 128); // Normalize 0 to 1
-            setAudioLevel(level);
+            const rms = Math.sqrt(sumSquares / timeData.length);
+            if (rms > peakLevelRef.current) peakLevelRef.current = rms;
+            setAudioLevel(Math.min(1, rms * 4));
+
+            // Each bar gets its own slice of the spectrum, weighted towards
+            // speech (roughly 100 Hz - 4 kHz sits in the lower half of the
+            // bins at this fftSize), so the shape moves with the voice.
+            analyserRef.current.getByteFrequencyData(freqData);
+            const usable = Math.floor(freqData.length * 0.6);
+            const per = Math.max(1, Math.floor(usable / smoothed.length));
+            for (let b = 0; b < smoothed.length; b++) {
+              let sum = 0;
+              for (let i = b * per; i < (b + 1) * per; i++) sum += freqData[i] || 0;
+              const band = Math.min(1, sum / per / 140);
+              // Ease towards the new value so it looks like a wave, not a strobe.
+              smoothed[b] = smoothed[b] * 0.55 + band * 0.45;
+            }
+            setAudioBars([...smoothed]);
           }
           animationFrameRef.current = requestAnimationFrame(updateAudioLevel);
         };
@@ -270,24 +310,47 @@ export default function AgentChat({
 
         mediaRecorder.onstop = async () => {
           setIsTranscribing(true);
-          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          setVoiceError("");
+          // What the recorder actually produced, not what we hoped for.
+          const recorded = mediaRecorder.mimeType || picked || "audio/webm";
+          const audioBlob = new Blob(audioChunksRef.current, { type: recorded });
+          if (audioBlob.size < 1024) {
+            setIsTranscribing(false);
+            setVoiceError("That recording was too short to hear. Hold the button while you speak.");
+            stream.getTracks().forEach((t) => t.stop());
+            return;
+          }
+          if (peakLevelRef.current < SPEECH_RMS_FLOOR) {
+            setIsTranscribing(false);
+            setVoiceError("No sound was picked up. Check that the right microphone is selected and that it is not muted.");
+            stream.getTracks().forEach((t) => t.stop());
+            return;
+          }
           const reader = new FileReader();
           reader.readAsDataURL(audioBlob);
           reader.onloadend = async () => {
              const base64Audio = (reader.result as string).split(',')[1];
              try {
-                const result = await callAiEndpoint('/api/ai/transcribe', { audioData: base64Audio, mimeType: 'audio/webm' });
+                // Gemini wants the base type; a ";codecs=" parameter is not
+                // part of a media type it recognises.
+                const sentType = recorded.split(";")[0];
+                const result = await callAiEndpoint('/api/ai/transcribe', { audioData: base64Audio, mimeType: sentType });
                 if (!result.ok) {
                    if (result.blocked && result.info) {
                       onQuotaBlocked?.(result.info);
                    } else {
-                      console.error("Transcription error:", result.error);
+                      // This used to go only to console.error, so a failed
+                      // transcription looked exactly like a mic that did
+                      // nothing at all.
+                      setVoiceError(result.error || "Could not transcribe that. Try again.");
                    }
-                } else if (result.data?.text) {
-                   setInput((prev) => prev + (prev ? " " : "") + result.data.text);
+                } else if (result.data?.text?.trim()) {
+                   setInput((prev) => prev + (prev ? " " : "") + result.data.text.trim());
+                } else {
+                   setVoiceError("No speech was picked up. Check the microphone permission and try again.");
                 }
-             } catch (err) {
-                console.error("Transcription error:", err);
+             } catch (err: any) {
+                setVoiceError(err?.message || "Could not reach the transcription service.");
              } finally {
                 setIsTranscribing(false);
              }
@@ -295,9 +358,18 @@ export default function AgentChat({
           };
         };
 
+        setVoiceError("");
+        peakLevelRef.current = 0;
         mediaRecorder.start();
         setIsRecording(true);
-      } catch (err) {
+      } catch (err: any) {
+        setVoiceError(
+          err?.name === "NotAllowedError"
+            ? "Microphone access was blocked. Allow it for this site in your browser settings and try again."
+            : err?.name === "NotFoundError"
+            ? "No microphone was found on this device."
+            : err?.message || "Could not start recording."
+        );
         console.error("Microphone error:", err);
         alert("Microphone access denied or not available. Please check your permissions.");
       }
@@ -585,6 +657,16 @@ export default function AgentChat({
             placeholder={isTranscribing ? "Transcribing audio..." : "Ask Joint-Agent..."}
             style={{ minHeight: '64px', maxHeight: '384px', maxWidth: '150%' }}
           />
+          {/* A failed transcription used to be invisible — it went to
+              console.error only, so the mic looked simply broken. */}
+          {voiceError && (
+            <p className="mt-1 text-[10px] text-red-500 leading-snug flex items-start gap-1">
+              <span className="flex-1">{voiceError}</span>
+              <button type="button" onClick={() => setVoiceError("")} className="text-[var(--text-muted)] hover:text-[var(--text-main)] shrink-0" title="Dismiss">
+                <X size={10} />
+              </button>
+            </p>
+          )}
         </div>
         <label className="flex items-center gap-1.5 cursor-pointer text-xs text-[var(--text-muted)] hover:text-[var(--text-main)] transition-colors shrink-0">
           <input 
@@ -604,11 +686,13 @@ export default function AgentChat({
         >
           {isRecording ? (
             <div className="flex items-center gap-0.5 h-4">
-              <span className="w-0.5 bg-red-500 transition-all duration-75" style={{ height: `${Math.max(4, audioLevel * 30)}px` }}></span>
-              <span className="w-0.5 bg-red-500 transition-all duration-75" style={{ height: `${Math.max(4, audioLevel * 40)}px` }}></span>
-              <span className="w-0.5 bg-red-500 transition-all duration-75" style={{ height: `${Math.max(4, audioLevel * 35)}px` }}></span>
-              <span className="w-0.5 bg-red-500 transition-all duration-75" style={{ height: `${Math.max(4, audioLevel * 40)}px` }}></span>
-              <span className="w-0.5 bg-red-500 transition-all duration-75" style={{ height: `${Math.max(4, audioLevel * 30)}px` }}></span>
+              {audioBars.map((v, i) => (
+                <span
+                  key={i}
+                  className="w-0.5 rounded-full bg-red-500"
+                  style={{ height: `${Math.max(3, Math.min(16, v * 16 + audioLevel * 6))}px`, transition: "height 60ms linear" }}
+                />
+              ))}
             </div>
           ) : (
             <Mic size={16} />

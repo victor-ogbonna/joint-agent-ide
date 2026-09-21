@@ -673,7 +673,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
             send({
               type: "tool_progress",
               text: toolName === "generate_project"
-                ? "Writing the firmware…"
+                ? "Writing firmware and preparing your workspace…"
                 : "Working…",
             });
           };
@@ -1119,7 +1119,7 @@ app.post("/api/ai/transcribe", requireAuthAndQuota, async (req, res) => {
         {
           role: "user",
           parts: [
-            { text: "Please transcribe the following audio accurately. Correct any obvious disfluencies, grammar mistakes, or stuttering while preserving the exact meaning and original words of the user as much as possible. Just output the final polished transcription and nothing else. If it is empty, output nothing." },
+            { text: "Transcribe the following audio. Correct obvious disfluencies and stuttering while preserving the speaker's exact meaning and wording. Output the transcription and nothing else — no preamble, no commentary, no quotation marks.\n\nCRITICAL: if the audio contains no intelligible human speech — silence, a tone, music, background noise, a fragment too short to make out — output an empty response. Do NOT invent, guess at, or pad out words that were not spoken. Returning nothing is always correct when nothing was said." },
             {
               inlineData: {
                 data: audioData,
