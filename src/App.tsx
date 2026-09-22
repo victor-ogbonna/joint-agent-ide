@@ -628,7 +628,35 @@ export default function App() {
     }
     const p = await requestUsbSerialPort();
     logToTerminal("[USB] Transport: WebUSB.", "info");
+    warnIfKnownLimited(p);
     return p;
+  };
+
+  /**
+   * Say up front when a board cannot be flashed on this transport, instead of
+   * letting the user describe a project, wait for a cloud build and only then
+   * hit a protocol failure.
+   *
+   * On Android there is no Web Serial, so the USB-serial bridge is driven by
+   * this app rather than by the operating system's driver — and the FTDI path
+   * still drops a byte from replies that nothing in the link reports as an
+   * error. CH340 and native-USB boards are unaffected.
+   */
+  const warnIfKnownLimited = (p: any) => {
+    try {
+      const info = typeof p?.getInfo === "function" ? p.getInfo() : {};
+      if (info?.usbVendorId !== 0x0403) return;      // FTDI only
+      logToTerminal(
+        "[USB] Heads up: this is an FTDI bridge, and flashing it over WebUSB is not reliable yet — " +
+        "replies lose a byte for reasons not yet pinned down. Everything else works: write code, " +
+        "compile, save, preview. To flash this board, open the project on a computer in Chrome or Edge.",
+        "error"
+      );
+      logToTerminal(
+        "[USB] ESP32 boards (CH340) and native-USB boards do flash from this phone.",
+        "info"
+      );
+    } catch { /* advisory only, never block a connection */ }
   };
 
   /** Boards already authorised in a previous session. */

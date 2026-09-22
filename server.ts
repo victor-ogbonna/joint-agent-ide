@@ -1136,8 +1136,14 @@ app.post("/api/ai/transcribe", requireAuthAndQuota, async (req, res) => {
     await incrementTokenUsage(req.uid!, req.quota!.subscriptionStatus, response.usageMetadata?.candidatesTokenCount || 0);
     res.json({ text: response.text || "" });
   } catch (err: any) {
-    console.error("Transcription API Error:", err.message);
-    res.status(500).json({ error: "Transcription failed." });
+    // "Transcription failed." told the user nothing and told us nothing
+    // either: container logs are wiped on every deploy, so by the time a
+    // report arrived the cause was gone. Pass the provider's own message
+    // through — it names an unsupported format, an exhausted quota or a bad
+    // key directly.
+    const detail = String(err?.message || err || "unknown error").slice(0, 300);
+    console.error("Transcription API Error:", detail);
+    res.status(500).json({ error: `Transcription failed: ${detail}` });
   }
 });
 

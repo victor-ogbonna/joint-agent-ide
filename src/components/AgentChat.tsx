@@ -36,6 +36,77 @@ interface AgentChatProps {
 // pressing Enter here must NOT dispatch anything to the agent, since the
 // user may still have other questions left to answer. Only the "Proceed to
 // Implement" button actually sends, bundling every saved answer at once.
+/**
+ * Re-encode whatever the browser recorded as 16 kHz mono WAV.
+ *
+ * MediaRecorder produces webm/opus on Chrome and mp4 on Safari and iOS, and
+ * Gemini's inline audio accepts webm but NOT audio/mp4 — so voice input could
+ * never have worked on an iPhone. Rather than special-case containers, decode
+ * and re-encode to WAV: every engine accepts it and it carries no codec
+ * parameters to get wrong. Speech at 16 kHz mono is about 32 KB per second,
+ * comfortably inside the request limit.
+ */
+async function encodeAsWav(blob: Blob): Promise<string> {
+  const Ctx: typeof AudioContext =
+    (window as any).AudioContext || (window as any).webkitAudioContext;
+  if (!Ctx) throw new Error("This browser cannot process audio.");
+
+  const decodeCtx = new Ctx();
+  let decoded: AudioBuffer;
+  try {
+    decoded = await decodeCtx.decodeAudioData(await blob.arrayBuffer());
+  } finally {
+    try { await decodeCtx.close(); } catch { /* already closed */ }
+  }
+
+  // Downmix to mono at 16 kHz. Some engines refuse an OfflineAudioContext
+  // below 44.1 kHz, so fall back to the source rate rather than fail.
+  let pcm: Float32Array;
+  let rate: number;
+  try {
+    const target = 16000;
+    const offline = new OfflineAudioContext(1, Math.ceil(decoded.duration * target), target);
+    const src = offline.createBufferSource();
+    src.buffer = decoded;
+    src.connect(offline.destination);
+    src.start();
+    pcm = (await offline.startRendering()).getChannelData(0);
+    rate = target;
+  } catch {
+    pcm = decoded.getChannelData(0);
+    rate = decoded.sampleRate;
+  }
+
+  const view = new DataView(new ArrayBuffer(44 + pcm.length * 2));
+  const ascii = (off: number, str: string) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i));
+  };
+  ascii(0, "RIFF");
+  view.setUint32(4, 36 + pcm.length * 2, true);
+  ascii(8, "WAVEfmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);            // PCM
+  view.setUint16(22, 1, true);            // mono
+  view.setUint32(24, rate, true);
+  view.setUint32(28, rate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  ascii(36, "data");
+  view.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) {
+    const c = Math.max(-1, Math.min(1, pcm[i]));
+    view.setInt16(44 + i * 2, c < 0 ? c * 0x8000 : c * 0x7fff, true);
+  }
+
+  const raw = new Uint8Array(view.buffer);
+  let binary = "";
+  // Chunked: spreading a large array into fromCharCode blows the stack.
+  for (let i = 0; i < raw.length; i += 0x8000) {
+    binary += String.fromCharCode(...raw.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
 function PlanQuestionItem({
   children,
   liProps,
@@ -326,36 +397,32 @@ export default function AgentChat({
             stream.getTracks().forEach((t) => t.stop());
             return;
           }
-          const reader = new FileReader();
-          reader.readAsDataURL(audioBlob);
-          reader.onloadend = async () => {
-             const base64Audio = (reader.result as string).split(',')[1];
-             try {
-                // Gemini wants the base type; a ";codecs=" parameter is not
-                // part of a media type it recognises.
-                const sentType = recorded.split(";")[0];
-                const result = await callAiEndpoint('/api/ai/transcribe', { audioData: base64Audio, mimeType: sentType });
-                if (!result.ok) {
-                   if (result.blocked && result.info) {
-                      onQuotaBlocked?.(result.info);
-                   } else {
-                      // This used to go only to console.error, so a failed
-                      // transcription looked exactly like a mic that did
-                      // nothing at all.
-                      setVoiceError(result.error || "Could not transcribe that. Try again.");
-                   }
-                } else if (result.data?.text?.trim()) {
-                   setInput((prev) => prev + (prev ? " " : "") + result.data.text.trim());
+          try {
+             // Always WAV, whatever the recorder produced.
+             const base64Audio = await encodeAsWav(audioBlob);
+             const result = await callAiEndpoint('/api/ai/transcribe', {
+               audioData: base64Audio,
+               mimeType: "audio/wav",
+             });
+             if (!result.ok) {
+                if (result.blocked && result.info) {
+                   onQuotaBlocked?.(result.info);
                 } else {
-                   setVoiceError("No speech was picked up. Check the microphone permission and try again.");
+                   // This used to go only to console.error, so a failed
+                   // transcription looked exactly like a mic that did nothing.
+                   setVoiceError(result.error || "Could not transcribe that. Try again.");
                 }
-             } catch (err: any) {
-                setVoiceError(err?.message || "Could not reach the transcription service.");
-             } finally {
-                setIsTranscribing(false);
+             } else if (result.data?.text?.trim()) {
+                setInput((prev) => prev + (prev ? " " : "") + result.data.text.trim());
+             } else {
+                setVoiceError("No speech was picked up. Try again, a little closer to the microphone.");
              }
-             stream.getTracks().forEach(track => track.stop());
-          };
+          } catch (err: any) {
+             setVoiceError(err?.message || "Could not process that recording.");
+          } finally {
+             setIsTranscribing(false);
+             stream.getTracks().forEach((track) => track.stop());
+          }
         };
 
         setVoiceError("");
