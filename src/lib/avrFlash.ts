@@ -144,6 +144,12 @@ class SerialBuffer {
   /** Every byte the port has produced, across discards. Purely diagnostic:
    *  "0 bytes" and "some bytes" are completely different faults. */
   received = 0;
+  /** First bytes ever seen, kept for the failure message. "N bytes but none
+   *  valid" does not say WHAT arrived, and the answer changes the diagnosis
+   *  completely: 0x01 0x60 repeating is an FTDI status header leaking through,
+   *  printable ASCII is a sketch still running, and anything else is a baud
+   *  rate or wiring problem. */
+  private sample: number[] = [];
   private ended = false;
   private err: Error | null = null;
   private wake: (() => void) | null = null;
@@ -161,7 +167,10 @@ class SerialBuffer {
         if (done) { this.ended = true; break; }
         if (value) {
           this.received += value.length;
-          for (let i = 0; i < value.length; i++) this.buf.push(value[i]);
+          for (let i = 0; i < value.length; i++) {
+            this.buf.push(value[i]);
+            if (this.sample.length < 24) this.sample.push(value[i]);
+          }
         }
         this.signal();
       }
@@ -180,6 +189,14 @@ class SerialBuffer {
   /** Drop anything already received — used right after a reset pulse. */
   discard(): void {
     this.buf.length = 0;
+  }
+
+  /** Hex plus printable ASCII of the first bytes seen, for the error message. */
+  describeSample(): string {
+    if (!this.sample.length) return "";
+    const hex = this.sample.map((b) => b.toString(16).padStart(2, "0")).join(" ");
+    const ascii = this.sample.map((b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : ".")).join("");
+    return ` First bytes: ${hex} ("${ascii}").`;
   }
 
   /** Resolve with exactly `count` bytes, or reject once `timeoutMs` elapses. */
@@ -215,12 +232,27 @@ async function command(
 ): Promise<Uint8Array> {
   await writer.write(new Uint8Array([...payload, CRC_EOP]));
 
-  const head = await rx.read(1, timeoutMs);
-  if (head[0] !== Resp.INSYNC) {
-    throw new Error(`Board out of sync (expected 0x14, got 0x${head[0].toString(16)}).`);
+  // One deadline for the whole exchange, so skipping junk cannot add up to a
+  // fresh timeout per byte.
+  const deadline = Date.now() + timeoutMs;
+  const left = () => Math.max(0, deadline - Date.now());
+
+  // Resync on INSYNC instead of demanding it be the very first byte. The v2
+  // path has always done this; v1 did not, so a SINGLE stray byte ahead of the
+  // reply killed the handshake outright — and stray bytes are the normal case,
+  // not an exception: an FTDI bridge hands over whatever was sitting in its
+  // receive buffer, and a sketch that printed on boot leaves its output there.
+  // That is what "the port sent N bytes but none formed a valid reply" was.
+  let head = await rx.read(1, left());
+  let skipped = 0;
+  while (head[0] !== Resp.INSYNC) {
+    if (++skipped > 512) {
+      throw new Error(`Board out of sync — ${skipped} bytes read without a 0x14 reply.`);
+    }
+    head = await rx.read(1, left());
   }
-  const body = expectBytes > 0 ? await rx.read(expectBytes, timeoutMs) : new Uint8Array(0);
-  const tail = await rx.read(1, timeoutMs);
+  const body = expectBytes > 0 ? await rx.read(expectBytes, left()) : new Uint8Array(0);
+  const tail = await rx.read(1, left());
   if (tail[0] !== Resp.OK) {
     throw new Error(`Board rejected a command (expected 0x10, got 0x${tail[0].toString(16)}).`);
   }
@@ -234,14 +266,14 @@ async function command(
  * never formed a valid reply means we ARE talking to something, but it is not
  * speaking this protocol.
  */
-function heardNothing(received: number): string {
+function heardNothing(received: number, sample = ""): string {
   return received === 0
     ? "Could not reach the bootloader — the port sent nothing at all (0 bytes). " +
       "That usually means this is not the board's port, the cable is charge-only, " +
       "or the board is not auto-resetting. Unplug and replug the board, then use " +
       "Detect Board and pick the Arduino in the chooser."
     : `Could not reach the bootloader — the port sent ${received} bytes but none formed a valid ` +
-      "reply. Close any serial monitor holding the port and try again.";
+      `reply.${sample} Close any serial monitor holding the port and try again.`;
 }
 
 /**
@@ -364,7 +396,7 @@ async function flashStk500v2(
     }
   }
   if (!signedOn) {
-    throw new Error(heardNothing(rx.received));
+    throw new Error(heardNothing(rx.received, rx.describeSample()));
   }
 
   // Values mirror what avrdude sends for wiring boards.
@@ -501,7 +533,7 @@ export async function flashAvr({
       }
     }
     if (!synced) {
-      throw new Error(heardNothing(rx!.received));
+      throw new Error(heardNothing(rx!.received, rx!.describeSample()));
     }
     log("Bootloader responded.");
 

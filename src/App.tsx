@@ -535,6 +535,13 @@ export default function App() {
         setDetectedBoardId(null);
         setDetectedMcu(null);
         webSerialPortRef.current = null;
+        // The cable coming out mid-flash is exactly when the spinner used to
+        // stick: the USB write throws from somewhere deep and the control kept
+        // reading "Flashing..." until the page was reloaded. Nothing can be
+        // flashing once the board is gone, so say so here too — belt and
+        // braces alongside the try/finally around the flash itself.
+        setIsFlashing(false);
+        setIsSmartFlashing(false);
       }
     };
 
@@ -697,8 +704,12 @@ export default function App() {
           logToTerminal("[USB] Port selection cancelled by user.", "info");
           return;
         }
-        logToTerminal(`[USB] Web Serial error: ${err.message}. Trying backend detection...`, "info");
-        await handleBackendDetect();
+        // No backend fallback here: /api/serial/ports asks the SERVER for its
+        // USB devices, and the server is a datacentre container with none, so
+        // it could only ever answer "No serial devices found. Connect a
+        // microcontroller and try again" — advice that cannot work and that
+        // buried the real error above it.
+        logToTerminal(`[USB] ${err.message}`, "error");
       }
     } else {
       // Neither transport: explain honestly rather than probing the server,
@@ -1477,6 +1488,13 @@ export default function App() {
     logToTerminal("[SMART FLASH] Starting autonomous compile -> debug -> flash cycle...", "info");
     logToTerminal("==========================================================", "info");
 
+    // Everything below runs inside try/finally so the button cannot be left
+    // reading "Flashing...". Unplugging the board mid-flash makes a USB
+    // transfer throw, and that escaped every early return here — leaving the
+    // control stuck until the page was reloaded. NOT a mobile-only fault: the
+    // same path runs on desktop, it is just harder to trip there.
+    try {
+
     const MAX_ATTEMPTS = 5;
     let attempt = 0;
     let compileResult = await handleCompile(currentCode);
@@ -1522,8 +1540,12 @@ export default function App() {
     } else {
       logToTerminal(`[SMART FLASH] Flash step failed: ${flashResult?.error || "Unknown error"}.`, "error");
     }
-
-    setIsSmartFlashing(false);
+    } catch (err: any) {
+      logToTerminal(`[SMART FLASH] Stopped unexpectedly: ${err?.message || err}.`, "error");
+    } finally {
+      setIsSmartFlashing(false);
+      setIsFlashing(false);
+    }
   };
 
   const handleStopGeneration = () => {

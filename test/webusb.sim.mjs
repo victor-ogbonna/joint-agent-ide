@@ -135,6 +135,7 @@ class MegaBootloader {
 function mockUsbDevice(boot, kind) {
   const control = [];              // every control transfer, for assertions
   let outQueue = [];
+  let lateJunk = null;
   return {
     vendorId: kind === "ch34x" ? 0x1a86 : kind === "cp210x" ? 0x10c4 : kind === "ftdi" ? 0x0403 : 0x2341,
     productId: 0x0042,
@@ -170,6 +171,7 @@ function mockUsbDevice(boot, kind) {
     },
     async transferOut(_ep, chunk) {
       boot.feed(new Uint8Array(chunk));
+      if (lateJunk) { outQueue.unshift(...lateJunk); lateJunk = null; }
       return { status: "ok", bytesWritten: chunk.byteLength };
     },
     async transferIn(_ep, len) {
@@ -186,6 +188,14 @@ function mockUsbDevice(boot, kind) {
       if (kind === "ftdi") bytes = new Uint8Array([0x01, 0x60, ...bytes]);
       return { status: "ok", data: new DataView(bytes.buffer) };
     },
+    /**
+     * Test hook: bytes the bridge was holding, delivered on the first read
+     * AFTER the flasher starts talking — which is when they really arrive. An
+     * FTDI latency timer is 16ms by default, so buffered bytes turn up well
+     * after the port was opened and after any discard, landing immediately in
+     * front of the bootloader's reply where they do real damage.
+     */
+    __stuffLate(bytes) { lateJunk = [...bytes]; },
   };
 }
 
@@ -230,6 +240,37 @@ for (const kind of ["cdc", "ch34x", "cp210x", "ftdi"]) {
     (kind === "cp210x" && c.request === 0x1e) || (kind === "ftdi" && c.request === 0x03));
   console.log(`  ${ok ? "ok  " : "FAIL"}  ${kind.padEnd(7)} -> ${verdict}${baudSet ? "" : "  (BAUD NEVER SET)"}`);
   if (!baudSet) failures++;
+}
+
+// --- STK500v1 with junk already in the bridge's receive buffer ------------
+// This is the reported Uno-over-FTDI failure: "the port sent 6065 bytes but
+// none formed a valid reply". An FTDI bridge hands over whatever it was
+// holding, and the v1 handshake used to demand INSYNC as the very FIRST byte,
+// so one stray byte killed it outright.
+{
+  const OptibootSim = (await import("./optiboot.mjs")).default;
+  const SZ = 924;
+  const prog = new Uint8Array(SZ);
+  for (let i = 0; i < SZ; i++) prog[i] = (i * 17 + 3) & 0xff;
+  const hx = makeHex(prog);
+
+  for (const junk of [[], [0x00], [0xff, 0x00, 0x5a, 0x13], Array.from({ length: 300 }, (_, i) => (i * 7) & 0xff)]) {
+    const boot = new OptibootSim(64);
+    const device = mockUsbDevice(boot, "ftdi");
+    const port = new WebUsbSerialPort(device, "ftdi");
+    device.__stuffLate(junk);                 // arrives just ahead of the reply
+    let verdict;
+    try {
+      await flashAvr({ hex: hx, uploadProtocol: "arduino", uploadSpeed: 115200,
+                       chip: "ATMEGA328P", port, onProgress: () => {} });
+      let bad = -1;
+      for (let i = 0; i < SZ; i++) if (boot.flash[i] !== prog[i]) { bad = i; break; }
+      verdict = bad >= 0 ? `flash corrupt at byte ${bad}` : `${SZ} bytes identical`;
+    } catch (e) { verdict = `threw: ${e.message}`; }
+    const ok = /identical/.test(verdict);
+    if (!ok) failures++;
+    console.log(`  ${ok ? "ok  " : "FAIL"}  ftdi + ${String(junk.length).padStart(3)} stale bytes -> ${verdict}`);
+  }
 }
 
 console.log(failures ? `\n${failures} failing case(s)` : "\nAll WebUSB bridges passed.");

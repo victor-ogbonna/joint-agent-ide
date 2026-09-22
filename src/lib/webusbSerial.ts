@@ -68,6 +68,7 @@ export class WebUsbSerialPort {
   private commIfaceNumber: number | null = null;
   private epIn = 0;
   private epOut = 0;
+  private epInPacketSize = 64;
   private pumping = false;
   private controller: ReadableStreamDefaultController<Uint8Array> | null = null;
   private dtr = false;
@@ -156,8 +157,13 @@ export class WebUsbSerialPort {
     if (!chosen) throw new Error("This USB device has no bulk serial endpoints.");
 
     this.ifaceNumber = chosen.iface.interfaceNumber;
-    this.epIn = chosen.alt.endpoints.find((e: any) => e.direction === "in" && e.type === "bulk").endpointNumber;
-    this.epOut = chosen.alt.endpoints.find((e: any) => e.direction === "out" && e.type === "bulk").endpointNumber;
+    const inEp = chosen.alt.endpoints.find((e: any) => e.direction === "in" && e.type === "bulk");
+    const outEp = chosen.alt.endpoints.find((e: any) => e.direction === "out" && e.type === "bulk");
+    this.epIn = inEp.endpointNumber;
+    this.epOut = outEp.endpointNumber;
+    // Needed to find FTDI's per-packet status bytes, which sit at every packet
+    // boundary rather than only at the start of a transfer.
+    this.epInPacketSize = inEp.packetSize || 64;
   }
 
   private async controlOut(request: number, value: number, index: number, data?: BufferSource): Promise<void> {
@@ -198,9 +204,19 @@ export class WebUsbSerialPort {
         break;
       }
       case "ftdi": {
-        await this.controlOut(0x00, 0x0000, this.ifaceNumber + 1);        // reset
-        await this.controlOut(0x03, ftdiDivisor(baudRate), this.ifaceNumber + 1);
-        await this.controlOut(0x04, 0x0008, this.ifaceNumber + 1);        // 8N1
+        const port = this.ifaceNumber + 1;
+        await this.controlOut(0x00, 0x0000, port);                        // SIO_RESET
+        await this.controlOut(0x03, ftdiDivisor(baudRate), port);         // baud
+        await this.controlOut(0x04, 0x0008, port);                        // 8N1
+        // Latency timer defaults to 16ms, which makes a request/response
+        // protocol crawl. 1ms is what ftdi_sio uses for interactive work.
+        await this.controlOut(0x09, 0x0001, port);
+        // Throw away whatever is already sitting in the chip's buffers. An
+        // FTDI bridge holds bytes across opens, so the first thing a reader
+        // saw was the previous sketch's output — and a single stray byte ahead
+        // of a bootloader reply is enough to break the handshake.
+        await this.controlOut(0x00, 0x0001, port);                        // purge RX
+        await this.controlOut(0x00, 0x0002, port);                        // purge TX
         break;
       }
     }
@@ -273,8 +289,18 @@ export class WebUsbSerialPort {
               // FTDI prefixes EVERY packet with two modem-status bytes. Passing
               // them through would corrupt the very first protocol reply.
               if (this.kind === "ftdi") {
-                if (bytes.length <= 2) continue;
-                bytes = bytes.slice(2);
+                // Two modem-status bytes per USB PACKET, not per transfer. A
+                // single transferIn can return several coalesced packets, and
+                // stripping only the leading pair let the headers buried at
+                // each packet boundary leak into the data stream.
+                const pkt = this.epInPacketSize || 64;
+                const kept: number[] = [];
+                for (let off = 0; off < bytes.length; off += pkt) {
+                  const end = Math.min(off + pkt, bytes.length);
+                  for (let i = off + 2; i < end; i++) kept.push(bytes[i]);
+                }
+                if (kept.length === 0) continue;
+                bytes = new Uint8Array(kept);
               }
               try { controller.enqueue(new Uint8Array(bytes)); } catch { break; }
             }
