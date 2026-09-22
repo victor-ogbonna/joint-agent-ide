@@ -1173,51 +1173,58 @@ export default function App() {
           writeLine: (data: string) => logToTerminal(`[FLASH] ${data}`, "info"),
           write: (data: string) => logToTerminal(`[FLASH] ${data}`, "info"),
         };
-        const loader = new ESPLoader({ transport, baudrate: 115200, terminal: term });
 
         /**
-         * Put the chip in download mode ourselves, in ONE line-state write.
+         * Put the chip in download mode in ONE line-state write.
          *
          * esptool's ClassicReset does setDTR(true) then setRTS(false) as two
          * separate writes. On a devkit's cross-coupled auto-reset circuit that
          * passes through a state where DTR and RTS are both high — neither EN
          * nor IO0 driven — so EN is released while IO0 is still high. A desktop
-         * serial driver gets through that glitch in microseconds and the
-         * capacitor on EN never charges, so it goes unnoticed. Over WebUSB from
-         * a phone each write is milliseconds: EN fully rises and the chip boots
-         * the application instead of the ROM loader. That is precisely why this
-         * worked on desktop and not on mobile.
+         * serial driver clears that glitch in microseconds and the capacitor on
+         * EN never charges. Over WebUSB from a phone each write takes
+         * milliseconds: EN fully rises and the chip boots the application
+         * instead of the ROM loader.
          *
-         * setSignals sets both lines in a single write, so going straight from
-         * (EN low) to (IO0 low, EN released) never visits the glitch state.
+         * setSignals writes both lines at once, so going straight from (EN low)
+         * to (IO0 low, EN released) never visits the glitch state.
+         *
+         * Handed to esptool as its classicReset rather than run by hand first.
+         * Running it by hand meant opening the port here and letting esptool
+         * open it again — which the WebUSB adapter tolerated (its open() is
+         * re-entrant) and a real SerialPort refused outright with "The port is
+         * already open". That is why ESP32 flashing worked on the phone and
+         * broke on the desktop. esptool owns the port now; only the waveform
+         * is ours.
          */
-        const enterDownloadMode = async () => {
-          await port.setSignals({ dataTerminalReady: false, requestToSend: false });
-          await new Promise((r) => setTimeout(r, 50));
-          await port.setSignals({ dataTerminalReady: false, requestToSend: true });   // EN low: in reset
-          await new Promise((r) => setTimeout(r, 120));
-          await port.setSignals({ dataTerminalReady: true, requestToSend: false });   // IO0 low + EN released, one write
-          await new Promise((r) => setTimeout(r, 60));
-          await port.setSignals({ dataTerminalReady: false, requestToSend: false });  // release both
-          await new Promise((r) => setTimeout(r, 60));
-        };
+        const atomicClassicReset = (t: any, resetDelay: number) => ({
+          reset: async () => {
+            const set = (dtr: boolean, rts: boolean) =>
+              t.device.setSignals({ dataTerminalReady: dtr, requestToSend: rts });
+            await set(false, false);
+            await new Promise((r) => setTimeout(r, 50));
+            await set(false, true);                        // EN low: held in reset
+            await new Promise((r) => setTimeout(r, 120));
+            await set(true, false);                        // IO0 low + EN released, one write
+            await new Promise((r) => setTimeout(r, Math.max(50, resetDelay)));
+            await set(false, false);                       // release both
+          },
+        });
+
+        const loaderWithReset = new ESPLoader({
+          transport,
+          baudrate: 115200,
+          terminal: term,
+          resetConstructors: { classicReset: atomicClassicReset },
+        } as any);
 
         try {
-          await port.open({ baudRate: 115200 });
-          await enterDownloadMode();
-          // The chip is already where it needs to be; do not let esptool
-          // re-run the waveform that fails here.
-          await loader.main("no_reset");
+          await loaderWithReset.main();
         } catch (connectErr: any) {
-          logToTerminal(`[FLASH] ${connectErr.message}. Trying esptool's own reset...`, "info");
-          try {
-            await loader.main();
-          } catch (secondErr: any) {
-            logToTerminal(`[FLASH] ${secondErr.message}. Last try — hold BOOT now.`, "info");
-            logToTerminal("[FLASH] Hold the BOOT (or FLASH) button and keep holding it.", "info");
-            await new Promise((r) => setTimeout(r, 3000));
-            await loader.main("no_reset");
-          }
+          logToTerminal(`[FLASH] ${connectErr.message}. Last try — hold BOOT now.`, "info");
+          logToTerminal("[FLASH] Hold the BOOT (or FLASH) button and keep holding it.", "info");
+          await new Promise((r) => setTimeout(r, 3000));
+          await loaderWithReset.main("no_reset");
         }
 
         // Convert base64 to Uint8Array for esptool-js writeFlash
@@ -1236,7 +1243,7 @@ export default function App() {
         if (compiled.boot_app0) fileArray.push({ data: base64ToUint8Array(compiled.boot_app0), address: 0xe000 });
         if (compiled.binary) fileArray.push({ data: base64ToUint8Array(compiled.binary), address: 0x10000 });
 
-        await loader.writeFlash({
+        await loaderWithReset.writeFlash({
           fileArray: fileArray,
           flashSize: "keep",
           flashMode: "keep",
@@ -1318,10 +1325,25 @@ export default function App() {
       const reader = port.readable.getReader();
       serialReaderRef.current = reader;
       const decoder = new TextDecoder();
+
+      // An ESP32 prints its ROM boot log at 74880 baud, so read at 115200 it
+      // is unreadable bytes. It only appeared once the post-flash reset
+      // started genuinely rebooting the chip — before that the board sat in
+      // the ROM loader and printed nothing, which is why the desktop looked
+      // clean and a phone did not. Drop whatever arrives in that window so the
+      // monitor opens on the sketch's own output.
+      const bootLogUntil = Date.now() + 600;
+      // Mojibake also comes from a partial UTF-8 sequence or a byte that is
+      // not text at all; neither belongs on screen.
+      const printable = (t: string) =>
+        t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFD]/g, "");
+
       while (true) {
         const { value, done } = await reader.read();
         if (done) { reader.releaseLock(); serialReaderRef.current = null; break; }
-        const chunk = decoder.decode(value, { stream: true });
+        if (Date.now() < bootLogUntil) continue;   // still inside the boot burst
+        const chunk = printable(decoder.decode(value, { stream: true }));
+        if (!chunk) continue;
         if (chunk.trim()) {
           logToTerminal(`[SERIAL] ${chunk.trim()}`, "serial");
         }

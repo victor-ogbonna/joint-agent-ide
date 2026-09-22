@@ -75,6 +75,8 @@ export class WebUsbSerialPort {
   readonly rawLog: string[] = [];
   /** Count of data-free status packets, so the log is not drowned in them. */
   private idlePackets = 0;
+  /** Bumped on every close, so an in-flight read cannot resurrect its loop. */
+  private pumpGeneration = 0;
   /** UART faults the bridge reported, which say the LINK is bad rather than
    *  the protocol. ftdi_sio line status: bit1 overrun, bit2 parity,
    *  bit3 framing, bit4 break. */
@@ -303,19 +305,31 @@ export class WebUsbSerialPort {
   }
 
   private startPump(): void {
+    // Each pump carries a generation. close() bumps the counter, so a loop
+    // whose transferIn was still in flight at close time exits instead of
+    // resuming.
+    //
+    // Without this, closing and reopening — which is exactly what happens
+    // between flashing and starting the serial monitor — left the OLD loop
+    // pending on a read. Reopening set `pumping` back to true, the stale loop
+    // saw it and carried on, and from then on two loops read the same endpoint
+    // and enqueued into the same stream. Bytes arrived interleaved: the
+    // monitor showed gibberish. A real SerialPort has no such loop, which is
+    // why the desktop was unaffected.
+    const generation = ++this.pumpGeneration;
     this.pumping = true;
     this.readable = new ReadableStream<Uint8Array>({
       start: (controller) => {
         this.controller = controller;
         const loop = async () => {
-          while (this.pumping) {
+          while (this.pumping && generation === this.pumpGeneration) {
             let result: any;
             try {
               result = await this.device.transferIn(this.epIn, 64);
             } catch {
               break; // device unplugged or the transfer was cancelled
             }
-            if (!this.pumping) break;
+            if (!this.pumping || generation !== this.pumpGeneration) break;
             if (result?.status === "stall") {
               try { await this.device.clearHalt("in", this.epIn); } catch { break; }
               continue;
@@ -363,6 +377,8 @@ export class WebUsbSerialPort {
                 if (kept.length === 0) continue;
                 bytes = new Uint8Array(kept);
               }
+              // Enqueue into THIS loop's own controller, never the shared
+              // field, so a stale loop cannot write into a newer stream.
               try { controller.enqueue(new Uint8Array(bytes)); } catch { break; }
             }
           }
@@ -377,6 +393,7 @@ export class WebUsbSerialPort {
   async close(): Promise<void> {
     if (!this.readable && !this.device.opened) throw new Error("The port is not open.");
     this.pumping = false;
+    this.pumpGeneration++;   // retire any loop still waiting on a transferIn
     try { this.controller?.close(); } catch { /* already closed */ }
     this.controller = null;
     this.readable = null;
