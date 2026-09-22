@@ -495,6 +495,8 @@ export default function App() {
     if (!bootLoggedRef.current) {
       logToTerminal("==========================================================", "info");
       logToTerminal("  JOINT-AGENT IDE INITIALIZED                   ", "success");
+      // So a pasted log always says which build produced it.
+      logToTerminal(`  Build ${typeof __BUILD_STAMP__ === "string" ? __BUILD_STAMP__ : "dev"}`, "info");
       logToTerminal("  Joint-Agent Embedded Core Ready                          ", "info");
       logToTerminal("==========================================================", "info");
       logToTerminal(`System Core: Node compiler initialized. Powered by Joint-Agent Engine.`, "info");

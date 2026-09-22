@@ -6,6 +6,13 @@ import {defineConfig} from 'vite';
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
+    // Stamped into the bundle so the running build can identify itself. A
+    // phone quietly serving a superseded bundle cost several rounds of
+    // debugging symptoms that had already been fixed; now every terminal log
+    // says which build produced it.
+    define: {
+      __BUILD_STAMP__: JSON.stringify(new Date().toISOString().replace(/\.\d+Z$/, "Z")),
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

@@ -35,6 +35,23 @@ jointagentide.com, www.jointagentide.com {
 		-Server
 	}
 
+	# The HTML shell must never be reused from cache. Its whole job is to name
+	# the current hashed bundle, so a stale copy pins the browser to an old
+	# build of the app — which happened: a phone kept running superseded
+	# flasher code for several rounds of debugging while reporting symptoms
+	# that had already been fixed. "max-age=0" asks for revalidation; mobile
+	# browsers do not always oblige. "no-store" leaves no room for
+	# interpretation.
+	@html {
+		path / /index.html /waitlist /privacy /thanks /admin
+	}
+	header @html Cache-Control "no-store, must-revalidate"
+
+	# Asset filenames carry a content hash, so they can be cached hard and
+	# forever — a changed file gets a different name.
+	@hashed path /assets/*
+	header @hashed Cache-Control "public, max-age=31536000, immutable"
+
 	log {
 		output stdout
 		format console
