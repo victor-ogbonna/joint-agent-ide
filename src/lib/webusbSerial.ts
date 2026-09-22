@@ -73,11 +73,13 @@ export class WebUsbSerialPort {
    *  Inferring the layout from post-strip bytes has proved unreliable — this
    *  records what the wire actually carried. */
   readonly rawLog: string[] = [];
+  /** Count of data-free status packets, so the log is not drowned in them. */
+  private idlePackets = 0;
 
   /** Endpoint geometry plus those raw packets, for a failure message. */
   describeFraming(): string {
-    return `bridge=${this.kind} epIn=${this.epIn} packetSize=${this.epInPacketSize}` +
-      (this.rawLog.length ? ` raw: ${this.rawLog.join(" | ")}` : " raw: (nothing read)");
+    return `bridge=${this.kind} epIn=${this.epIn} packetSize=${this.epInPacketSize} idle=${this.idlePackets}` +
+      (this.rawLog.length ? ` data packets: ${this.rawLog.join(" | ")}` : " data packets: (none)");
   }
   private pumping = false;
   private controller: ReadableStreamDefaultController<Uint8Array> | null = null;
@@ -296,11 +298,17 @@ export class WebUsbSerialPort {
             const view = result?.data;
             if (view && view.byteLength > 0) {
               let bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-              if (this.rawLog.length < 6) {
+              // Record only packets that CARRY something. An idle FTDI sends a
+              // bare status pair every latency period, so logging the first
+              // few packets captured six of those and none of the traffic
+              // that mattered.
+              if (bytes.length > 2 && this.rawLog.length < 10) {
                 this.rawLog.push(
-                  `len=${bytes.length} [${Array.from(bytes.slice(0, 16))
+                  `len=${bytes.length} [${Array.from(bytes.slice(0, 20))
                     .map((b) => b.toString(16).padStart(2, "0")).join(" ")}]`
                 );
+              } else if (bytes.length <= 2) {
+                this.idlePackets++;
               }
               // FTDI prefixes EVERY packet with two modem-status bytes. Passing
               // them through would corrupt the very first protocol reply.

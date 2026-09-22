@@ -625,28 +625,13 @@ export async function flashAvr({
     // accepts 0x14 followed by 0x10, and in a noisy stream those can occur by
     // chance. Ask the chip to identify itself — a real bootloader answers with
     // its three signature bytes, and junk will not.
-    // Diagnostic, never fatal. Reading it needs a 3-byte payload back, and a
-    // payload cannot be resynchronised the way a bare INSYNC/OK pair can — so
-    // a noisy line can spoil the probe on a board that would program perfectly
-    // well. Report what it says and carry on either way.
-    let signature = "";
-    try {
-      const sig = await command(writer!, rx!, [Cmd.READ_SIGN], 3, 1000);
-      signature = Array.from(sig).map((b) => b.toString(16).padStart(2, "0")).join(" ");
-      rx!.discard();
-    } catch {
-      rx!.discard();
-    }
-
-    if (signature.startsWith("1e")) {
-      log(`Bootloader responded — device signature ${signature}.`);
-    } else if (signature) {
-      // 0x1E is Atmel's manufacturer byte. Anything else means we are reading
-      // something that is not an AVR bootloader.
-      log(`Bootloader responded, but the signature (${signature}) is not an AVR's. Continuing anyway.`);
-    } else {
-      log("Bootloader responded (signature unreadable on this line).");
-    }
+    // A signature probe used to sit here. It cost more than it told us:
+    // optiboot's verifySpace() busy-loops until the watchdog resets the chip
+    // if it reads a byte that is not CRC_EOP, so a probe that misread left the
+    // board OUT of the bootloader and every command after it timed out. A
+    // diagnostic must not break the thing it is diagnosing. Raw packet logging
+    // gives the same insight without touching the protocol.
+    log("Bootloader responded.");
 
     await command(writer!, rx!, [Cmd.ENTER_PROGMODE]);
 
