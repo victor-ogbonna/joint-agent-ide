@@ -181,6 +181,7 @@ function makePort(boot) {
 
 const STK_OK=0x10, STK_INSYNC=0x14, CRC_EOP=0x20;
 const GET_SYNC=0x30, ENTER_PROG=0x50, LEAVE_PROG=0x51, LOAD_ADDR=0x55, PROG_PAGE=0x64;
+const READ_SIGN=0x75;   // optiboot answers this; avrdude uses it to identify the chip
 const FLASH=32*1024;
 
 class Optiboot {
@@ -193,7 +194,7 @@ class Optiboot {
       if(!this.rx.length) return;
       const c=this.rx[0];
       let need, handler;
-      if(c===GET_SYNC||c===ENTER_PROG||c===LEAVE_PROG){ need=2; }
+      if(c===GET_SYNC||c===ENTER_PROG||c===LEAVE_PROG||c===READ_SIGN){ need=2; }
       else if(c===LOAD_ADDR){ need=4; }
       else if(c===PROG_PAGE){
         if(this.rx.length<4) return;
@@ -219,6 +220,12 @@ class Optiboot {
       this.log.push(`PAGE ${len}B @0x${this.addr.toString(16)}`);
       this.ok();
     }
+    // ATmega328P. Real optiboot answers READ_SIGN, and answers unknown
+    // commands with a bare INSYNC/OK through its default branch - the model
+    // used to stay silent for both, which is LESS forgiving than the hardware
+    // and made a faithful client look broken.
+    else if(c===READ_SIGN){ this.log.push("SIGN"); this.ok([0x1e,0x95,0x0f]); }
+    else { this.log.push(`UNKNOWN 0x${c.toString(16)}`); this.ok(); }
   }
   drain(){ return this.out.length? new Uint8Array(this.out.splice(0,this.chunkBytes)) : null; }
 }

@@ -218,7 +218,10 @@ class SerialBuffer {
       if (this.ended) throw new Error("Serial port closed during upload.");
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
-        throw new Error(`Timed out waiting for the board (got ${this.buf.length} of ${count} bytes).`);
+        throw new Error(
+          `Timed out waiting for the board (got ${this.buf.length} of ${count} bytes).` +
+          (this.recent.length ? ` Recent bytes: ${this.describeRecent()}` : " Nothing has been received at all.")
+        );
       }
       // Capped so a wake-up that races the assignment below cannot stall us.
       await new Promise<void>((resolve) => {
@@ -557,28 +560,77 @@ export async function flashAvr({
     }
 
     // --- stk500v1 (optiboot: Uno, Nano, Pro Mini, urclock boards) ---
+    //
+    // The catalogue's upload speed is the board's NOMINAL rate, which is not
+    // always the rate the bootloader actually on the chip runs at. An
+    // FT232-based "Uno" is usually a Duemilanove or a Nano clone carrying the
+    // older ATmegaBOOT at 57600, and older boards still use 19200. At the
+    // wrong rate the line produces framing garbage rather than silence, which
+    // is far more confusing than no reply at all. Try the configured rate
+    // first, then the historical ones.
+    const bauds = [baudRate, 57600, 19200].filter((b, i, a) => a.indexOf(b) === i);
     let synced = false;
-    for (let attempt = 1; attempt <= 3 && !synced; attempt++) {
-      try {
-        await command(writer!, rx!, [Cmd.GET_SYNC], 0, 500);
-        synced = true;
-      } catch {
-        if (attempt < 3) {
-          log(`Sync attempt ${attempt} failed, retrying…`);
-          await resetBoard(port, resetDelayMs);
-          rx!.discard();
+
+    for (const baud of bauds) {
+      if (baud !== baudRate) {
+        log(`No reply at ${baudRate} baud. Trying ${baud}…`);
+        try { await port.close(); } catch { /* already closed */ }
+        await port.open({ baudRate: baud });
+        reader = port.readable.getReader();
+        writer = port.writable.getWriter();
+        rx = new SerialBuffer(reader!);
+      }
+
+      for (let attempt = 1; attempt <= 3 && !synced; attempt++) {
+        await resetBoard(port, resetDelayMs);
+        rx!.discard();
+        try {
+          await command(writer!, rx!, [Cmd.GET_SYNC], 0, 500);
+          synced = true;
+        } catch {
+          if (attempt < 3) log(`Sync attempt ${attempt} failed, retrying…`);
         }
       }
+      if (synced) {
+        if (baud !== baudRate) log(`Synced at ${baud} baud.`);
+        break;
+      }
     }
+
     if (!synced) {
       throw new Error(heardNothing(rx!.received, rx!.describeSample()));
     }
-    log("Bootloader responded.");
-    // Drain once synced, exactly as avrdude does. Sync may have succeeded by
-    // resynchronising PAST junk, which leaves the rest of that junk sitting in
-    // front of the next reply — and from there every command reads somebody
-    // else's bytes and the stream is permanently one step out of phase.
+    // Drain BEFORE asking anything else. Sync may have succeeded by skipping
+    // past junk, and the rest of that junk is still queued — a probe issued now
+    // reads it instead of the reply and latches onto the wrong marker.
     rx!.discard();
+
+    // "Bootloader responded" is a weaker claim than it sounds: resynchronising
+    // accepts 0x14 followed by 0x10, and in a noisy stream those can occur by
+    // chance. Ask the chip to identify itself — a real bootloader answers with
+    // its three signature bytes, and junk will not.
+    // Diagnostic, never fatal. Reading it needs a 3-byte payload back, and a
+    // payload cannot be resynchronised the way a bare INSYNC/OK pair can — so
+    // a noisy line can spoil the probe on a board that would program perfectly
+    // well. Report what it says and carry on either way.
+    let signature = "";
+    try {
+      const sig = await command(writer!, rx!, [Cmd.READ_SIGN], 3, 1000);
+      signature = Array.from(sig).map((b) => b.toString(16).padStart(2, "0")).join(" ");
+      rx!.discard();
+    } catch {
+      rx!.discard();
+    }
+
+    if (signature.startsWith("1e")) {
+      log(`Bootloader responded — device signature ${signature}.`);
+    } else if (signature) {
+      // 0x1E is Atmel's manufacturer byte. Anything else means we are reading
+      // something that is not an AVR bootloader.
+      log(`Bootloader responded, but the signature (${signature}) is not an AVR's. Continuing anyway.`);
+    } else {
+      log("Bootloader responded (signature unreadable on this line).");
+    }
 
     await command(writer!, rx!, [Cmd.ENTER_PROGMODE]);
 

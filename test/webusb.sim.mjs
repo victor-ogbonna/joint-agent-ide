@@ -137,6 +137,8 @@ function mockUsbDevice(boot, kind) {
   let outQueue = [];
   let lateJunk = null;
   let noisy = false;
+  let onlyBaud = null;
+  let currentBaud = 0;
   return {
     vendorId: kind === "ch34x" ? 0x1a86 : kind === "cp210x" ? 0x10c4 : kind === "ftdi" ? 0x0403 : 0x2341,
     productId: 0x0042,
@@ -161,6 +163,13 @@ function mockUsbDevice(boot, kind) {
     async clearHalt() {},
     async controlTransferOut(setup, data) {
       control.push({ ...setup, len: data ? data.byteLength : 0 });
+      if (kind === "ftdi" && setup.request === 0x03) {
+        // divisor -> baud, using the same 3MHz base the adapter encodes with
+        const whole = setup.value & 0x3fff;
+        const frac = (setup.value >> 14) & 3;
+        const eighths = whole * 8 + [0, 4, 2, 6][frac];
+        currentBaud = eighths ? Math.round((3000000 * 8) / eighths) : 3000000;
+      }
       // DTR assert on any bridge resets the board; the flasher relies on it.
       const asserted =
         (kind === "cdc"   && setup.request === 0x22 && (setup.value & 1)) ||
@@ -171,6 +180,15 @@ function mockUsbDevice(boot, kind) {
       return { status: "ok" };
     },
     async transferOut(_ep, chunk) {
+      // At the wrong rate the chip does not stay quiet: it emits garbage.
+      // Real bridges quantise: an FTDI divisor lands 57600 on 57692, which is
+      // 0.16% out and perfectly readable. Compare with UART tolerance, not
+      // for equality, or the model rejects rates that hardware accepts.
+      const rateOk = onlyBaud === null || Math.abs(currentBaud - onlyBaud) / onlyBaud < 0.02;
+      if (!rateOk) {
+        for (let i = 0; i < 8; i++) outQueue.push(0xfc, 0x00, 0xe0, 0x80);
+        return { status: "ok", bytesWritten: chunk.byteLength };
+      }
       boot.feed(new Uint8Array(chunk));
       if (lateJunk) { outQueue.unshift(...lateJunk); lateJunk = null; }
       if (noisy && boot.out.length >= 2) {
@@ -208,6 +226,12 @@ function mockUsbDevice(boot, kind) {
      * sitting between INSYNC and OK surfaces as "expected 0x10, got 0xfc".
      */
     __noisy(on) { noisy = on; },
+    /**
+     * A board whose bootloader only speaks at one particular rate. Anything
+     * else on the wire is framing garbage, not silence - which is what an
+     * FT232-based Duemilanove or Nano clone does when addressed at 115200.
+     */
+    __onlyAtBaud(b) { onlyBaud = b; },
   };
 }
 
@@ -306,6 +330,30 @@ for (const kind of ["cdc", "ch34x", "cp210x", "ftdi"]) {
   const ok = /identical/.test(verdict);
   if (!ok) failures++;
   console.log(`  ${ok ? "ok  " : "FAIL"}  ftdi, junk around every reply -> ${verdict}`);
+}
+
+// --- a board whose bootloader only runs at 57600 --------------------------
+{
+  const OptibootSim = (await import("./optiboot.mjs")).default;
+  const SZ = 924;
+  const prog = new Uint8Array(SZ);
+  for (let i = 0; i < SZ; i++) prog[i] = (i * 17 + 3) & 0xff;
+  const boot = new OptibootSim(64);
+  const device = mockUsbDevice(boot, "ftdi");
+  const port = new WebUsbSerialPort(device, "ftdi");
+  device.__onlyAtBaud(57600);
+  let verdict;
+  try {
+    // The catalogue says 115200, as it does for "uno".
+    await flashAvr({ hex: makeHex(prog), uploadProtocol: "arduino", uploadSpeed: 115200,
+                     chip: "ATMEGA328P", port, onProgress: () => {} });
+    let bad = -1;
+    for (let i = 0; i < SZ; i++) if (boot.flash[i] !== prog[i]) { bad = i; break; }
+    verdict = bad >= 0 ? `flash corrupt at byte ${bad}` : `${SZ} bytes identical`;
+  } catch (e) { verdict = `threw: ${e.message.slice(0, 60)}`; }
+  const ok = /identical/.test(verdict);
+  if (!ok) failures++;
+  console.log(`  ${ok ? "ok  " : "FAIL"}  ftdi, bootloader only at 57600 -> ${verdict}`);
 }
 
 console.log(failures ? `\n${failures} failing case(s)` : "\nAll WebUSB bridges passed.");
