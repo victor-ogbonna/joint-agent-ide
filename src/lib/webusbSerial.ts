@@ -75,10 +75,31 @@ export class WebUsbSerialPort {
   readonly rawLog: string[] = [];
   /** Count of data-free status packets, so the log is not drowned in them. */
   private idlePackets = 0;
+  /** UART faults the bridge reported, which say the LINK is bad rather than
+   *  the protocol. ftdi_sio line status: bit1 overrun, bit2 parity,
+   *  bit3 framing, bit4 break. */
+  private lineErrors = { overrun: 0, parity: 0, framing: 0, break: 0 };
+
+  private noteLineStatus(b: number): void {
+    if (b === undefined) return;
+    if (b & 0x02) this.lineErrors.overrun++;
+    if (b & 0x04) this.lineErrors.parity++;
+    if (b & 0x08) this.lineErrors.framing++;
+    if (b & 0x10) this.lineErrors.break++;
+  }
+
+  /** Non-zero counts mean the bytes themselves cannot be trusted. */
+  describeLineErrors(): string {
+    const e = this.lineErrors;
+    const total = e.overrun + e.parity + e.framing + e.break;
+    if (!total) return "";
+    return ` UART errors: overrun=${e.overrun} parity=${e.parity} framing=${e.framing} break=${e.break}`;
+  }
 
   /** Endpoint geometry plus those raw packets, for a failure message. */
   describeFraming(): string {
     return `bridge=${this.kind} epIn=${this.epIn} packetSize=${this.epInPacketSize} idle=${this.idlePackets}` +
+      this.describeLineErrors() +
       (this.rawLog.length ? ` data packets: ${this.rawLog.join(" | ")}` : " data packets: (none)");
   }
   private pumping = false;
@@ -321,14 +342,18 @@ export class WebUsbSerialPort {
                 const kept: number[] = [];
                 for (let off = 0; off < bytes.length; off += pkt) {
                   const end = Math.min(off + pkt, bytes.length);
-                  // Only strip a pair that actually LOOKS like FTDI status.
-                  // Stripping unconditionally destroyed real data: an Uno's
-                  // signature reply 14 1e 95 0f 10 came back as 0f 10, and a
-                  // bare 14 10 sync reply vanished entirely because the packet
-                  // was exactly two bytes long. The modem-status byte always
-                  // carries 0x01 in its low nibble and the line-status byte
-                  // carries 0x00 in its, which no STK500 code does.
-                  const start = isFtdiStatusPair(bytes[off], bytes[off + 1]) ? off + 2 : off;
+                  // FTDI puts two status bytes at the head of EVERY packet,
+                  // so strip by position. A previous attempt made this
+                  // conditional on the bytes "looking like" status, requiring
+                  // the line-status byte's low nibble to be zero — but that
+                  // byte carries the error flags, and a link reporting
+                  // framing or parity errors sends values like 0xfc, which
+                  // then leaked into the data stream as though they were
+                  // protocol bytes. The raw capture settled it: packets always
+                  // carry the pair, and a two-byte packet is status with no
+                  // payload rather than an unprefixed reply.
+                  this.noteLineStatus(bytes[off + 1]);
+                  const start = off + 2;
                   for (let i = start; i < end; i++) kept.push(bytes[i]);
                 }
                 if (kept.length === 0) continue;
@@ -385,20 +410,6 @@ export function ch34xDivisor(baud: number): number {
   if (div < 2) throw new Error(`The CH340 cannot do ${baud} baud.`);
 
   return (((0x100 - div) << 8) | (fact << 2) | ps | 0x80) & 0xffff;
-}
-
-/**
- * Does this byte pair look like FTDI's two modem/line status bytes?
- *
- * ftdi_sio treats the first two bytes of every IN packet as status. In
- * practice that is not safe to assume blindly here: doing so ate an Uno's
- * replies outright. Both status bytes have a fixed low nibble — 0x1 for modem
- * status, 0x0 for line status — while the STK500 codes that matter (0x14
- * INSYNC, 0x10 OK) and AVR signature bytes do not fit that shape.
- */
-export function isFtdiStatusPair(b0: number, b1: number): boolean {
-  if (b0 === undefined || b1 === undefined) return false;
-  return (b0 & 0x0f) === 0x01 && (b1 & 0x0f) === 0x00;
 }
 
 /** ftdi_sio.c divisor encoding for the 3MHz-base parts (FT232R and friends). */

@@ -584,11 +584,25 @@ export async function flashAvr({
     for (const baud of bauds) {
       if (baud !== baudRate) {
         log(`No reply at ${baudRate} baud. Trying ${baud}…`);
+        // Tear the old transport down COMPLETELY before reopening. Closing
+        // the port alone leaves the previous pump's read in flight; it then
+        // consumes a packet and enqueues it into a stream nobody is reading,
+        // so a reply vanishes. That showed up as the suite failing about one
+        // run in three, which is the same race real hardware would hit on
+        // every baud change.
+        try { await reader?.cancel(); } catch { /* already gone */ }
+        try { await rx?.pumping; } catch { /* pump already stopped */ }
+        try { reader?.releaseLock(); } catch { /* already released */ }
+        try { writer?.releaseLock(); } catch { /* already released */ }
         try { await port.close(); } catch { /* already closed */ }
+
         await port.open({ baudRate: baud });
         reader = port.readable.getReader();
         writer = port.writable.getWriter();
         rx = new SerialBuffer(reader!);
+        if (typeof (port as any).describeFraming === "function") {
+          rx.framing = () => (port as any).describeFraming();
+        }
       }
 
       for (let attempt = 1; attempt <= 3 && !synced; attempt++) {
