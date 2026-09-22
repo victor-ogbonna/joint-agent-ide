@@ -598,7 +598,13 @@ export async function flashAvr({
     }
 
     if (!synced) {
-      throw new Error(heardNothing(rx!.received, rx!.describeSample()));
+      // Surface the raw framing when the adapter can describe it. Post-strip
+      // bytes alone could not settle whether the status-byte handling was
+      // right; the pre-strip packets can.
+      const framing = typeof (port as any).describeFraming === "function"
+        ? ` ${(port as any).describeFraming()}`
+        : "";
+      throw new Error(heardNothing(rx!.received, rx!.describeSample() + framing));
     }
     // Drain BEFORE asking anything else. Sync may have succeeded by skipping
     // past junk, and the rest of that junk is still queued — a probe issued now

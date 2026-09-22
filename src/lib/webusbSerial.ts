@@ -69,6 +69,16 @@ export class WebUsbSerialPort {
   private epIn = 0;
   private epOut = 0;
   private epInPacketSize = 64;
+  /** Raw, pre-strip packets from the first reads, for diagnosing framing.
+   *  Inferring the layout from post-strip bytes has proved unreliable — this
+   *  records what the wire actually carried. */
+  readonly rawLog: string[] = [];
+
+  /** Endpoint geometry plus those raw packets, for a failure message. */
+  describeFraming(): string {
+    return `bridge=${this.kind} epIn=${this.epIn} packetSize=${this.epInPacketSize}` +
+      (this.rawLog.length ? ` raw: ${this.rawLog.join(" | ")}` : " raw: (nothing read)");
+  }
   private pumping = false;
   private controller: ReadableStreamDefaultController<Uint8Array> | null = null;
   private dtr = false;
@@ -286,6 +296,12 @@ export class WebUsbSerialPort {
             const view = result?.data;
             if (view && view.byteLength > 0) {
               let bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+              if (this.rawLog.length < 6) {
+                this.rawLog.push(
+                  `len=${bytes.length} [${Array.from(bytes.slice(0, 16))
+                    .map((b) => b.toString(16).padStart(2, "0")).join(" ")}]`
+                );
+              }
               // FTDI prefixes EVERY packet with two modem-status bytes. Passing
               // them through would corrupt the very first protocol reply.
               if (this.kind === "ftdi") {
