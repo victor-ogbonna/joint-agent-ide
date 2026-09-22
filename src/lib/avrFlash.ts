@@ -150,6 +150,9 @@ class SerialBuffer {
    *  printable ASCII is a sketch still running, and anything else is a baud
    *  rate or wiring problem. */
   private sample: number[] = [];
+  /** Rolling window of the most recent bytes, for pinpointing where a reply
+   *  stopped making sense mid-session. */
+  private recent: number[] = [];
   private ended = false;
   private err: Error | null = null;
   private wake: (() => void) | null = null;
@@ -170,6 +173,8 @@ class SerialBuffer {
           for (let i = 0; i < value.length; i++) {
             this.buf.push(value[i]);
             if (this.sample.length < 24) this.sample.push(value[i]);
+            this.recent.push(value[i]);
+            if (this.recent.length > 32) this.recent.shift();
           }
         }
         this.signal();
@@ -189,6 +194,12 @@ class SerialBuffer {
   /** Drop anything already received — used right after a reset pulse. */
   discard(): void {
     this.buf.length = 0;
+  }
+
+  /** Hex of the most recent bytes, to show what a bad reply sat among. */
+  describeRecent(): string {
+    if (!this.recent.length) return "";
+    return this.recent.map((b) => b.toString(16).padStart(2, "0")).join(" ");
   }
 
   /** Hex plus printable ASCII of the first bytes seen, for the error message. */
@@ -247,14 +258,40 @@ async function command(
   let skipped = 0;
   while (head[0] !== Resp.INSYNC) {
     if (++skipped > 512) {
-      throw new Error(`Board out of sync — ${skipped} bytes read without a 0x14 reply.`);
+      throw new Error(
+        `Board out of sync — ${skipped} bytes read without a 0x14 reply. ` +
+        `Recent bytes: ${rx.describeRecent()}`
+      );
     }
     head = await rx.read(1, left());
   }
   const body = expectBytes > 0 ? await rx.read(expectBytes, left()) : new Uint8Array(0);
-  const tail = await rx.read(1, left());
+  let tail = await rx.read(1, left());
+
+  // Junk can also land BETWEEN the two markers, which is what produced
+  // "expected 0x10, got 0xfc" the moment resynchronising got sync working.
+  // Skipping to the OK is only safe when no payload is expected between them —
+  // otherwise a data byte that happened to be 0x10 would be mistaken for the
+  // terminator. Every v1 command this flasher sends expects an empty body, so
+  // the guard holds; it is asserted rather than assumed.
+  if (expectBytes === 0) {
+    let junk = 0;
+    while (tail[0] !== Resp.OK && junk < 64) {
+      junk++;
+      tail = await rx.read(1, left());
+    }
+    skipped += junk;
+  }
+
   if (tail[0] !== Resp.OK) {
-    throw new Error(`Board rejected a command (expected 0x10, got 0x${tail[0].toString(16)}).`);
+    // Name the command and show the surrounding bytes. "expected 0x10, got
+    // 0xfc" alone cannot distinguish a stream that is one reply out of step
+    // from real corruption, and those need opposite fixes.
+    throw new Error(
+      `Command 0x${payload[0].toString(16)} got 0x${tail[0].toString(16)} where 0x10 was due` +
+      `${skipped ? ` (after skipping ${skipped} byte(s))` : ""}. ` +
+      `Recent bytes: ${rx.describeRecent()}`
+    );
   }
   return body;
 }
@@ -385,6 +422,7 @@ async function flashStk500v2(
       // Reply is [CMD_SIGN_ON, status, len, ...signature]
       const sig = new TextDecoder().decode(reply.slice(3)).replace(/\0+$/, "");
       log(`Bootloader responded${sig ? ` (${sig})` : ""}.`);
+      rx.discard();   // same reasoning as the v1 path: start clean once synced
       signedOn = true;
       next();
     } catch {
@@ -536,6 +574,11 @@ export async function flashAvr({
       throw new Error(heardNothing(rx!.received, rx!.describeSample()));
     }
     log("Bootloader responded.");
+    // Drain once synced, exactly as avrdude does. Sync may have succeeded by
+    // resynchronising PAST junk, which leaves the rest of that junk sitting in
+    // front of the next reply — and from there every command reads somebody
+    // else's bytes and the stream is permanently one step out of phase.
+    rx!.discard();
 
     await command(writer!, rx!, [Cmd.ENTER_PROGMODE]);
 

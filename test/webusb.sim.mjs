@@ -136,6 +136,7 @@ function mockUsbDevice(boot, kind) {
   const control = [];              // every control transfer, for assertions
   let outQueue = [];
   let lateJunk = null;
+  let noisy = false;
   return {
     vendorId: kind === "ch34x" ? 0x1a86 : kind === "cp210x" ? 0x10c4 : kind === "ftdi" ? 0x0403 : 0x2341,
     productId: 0x0042,
@@ -172,6 +173,10 @@ function mockUsbDevice(boot, kind) {
     async transferOut(_ep, chunk) {
       boot.feed(new Uint8Array(chunk));
       if (lateJunk) { outQueue.unshift(...lateJunk); lateJunk = null; }
+      if (noisy && boot.out.length >= 2) {
+        const reply = boot.out.splice(0, boot.out.length);
+        boot.out.push(0xfc, reply[0], 0xfc, ...reply.slice(1));
+      }
       return { status: "ok", bytesWritten: chunk.byteLength };
     },
     async transferIn(_ep, len) {
@@ -196,6 +201,13 @@ function mockUsbDevice(boot, kind) {
      * front of the bootloader's reply where they do real damage.
      */
     __stuffLate(bytes) { lateJunk = [...bytes]; },
+    /**
+     * A noise source that never stops: one junk byte ahead of every reply
+     * and another wedged between its two marker bytes. This is the reported
+     * Uno failure - sync resynchronises past the leading junk, then the byte
+     * sitting between INSYNC and OK surfaces as "expected 0x10, got 0xfc".
+     */
+    __noisy(on) { noisy = on; },
   };
 }
 
@@ -271,6 +283,29 @@ for (const kind of ["cdc", "ch34x", "cp210x", "ftdi"]) {
     if (!ok) failures++;
     console.log(`  ${ok ? "ok  " : "FAIL"}  ftdi + ${String(junk.length).padStart(3)} stale bytes -> ${verdict}`);
   }
+}
+
+// --- a line that never stops emitting junk --------------------------------
+{
+  const OptibootSim = (await import("./optiboot.mjs")).default;
+  const SZ = 924;
+  const prog = new Uint8Array(SZ);
+  for (let i = 0; i < SZ; i++) prog[i] = (i * 17 + 3) & 0xff;
+  const boot = new OptibootSim(64);
+  const device = mockUsbDevice(boot, "ftdi");
+  const port = new WebUsbSerialPort(device, "ftdi");
+  device.__noisy(true);
+  let verdict;
+  try {
+    await flashAvr({ hex: makeHex(prog), uploadProtocol: "arduino", uploadSpeed: 115200,
+                     chip: "ATMEGA328P", port, onProgress: () => {} });
+    let bad = -1;
+    for (let i = 0; i < SZ; i++) if (boot.flash[i] !== prog[i]) { bad = i; break; }
+    verdict = bad >= 0 ? `flash corrupt at byte ${bad}` : `${SZ} bytes identical`;
+  } catch (e) { verdict = `threw: ${e.message.slice(0, 70)}`; }
+  const ok = /identical/.test(verdict);
+  if (!ok) failures++;
+  console.log(`  ${ok ? "ok  " : "FAIL"}  ftdi, junk around every reply -> ${verdict}`);
 }
 
 console.log(failures ? `\n${failures} failing case(s)` : "\nAll WebUSB bridges passed.");
