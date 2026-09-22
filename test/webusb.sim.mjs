@@ -138,6 +138,7 @@ function mockUsbDevice(boot, kind) {
   let lateJunk = null;
   let noisy = false;
   let onlyBaud = null;
+  let noStatus = false;
   let currentBaud = 0;
   return {
     vendorId: kind === "ch34x" ? 0x1a86 : kind === "cp210x" ? 0x10c4 : kind === "ftdi" ? 0x0403 : 0x2341,
@@ -208,7 +209,7 @@ function mockUsbDevice(boot, kind) {
       const take = outQueue.splice(0, Math.min(len, 64));
       let bytes = new Uint8Array(take);
       // FTDI puts two modem-status bytes in front of every IN packet.
-      if (kind === "ftdi") bytes = new Uint8Array([0x01, 0x60, ...bytes]);
+      if (kind === "ftdi" && !noStatus) bytes = new Uint8Array([0x01, 0x60, ...bytes]);
       return { status: "ok", data: new DataView(bytes.buffer) };
     },
     /**
@@ -232,6 +233,13 @@ function mockUsbDevice(boot, kind) {
      * FT232-based Duemilanove or Nano clone does when addressed at 115200.
      */
     __onlyAtBaud(b) { onlyBaud = b; },
+    /**
+     * Deliver FTDI packets WITHOUT the two status bytes. Real hardware on
+     * this user's phone does exactly that, and stripping two bytes
+     * unconditionally then ate the payload: a bare 14 10 sync reply
+     * vanished outright, and a signature came back missing its head.
+     */
+    __noStatusPrefix() { noStatus = true; },
   };
 }
 
@@ -354,6 +362,29 @@ for (const kind of ["cdc", "ch34x", "cp210x", "ftdi"]) {
   const ok = /identical/.test(verdict);
   if (!ok) failures++;
   console.log(`  ${ok ? "ok  " : "FAIL"}  ftdi, bootloader only at 57600 -> ${verdict}`);
+}
+
+// --- an FTDI bridge that does NOT prefix packets with status bytes --------
+{
+  const OptibootSim = (await import("./optiboot.mjs")).default;
+  const SZ = 924;
+  const prog = new Uint8Array(SZ);
+  for (let i = 0; i < SZ; i++) prog[i] = (i * 17 + 3) & 0xff;
+  const boot = new OptibootSim(64);
+  const device = mockUsbDevice(boot, "ftdi");
+  const port = new WebUsbSerialPort(device, "ftdi");
+  device.__noStatusPrefix();
+  let verdict;
+  try {
+    await flashAvr({ hex: makeHex(prog), uploadProtocol: "arduino", uploadSpeed: 115200,
+                     chip: "ATMEGA328P", port, onProgress: () => {} });
+    let bad = -1;
+    for (let i = 0; i < SZ; i++) if (boot.flash[i] !== prog[i]) { bad = i; break; }
+    verdict = bad >= 0 ? `flash corrupt at byte ${bad}` : `${SZ} bytes identical`;
+  } catch (e) { verdict = `threw: ${e.message.slice(0, 55)}`; }
+  const ok = /identical/.test(verdict);
+  if (!ok) failures++;
+  console.log(`  ${ok ? "ok  " : "FAIL"}  ftdi without status prefix -> ${verdict}`);
 }
 
 console.log(failures ? `\n${failures} failing case(s)` : "\nAll WebUSB bridges passed.");

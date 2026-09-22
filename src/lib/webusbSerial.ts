@@ -313,7 +313,15 @@ export class WebUsbSerialPort {
                 const kept: number[] = [];
                 for (let off = 0; off < bytes.length; off += pkt) {
                   const end = Math.min(off + pkt, bytes.length);
-                  for (let i = off + 2; i < end; i++) kept.push(bytes[i]);
+                  // Only strip a pair that actually LOOKS like FTDI status.
+                  // Stripping unconditionally destroyed real data: an Uno's
+                  // signature reply 14 1e 95 0f 10 came back as 0f 10, and a
+                  // bare 14 10 sync reply vanished entirely because the packet
+                  // was exactly two bytes long. The modem-status byte always
+                  // carries 0x01 in its low nibble and the line-status byte
+                  // carries 0x00 in its, which no STK500 code does.
+                  const start = isFtdiStatusPair(bytes[off], bytes[off + 1]) ? off + 2 : off;
+                  for (let i = start; i < end; i++) kept.push(bytes[i]);
                 }
                 if (kept.length === 0) continue;
                 bytes = new Uint8Array(kept);
@@ -369,6 +377,20 @@ export function ch34xDivisor(baud: number): number {
   if (div < 2) throw new Error(`The CH340 cannot do ${baud} baud.`);
 
   return (((0x100 - div) << 8) | (fact << 2) | ps | 0x80) & 0xffff;
+}
+
+/**
+ * Does this byte pair look like FTDI's two modem/line status bytes?
+ *
+ * ftdi_sio treats the first two bytes of every IN packet as status. In
+ * practice that is not safe to assume blindly here: doing so ate an Uno's
+ * replies outright. Both status bytes have a fixed low nibble — 0x1 for modem
+ * status, 0x0 for line status — while the STK500 codes that matter (0x14
+ * INSYNC, 0x10 OK) and AVR signature bytes do not fit that shape.
+ */
+export function isFtdiStatusPair(b0: number, b1: number): boolean {
+  if (b0 === undefined || b1 === undefined) return false;
+  return (b0 & 0x0f) === 0x01 && (b1 & 0x0f) === 0x00;
 }
 
 /** ftdi_sio.c divisor encoding for the 3MHz-base parts (FT232R and friends). */

@@ -159,6 +159,9 @@ class SerialBuffer {
   /** Resolves when the pump stops — awaited before releasing the lock. */
   readonly pumping: Promise<void>;
 
+  /** Optional hook to describe the transport's raw framing in errors. */
+  framing: (() => string) | null = null;
+
   constructor(private reader: ReadableStreamDefaultReader<Uint8Array>) {
     this.pumping = this.pump();
   }
@@ -220,7 +223,11 @@ class SerialBuffer {
       if (remaining <= 0) {
         throw new Error(
           `Timed out waiting for the board (got ${this.buf.length} of ${count} bytes).` +
-          (this.recent.length ? ` Recent bytes: ${this.describeRecent()}` : " Nothing has been received at all.")
+          (this.recent.length ? ` Recent bytes: ${this.describeRecent()}` : " Nothing has been received at all.") +
+          // Raw framing on timeouts too. It was only on the sync-failure path,
+          // so the one log that could have settled the FTDI question arrived
+          // without it and cost another round.
+          (this.framing ? ` ${this.framing()}` : "")
         );
       }
       // Capped so a wake-up that races the assignment below cannot stall us.
@@ -548,6 +555,9 @@ export async function flashAvr({
     reader = port.readable.getReader();
     writer = port.writable.getWriter();
     rx = new SerialBuffer(reader!);
+    if (typeof (port as any).describeFraming === "function") {
+      rx.framing = () => (port as any).describeFraming();
+    }
 
     log("Resetting board into bootloader…");
     await resetBoard(port, resetDelayMs);
