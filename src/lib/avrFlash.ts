@@ -244,6 +244,39 @@ class SerialBuffer {
  * Send a command and consume the INSYNC/OK envelope every STK500v1 reply is
  * wrapped in. `expectBytes` is the payload length between the two markers.
  */
+/**
+ * Send a command, and resend it if the reply does not arrive intact.
+ *
+ * Replies have been observed losing their leading INSYNC — the bridge
+ * delivered "10" alone where "14 10" was due, on a link reporting no UART
+ * errors at all. Whatever drops that byte, every STK500v1 command this
+ * flasher sends is idempotent: entering or leaving programming mode twice is
+ * a no-op, loading the same address twice is a no-op, and rewriting a page
+ * with identical bytes is a no-op. So resending is safe, and far better than
+ * failing the whole flash over one missing byte.
+ */
+async function commandRetrying(
+  writer: WritableStreamDefaultWriter<Uint8Array>,
+  rx: SerialBuffer,
+  payload: number[],
+  expectBytes = 0,
+  timeoutMs = 2000,
+  tries = 3
+): Promise<Uint8Array> {
+  let last: any;
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    try {
+      return await command(writer, rx, payload, expectBytes, timeoutMs);
+    } catch (e) {
+      last = e;
+      // Start the next attempt from a clean stream: whatever fragment of the
+      // previous reply did arrive would otherwise be read as this one's.
+      rx.discard();
+    }
+  }
+  throw last;
+}
+
 async function command(
   writer: WritableStreamDefaultWriter<Uint8Array>,
   rx: SerialBuffer,
@@ -647,7 +680,7 @@ export async function flashAvr({
     // gives the same insight without touching the protocol.
     log("Bootloader responded.");
 
-    await command(writer!, rx!, [Cmd.ENTER_PROGMODE]);
+    await commandRetrying(writer!, rx!, [Cmd.ENTER_PROGMODE]);
 
     const totalPages = Math.ceil(data.length / pageSize);
     let lastPct = -1;
@@ -658,9 +691,9 @@ export async function flashAvr({
 
       // STK500 addresses flash in WORDS, not bytes.
       const wordAddr = (startAddress + offset) >> 1;
-      await command(writer!, rx!, [Cmd.LOAD_ADDRESS, wordAddr & 0xff, (wordAddr >> 8) & 0xff]);
+      await commandRetrying(writer!, rx!, [Cmd.LOAD_ADDRESS, wordAddr & 0xff, (wordAddr >> 8) & 0xff]);
 
-      await command(writer!, rx!, [
+      await commandRetrying(writer!, rx!, [
         Cmd.PROG_PAGE,
         (chunk.length >> 8) & 0xff,
         chunk.length & 0xff,
@@ -672,7 +705,7 @@ export async function flashAvr({
       if (pct !== lastPct && pct % 10 === 0) { log(`Writing… ${pct}%`); lastPct = pct; }
     }
 
-    await command(writer!, rx!, [Cmd.LEAVE_PROGMODE]);
+    await commandRetrying(writer!, rx!, [Cmd.LEAVE_PROGMODE]);
     log(`Done — ${data.length} bytes written across ${totalPages} pages.`);
   } finally {
     // cancel() ends the pump's in-flight read; without this releaseLock()

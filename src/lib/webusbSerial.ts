@@ -241,9 +241,13 @@ export class WebUsbSerialPort {
         await this.controlOut(0x00, 0x0000, port);                        // SIO_RESET
         await this.controlOut(0x03, ftdiDivisor(baudRate), port);         // baud
         await this.controlOut(0x04, 0x0008, port);                        // 8N1
-        // Latency timer defaults to 16ms, which makes a request/response
-        // protocol crawl. 1ms is what ftdi_sio uses for interactive work.
-        await this.controlOut(0x09, 0x0001, port);
+        // Latency timer. 16ms (the default) makes a request/response protocol
+        // crawl, but 1ms is too far the other way: an idle FTDI answers every
+        // poll with a bare status pair, and a real session logged 4626 of them
+        // — thousands of USB transfers a second, on a phone, competing with
+        // the traffic we actually want. 4ms keeps it responsive without the
+        // storm.
+        await this.controlOut(0x09, 0x0004, port);
         // Throw away whatever is already sitting in the chip's buffers. An
         // FTDI bridge holds bytes across opens, so the first thing a reader
         // saw was the previous sketch's output — and a single stray byte ahead
