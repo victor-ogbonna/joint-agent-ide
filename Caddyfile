@@ -45,12 +45,16 @@ jointagentide.com, www.jointagentide.com {
 	@html {
 		path / /index.html /waitlist /privacy /thanks /admin
 	}
-	header @html Cache-Control "no-store, must-revalidate"
+	# ">" REPLACES the header. Without it Caddy appends, and the app server's
+	# own "public, max-age=0" stayed alongside ours — two conflicting
+	# Cache-Control values in one response, with the browser free to honour
+	# either. Verified against the live site: exactly one now.
+	header @html >Cache-Control "no-store, must-revalidate"
 
 	# Asset filenames carry a content hash, so they can be cached hard and
 	# forever — a changed file gets a different name.
 	@hashed path /assets/*
-	header @hashed Cache-Control "public, max-age=31536000, immutable"
+	header @hashed >Cache-Control "public, max-age=31536000, immutable"
 
 	log {
 		output stdout
