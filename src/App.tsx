@@ -291,7 +291,23 @@ export default function App() {
   const [isSerialMonitorOpen, setIsSerialMonitorOpen] = useState(false);
   const [isSerialPlotterOpen, setIsSerialPlotterOpen] = useState(false);
   const [autoScrollSerial, setAutoScrollSerial] = useState(true);
+  /**
+   * A phone cannot hold two dock panes side by side: at ~380px each pane gets
+   * ~190px, and its header (icon + title + buttons) wraps over the output.
+   * On narrow screens the dock becomes tabbed — one full-width pane at a time.
+   * Desktop is untouched and keeps the split view.
+   */
+  const [mobileDockTab, setMobileDockTab] = useState<"terminal" | "serial" | "plotter">("terminal");
   const serialMonitorRef = useRef<HTMLDivElement>(null);
+  const openDocks = ([
+    ["terminal", isTerminalOpen],
+    ["serial", isSerialMonitorOpen],
+    ["plotter", isSerialPlotterOpen],
+  ] as const).filter(([, open]) => open).map(([id]) => id);
+  // If the tab a user last chose has since been closed, fall back to whatever
+  // is still open rather than showing an empty dock.
+  const activeDock = openDocks.includes(mobileDockTab) ? mobileDockTab : openDocks[0];
+  const showsDock = (id: "terminal" | "serial" | "plotter") => !isNarrow || activeDock === id;
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -350,6 +366,10 @@ export default function App() {
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [githubOpen, setGithubOpen] = useState(false);
   const [webPreviewOpen, setWebPreviewOpen] = useState(false);
+  /** The monitor was running when the board went away, so bring it back when
+   *  the board returns. Unplugging previously ended the session silently and
+   *  left no way to resume short of reloading. */
+  const wantSerialMonitorRef = useRef(false);
   const [recentFetched, setRecentFetched] = useState(false);
   const welcomeShownForRef = useRef<string | null>(null);
   const [loadingRecent, setLoadingRecent] = useState(false);
@@ -522,6 +542,11 @@ export default function App() {
           // clicking Connect, so it has less claim to change the build target.
           setMcuPluggedIn(true);
           setDetectedMcu(board?.type ?? null);
+          // Resume a monitor the user had open before the cable came out.
+          if (wantSerialMonitorRef.current && e.target) {
+            logToTerminal("[SERIAL] Board back — resuming the monitor.", "info");
+            setTimeout(() => { void startWebSerialMonitor(e.target); }, 600);
+          }
           setDetectedBoard(`Connected: ${boardName}${vendorId ? ` (VID: 0x${vendorId.toString(16).toUpperCase()})` : ""}`);
           setDetectedBoardId(board?.boardId ?? null);
         }
@@ -544,6 +569,15 @@ export default function App() {
         // braces alongside the try/finally around the flash itself.
         setIsFlashing(false);
         setIsSmartFlashing(false);
+        // Drop the dead reader, but remember the monitor was wanted so
+        // reconnecting resumes it.
+        if (serialReaderRef.current) {
+          try { serialReaderRef.current.cancel(); } catch { /* already gone */ }
+          serialReaderRef.current = null;
+        }
+        if (wantSerialMonitorRef.current) {
+          logToTerminal("[SERIAL] Board disconnected — reconnect it and the monitor resumes.", "info");
+        }
       }
     };
 
@@ -829,7 +863,7 @@ export default function App() {
       logToTerminal("  compile                   Verify & compile the current C++ code", "success");
       logToTerminal("  flash                     Upload the binary code to target board", "success");
       logToTerminal("  clear                     Clear the terminal screen output", "success");
-      logToTerminal("  pio system                View Joint-Agent Engine compiler metadata", "success");
+      logToTerminal("  engine                    View Joint-Agent Engine metadata", "success");
       logToTerminal("  web3 status               Print Web3 wallet linkage state", "success");
       logToTerminal("  ret                       Retrieve firmware from connected board", "success");
     } else if (cmdClean === "clear") {
@@ -840,7 +874,9 @@ export default function App() {
       handleFlash();
     } else if (cmdClean === "ret") {
       handleRetrieveFirmware();
-    } else if (cmdClean === "pio system" || cmdClean === "platformio --version" || cmdClean === "pio --version") {
+    } else if (cmdClean === "engine" || cmdClean === "pio system" || cmdClean === "platformio --version" || cmdClean === "pio --version") {
+      // The old spellings stay as undocumented aliases so anyone who learned
+      // them still gets an answer; only "engine" is advertised.
       logToTerminal("Joint-Agent Engine System Information:", "info");
       logToTerminal("  Engine:        Joint-Agent Engine (embedded build core)", "info");
       logToTerminal(`  Host OS:       Linux (Cloud Sandbox)`, "info");
@@ -1311,11 +1347,16 @@ export default function App() {
 
   // Web Serial monitor for Chrome (after esptool-js flash)
   const startWebSerialMonitor = async (port: any) => {
+    wantSerialMonitorRef.current = true;
     logToTerminal("[SERIAL MONITOR INITIALIZED @ 115200 BAUD]", "serial");
     try {
-      if (port.readable === null) {
-        await port.open({ baudRate: 115200 });
-      }
+      // Close and reopen unconditionally. Skipping the open when a stream
+      // already existed meant the USB-serial bridge kept whatever baud the
+      // flasher left it at, and every byte after that was misframed — which
+      // is what filled the monitor with stray characters on a phone. A real
+      // SerialPort was reconfigured by the platform, so the desktop hid it.
+      try { await port.close(); } catch { /* not open, which is fine */ }
+      await port.open({ baudRate: 115200 });
       activePortRef.current = port;
 
       if (mcu === "esp32") {
@@ -1338,16 +1379,33 @@ export default function App() {
       const printable = (t: string) =>
         t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFD]/g, "");
 
+      // Assemble lines. A USB-serial bridge delivers whatever happens to be
+      // in its buffer — often a single byte — and logging each delivery as its
+      // own entry turned one printed line into a column of single characters.
+      // Hold text until a newline, and flush anything left after a pause so a
+      // sketch that never prints a newline still shows up.
+      let pending = "";
+      let flushTimer: ReturnType<typeof setTimeout> | null = null;
+      const emit = (line: string) => {
+        const clean = printable(line).trim();
+        if (clean) logToTerminal(`[SERIAL] ${clean}`, "serial");
+      };
+      const scheduleFlush = () => {
+        if (flushTimer) clearTimeout(flushTimer);
+        flushTimer = setTimeout(() => { const t = pending; pending = ""; emit(t); }, 250);
+      };
+
       while (true) {
         const { value, done } = await reader.read();
         if (done) { reader.releaseLock(); serialReaderRef.current = null; break; }
         if (Date.now() < bootLogUntil) continue;   // still inside the boot burst
-        const chunk = printable(decoder.decode(value, { stream: true }));
-        if (!chunk) continue;
-        if (chunk.trim()) {
-          logToTerminal(`[SERIAL] ${chunk.trim()}`, "serial");
-        }
+        pending += decoder.decode(value, { stream: true });
+        const lines = pending.split(/\r?\n/);
+        pending = lines.pop() ?? "";               // keep the unterminated tail
+        for (const line of lines) emit(line);
+        if (pending) scheduleFlush(); else if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
       }
+      if (flushTimer) clearTimeout(flushTimer);
     } catch (e: any) {
       logToTerminal(`[SERIAL ERROR] ${e.message}`, "error");
       serialReaderRef.current = null;
@@ -1356,7 +1414,7 @@ export default function App() {
 
   // Backend PlatformIO flash — works in ALL browsers, supports ALL MCUs
   const handleBackendFlash = async (codeToFlash: string): Promise<{ success: boolean, error?: string }> => {
-    logToTerminal(`[FLASH] Using PlatformIO CLI to compile and upload (${mcu.toUpperCase()})...`, "info");
+    logToTerminal(`[FLASH] Using the Joint-Agent Engine to compile and upload (${mcu.toUpperCase()})...`, "info");
     let result: { success: boolean, error?: string } = { success: false, error: "Unknown flash error." };
     try {
       const response = await authedApiRequest("/api/flash", {
@@ -1371,7 +1429,7 @@ export default function App() {
 
       if (data.success) {
         logToTerminal("==========================================================", "success");
-        logToTerminal(`[FLASH] SUCCESS: ${mcu.toUpperCase()} flashed via PlatformIO!`, "success");
+        logToTerminal(`[FLASH] SUCCESS: ${mcu.toUpperCase()} flashed!`, "success");
         logToTerminal("==========================================================", "success");
         if (data.stdout) {
           const lines = data.stdout.split('\n').slice(-10);
@@ -2356,16 +2414,16 @@ export default function App() {
               </div>
 
               <div className="border-t border-[var(--border-main)] p-1.5 space-y-0.5 mt-auto shrink-0">
-                <button onClick={() => { setIsTerminalOpen(!isTerminalOpen); if (isNarrow) setMobilePane("editor"); }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isTerminalOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
+                <button onClick={() => { setIsTerminalOpen(!isTerminalOpen); if (isNarrow) { setMobilePane("editor"); if (!isTerminalOpen) setMobileDockTab("terminal"); } }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isTerminalOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
                   <TerminalIcon size={13} /> Terminal
                 </button>
                 <button onClick={() => setWebPreviewOpen(true)} className="w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]">
                   <Globe size={13} /> Web Preview
                 </button>
-                <button onClick={() => { setIsSerialMonitorOpen(!isSerialMonitorOpen); if (isNarrow) setMobilePane("editor"); }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isSerialMonitorOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
+                <button onClick={() => { setIsSerialMonitorOpen(!isSerialMonitorOpen); if (isNarrow) { setMobilePane("editor"); if (!isSerialMonitorOpen) setMobileDockTab("serial"); } }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isSerialMonitorOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
                   <Monitor size={13} /> Serial Monitor
                 </button>
-                <button onClick={() => { setIsSerialPlotterOpen(!isSerialPlotterOpen); if (isNarrow) setMobilePane("editor"); }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isSerialPlotterOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
+                <button onClick={() => { setIsSerialPlotterOpen(!isSerialPlotterOpen); if (isNarrow) { setMobilePane("editor"); if (!isSerialPlotterOpen) setMobileDockTab("plotter"); } }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isSerialPlotterOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
                   <Activity size={13} /> Serial Plotter
                 </button>
                 <FeedbackWidget variant="sidebar" boardId={boardId} mcu={mcu} />
@@ -2476,9 +2534,28 @@ export default function App() {
               {(isTerminalOpen || isSerialMonitorOpen || isSerialPlotterOpen) && (
                 <>
                   <PanelResizeHandle className="panel-separator h-[3px] bg-[var(--border-main)] hover:bg-[var(--accent-primary)] transition-all duration-200 cursor-row-resize z-10" />
-                  <Panel defaultSize={30} minSize={1}>
-                    <div className="w-full h-full bg-[var(--bg-panel)] flex min-h-0 min-w-0">
-                      {isTerminalOpen && (
+                  <Panel defaultSize={isNarrow ? 42 : 30} minSize={1}>
+                    <div className="w-full h-full bg-[var(--bg-panel)] flex flex-col min-h-0 min-w-0">
+                      {isNarrow && openDocks.length > 1 && (
+                        <div className="flex shrink-0 border-b border-[var(--border-main)] bg-[var(--bg-panel)]">
+                          {openDocks.map((id) => (
+                            <button
+                              key={id}
+                              onClick={() => setMobileDockTab(id)}
+                              className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-2 text-[10px] font-display uppercase tracking-wider border-b-2 transition ${
+                                activeDock === id
+                                  ? "text-[var(--accent-primary)] border-[var(--accent-primary)]"
+                                  : "text-[var(--text-muted)] border-transparent"
+                              }`}
+                            >
+                              {id === "terminal" ? <TerminalIcon size={12} /> : id === "serial" ? <Monitor size={12} /> : <Activity size={12} />}
+                              {id === "terminal" ? "Terminal" : id === "serial" ? "Monitor" : "Plotter"}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <div className="flex-1 flex min-h-0 min-w-0">
+                      {isTerminalOpen && showsDock("terminal") && (
                         <div className="flex-1 min-w-0 h-full border-r border-[var(--border-main)] last:border-r-0">
                           <Terminal
                             lines={terminalLines}
@@ -2489,7 +2566,7 @@ export default function App() {
                         </div>
                       )}
 
-                      {isSerialMonitorOpen && (
+                      {isSerialMonitorOpen && showsDock("serial") && (
                         <div className="flex-1 min-w-0 h-full border-r border-[var(--border-main)] last:border-r-0 bg-[var(--bg-root)] flex flex-col font-mono text-xs shadow-lg">
                           <div className="bg-[var(--bg-panel)] border-b border-[var(--border-main)] px-4 py-2.5 flex items-center justify-between shrink-0 select-none">
                             <div className="flex items-center gap-2">
@@ -2544,7 +2621,7 @@ export default function App() {
                         </div>
                       )}
 
-                      {isSerialPlotterOpen && (
+                      {isSerialPlotterOpen && showsDock("plotter") && (
                         <div className="flex-1 min-w-0 h-full bg-[var(--bg-root)] flex flex-col font-mono text-xs shadow-lg">
                           <div className="bg-[var(--bg-panel)] border-b border-[var(--border-main)] px-4 py-2.5 flex items-center justify-between shrink-0 select-none">
                             <div className="flex items-center gap-2">
@@ -2579,6 +2656,7 @@ export default function App() {
                           </div>
                         </div>
                       )}
+                      </div>
                     </div>
                   </Panel>
                 </>

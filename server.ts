@@ -383,6 +383,11 @@ app.get("/api/boards", (req, res) => {
 // is for (compiling/flashing/inspecting an embedded project) needs them.
 const ALLOWED_COMMAND_PREFIXES = ['pio', 'platformio', 'ls', 'cat', 'echo', 'pwd', 'which'];
 
+import { scrubToolchainNames } from "./server/scrub.js";
+// Re-exported so the branding test can reach it from the server entrypoint too.
+export { scrubToolchainNames };
+
+
 function isCommandAllowed(command: string): boolean {
   const trimmed = command.trim();
   const firstWord = trimmed.split(/\s+/)[0];
@@ -418,9 +423,13 @@ app.post("/api/terminal/execute", requireFirebaseAuth, async (req, res) => {
 
   try {
     const { stdout, stderr } = await execPromise(command, { cwd: process.cwd(), timeout: 60000 });
-    res.json({ stdout, stderr });
+    res.json({ stdout: scrubToolchainNames(stdout), stderr: scrubToolchainNames(stderr) });
   } catch (error: any) {
-    res.json({ stdout: error.stdout, stderr: error.stderr || error.message, error: true });
+    res.json({
+      stdout: scrubToolchainNames(error.stdout || ""),
+      stderr: scrubToolchainNames(error.stderr || error.message || ""),
+      error: true,
+    });
   }
 });
 
@@ -538,7 +547,9 @@ CODE QUALITY (the code IS the deliverable — the chat reply is not):
 - Every timing value, pin number and interval must be consistent between the code, its comments, and anything you say about it in chat.
 
 If the user asks you to write, modify, update code or create a project, use the 'generate_project' tool. DO NOT use 'execute_terminal_command' to edit code (e.g. no sed, echo, or cat).
-If the user asks you to run a command (e.g., compile, list files, check the PlatformIO toolchain), use 'execute_terminal_command'.
+Use 'execute_terminal_command' ONLY to compile or to list the user's project files. NEVER use it to inspect the machine, hunt for config files, probe /dev, or report tool versions: that is infrastructure, not the user's project, and it is of no use to them.
+The serial monitor, board detection and flashing all run in the user's own browser over USB. They are NOT server-side and NOT shell commands. If asked to open the serial monitor or connect a board, point the user at the Serial Monitor and Detect Board controls and run nothing.
+Never name the underlying build system, its config files or its directories. The toolchain is "the Joint-Agent Engine".
 If answering a general question, just respond conversationally.`;
   }
 
@@ -695,7 +706,15 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
         projectUpdate: call.args,
       });
     } else if (call?.name === "execute_terminal_command") {
-      send({ type: "command", text: `Executing command: \`${call.args.command}\``, command: call.args.command });
+      // Never echo the raw command. It exposed the build system — a request to
+      // "activate serial monitor" produced a shell line naming platformio.ini
+      // and /dev/ttyUSB* in the user's chat — and a shell command is not
+      // something a user of this product should be reading in the first place.
+      send({
+        type: "command",
+        text: "Running a build task…",
+        command: call.args.command,
+      });
     }
     send({ type: "done" });
     res.end();
@@ -1257,21 +1276,26 @@ lib_deps =
         uploadProtocol: board.uploadProtocol,
         uploadSpeed: board.uploadSpeed,
         chip: board.mcu,
-        stdout,
+        stdout: scrubToolchainNames(stdout),
         ...additionalBinaries,
       });
     } else {
       // compileSucceeded tells the client this is NOT a code problem, so it
       // must not burn five AI debug rounds trying to "fix" working code.
-      const tail = (stderr || stdout || "").trim().split("\n").slice(-12).join("\n");
+      const tail = scrubToolchainNames((stderr || stdout || "").trim()).split("\n").slice(-12).join("\n");
       res.status(500).json({
         error: "The build reported success but no firmware file was produced. This is a build-server problem, not a problem with your code.",
         compileSucceeded: true,
-        stdout, stderr, detail: tail,
+        stdout: scrubToolchainNames(stdout), stderr: scrubToolchainNames(stderr), detail: tail,
       });
     }
   } catch (err: any) {
-    res.status(500).json({ error: "Compilation failed.", stdout: err.stdout, stderr: err.stderr, message: err.message });
+    res.status(500).json({
+      error: "Compilation failed.",
+      stdout: scrubToolchainNames(err.stdout || ""),
+      stderr: scrubToolchainNames(err.stderr || ""),
+      message: scrubToolchainNames(err.message || ""),
+    });
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

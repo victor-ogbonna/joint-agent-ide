@@ -422,13 +422,13 @@ function AgentDemoPanel() {
 const WORKFLOW = [
   { icon: MessageSquare, title: "Describe it", desc: "Tell the agent what you're building, in plain English — no boilerplate to write first." },
   { icon: FileCode2, title: "It writes the firmware", desc: "Real C++ for your board, plus a wired schematic showing exactly how to connect it." },
-  { icon: TerminalSquare, title: "Compile & flash", desc: "A real PlatformIO toolchain runs in the browser — straight to your ESP32 or Arduino over USB." },
+  { icon: TerminalSquare, title: "Compile & flash", desc: "A real compiler toolchain runs in the cloud — straight to your ESP32 or Arduino over USB." },
   { icon: Activity, title: "Watch it run", desc: "Live serial monitor and plotter, right next to the code that's driving them." },
 ];
 
 const DIFFERENTIATORS = [
   { icon: Chrome, title: "Nothing to install", desc: "The whole toolchain runs in the browser tab. Chrome or Edge, since hardware access needs Web Serial — that's a browser limit, not ours." },
-  { icon: FlaskConical, title: "466 boards, one workspace", desc: "Every ESP32 and AVR board PlatformIO supports, picked from a real catalog — not two hardcoded defaults." },
+  { icon: FlaskConical, title: "466 boards, one workspace", desc: "Every ESP32 and AVR board the engine supports, picked from a real catalog — not two hardcoded defaults." },
   { icon: Wallet, title: "Web3, when you need it", desc: "Bring on-chain data and wallet connections into a project without leaving the IDE." },
 ];
 

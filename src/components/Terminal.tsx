@@ -145,7 +145,7 @@ export default function Terminal({ lines, onExecuteCommand, onClear, onClose }: 
         })}
         {lines.length === 0 && (
           <div className="text-[var(--text-muted)] text-center py-8 text-[11px]">
-            PlatformIO Core Toolchain Idle. Type <span className="text-[var(--term-input)]">help</span> to begin.
+            Joint-Agent Engine idle. Type <span className="text-[var(--term-input)]">help</span> to begin.
           </div>
         )}
       </div>
@@ -161,7 +161,7 @@ export default function Terminal({ lines, onExecuteCommand, onClear, onClose }: 
           value={input}
           onChange={(e) => setInput(e.target.value)}
           className="flex-1 bg-transparent border-0 outline-none text-[var(--text-main)] font-mono text-xs focus:ring-0 placeholder-[var(--text-muted)] min-w-0"
-          placeholder="Type 'help', 'compile', 'flash', 'pio system', or 'web3 status'..."
+          placeholder="Type 'help', 'compile', 'flash', 'engine', or 'web3 status'..."
           autoFocus
           spellCheck={false}
           autoComplete="off"
