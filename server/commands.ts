@@ -21,6 +21,19 @@ export function isWorkspaceCommand(command: string): boolean {
   return (WORKSPACE_COMMANDS as readonly string[]).includes(String(command || "").trim().toLowerCase());
 }
 
+/**
+ * The workspace command a model's command stands for, or null. Asked to open
+ * the serial monitor, the model still sometimes writes the shell spelling —
+ * "pio device monitor -b 9600" — which the workspace cannot run; the user
+ * plainly wanted the monitor, so that is what it maps to.
+ */
+export function toWorkspaceCommand(command: string): string | null {
+  const c = String(command || "").trim().toLowerCase();
+  if (isWorkspaceCommand(c)) return c;
+  if (/\bmonitor\b/.test(c)) return "monitor";
+  return null;
+}
+
 export const ALLOWED_COMMAND_PREFIXES = ['pio', 'platformio', 'ls', 'cat', 'echo', 'pwd', 'which'];
 
 // Shell syntax that smuggles a second command past a first-word check, plus

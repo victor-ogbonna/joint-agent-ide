@@ -11,13 +11,14 @@
     "lint": "tsc --noEmit",
     "test:flash": "node test/avrFlash.sim.mjs",
     "test:webusb": "node test/webusb.sim.mjs",
-    "test": "npm run test:flash && npm run test:webusb && npm run test:esp32 && npm run test:serial && npm run test:pump && npm run test:scrub && npm run test:commands && npm run test:monitor",
+    "test": "npm run test:flash && npm run test:webusb && npm run test:esp32 && npm run test:serial && npm run test:pump && npm run test:scrub && npm run test:commands && npm run test:monitor && npm run test:markup",
     "test:esp32": "node test/esp32.sim.mjs",
     "test:pump": "node test/pump.sim.mjs",
     "test:serial": "node test/serialLines.sim.mjs",
     "test:scrub": "tsx test/scrub.mjs",
     "test:commands": "tsx test/commands.mjs",
-    "test:monitor": "node test/serialMonitor.sim.mjs"
+    "test:monitor": "node test/serialMonitor.sim.mjs",
+    "test:markup": "tsx test/toolMarkup.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

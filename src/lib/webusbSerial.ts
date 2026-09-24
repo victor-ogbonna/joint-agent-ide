@@ -447,7 +447,9 @@ export function ch34xDivisor(baud: number): number {
 
   let fact = 1;
   let div = Math.floor(CLKRATE / (clkDiv(ps, fact) * baud));
-  if (div < 9 || div > 255) { div = Math.floor(div / 8); fact = 0; }
+  // Halve the base clock (fact 0) and the divisor with it, as
+  // ch341_get_divisor() does. Dividing by 8 here put 38400 at ~153800 baud.
+  if (div < 9 || div > 255) { div = Math.floor(div / 2); fact = 0; }
   if (div < 2) throw new Error(`The CH340 cannot do ${baud} baud.`);
 
   return (((0x100 - div) << 8) | (fact << 2) | ps | 0x80) & 0xffff;

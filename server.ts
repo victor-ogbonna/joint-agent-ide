@@ -388,7 +388,7 @@ app.get("/api/boards", (req, res) => {
 // defeats the whitelist's entire purpose. Nothing legitimate this terminal
 // is for (compiling/flashing/inspecting an embedded project) needs them.
 
-import { WORKSPACE_COMMANDS, isWorkspaceCommand, ALLOWED_COMMAND_PREFIXES, isCommandAllowed } from "./server/commands.js";
+import { WORKSPACE_COMMANDS, isWorkspaceCommand, toWorkspaceCommand, ALLOWED_COMMAND_PREFIXES, isCommandAllowed } from "./server/commands.js";
 import { scrubToolchainNames } from "./server/scrub.js";
 // Re-exported so the branding test can reach it from the server entrypoint too.
 export { scrubToolchainNames };
@@ -672,7 +672,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
       })),
     ];
 
-    const { toolCall, outputTokens } = await streamChat(
+    const { toolCall, textToolCall, sentText, outputTokens } = await streamChat(
       dsMessages,
       chatMode === "plan" ? undefined : DEEPSEEK_IMPLEMENT_TOOLS,
       {
@@ -696,7 +696,15 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
       }
     );
 
-    const call = toolCall;
+    // A call the model wrote out as markup instead of making is still the call
+    // it meant. Plan mode offers no tools, so there the only one honoured is
+    // opening the serial monitor, which changes nothing in the project.
+    let call = toolCall;
+    if (!call && textToolCall) {
+      const opensMonitor = textToolCall.name === "execute_terminal_command" &&
+        toWorkspaceCommand(textToolCall.args?.command) === "monitor";
+      if (chatMode !== "plan" || opensMonitor) call = textToolCall;
+    }
     await incrementTokenUsage(req.uid!, req.quota!.subscriptionStatus, outputTokens);
 
     if (call?.name === "generate_project") {
@@ -717,11 +725,14 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
       // The model can still emit anything. If it is not one of the workspace's
       // own commands, no command event is sent: the shell line never reaches
       // the browser, so it cannot be echoed into the chat or the terminal.
-      if (isWorkspaceCommand(call.args.command)) {
+      const command = toWorkspaceCommand(call.args?.command);
+      if (command) {
         send({
           type: "command",
-          text: "Running a build task…",
-          command: String(call.args.command).trim().toLowerCase(),
+          text: command === "monitor" || command === "serial monitor"
+            ? "Opening the serial monitor…"
+            : "Running a build task…",
+          command,
         });
       } else {
         send({
@@ -729,6 +740,16 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
           text: "I can compile, flash, or read back your project here — tell me which and I'll do it.",
         });
       }
+    }
+    // Everything the model said was markup, and none of it could be acted on
+    // here. Say something rather than leave an empty bubble.
+    if (!call && !sentText) {
+      send({
+        type: "text_delta",
+        text: textToolCall && chatMode === "plan"
+          ? "Turn off Plan Mode and ask again, and I'll make that change."
+          : "I didn't catch that — could you say it another way?",
+      });
     }
     send({ type: "done" });
     res.end();
