@@ -498,6 +498,9 @@ export default function App() {
 
   const activePortRef = useRef<any>(null);
   const serialReaderRef = useRef<any>(null);
+  // The in-flight monitor read loop, so stopping one can wait for it to exit
+  // rather than assume it has.
+  const monitorLoopRef = useRef<Promise<void> | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   // Log message helper to Terminal
@@ -574,11 +577,10 @@ export default function App() {
         setIsFlashing(false);
         setIsSmartFlashing(false);
         // Drop the dead reader, but remember the monitor was wanted so
-        // reconnecting resumes it.
-        if (serialReaderRef.current) {
-          try { serialReaderRef.current.cancel(); } catch { /* already gone */ }
-          serialReaderRef.current = null;
-        }
+        // reconnecting resumes it. Go through stopSerialMonitor so the loop is
+        // awaited and the stream lock is genuinely released — a half-released
+        // reader on an unplug is what the next flash trips over.
+        void stopSerialMonitor();
         if (wantSerialMonitorRef.current) {
           logToTerminal("[SERIAL] Board disconnected — reconnect it and the monitor resumes.", "info");
         }
@@ -990,12 +992,10 @@ export default function App() {
     }
 
     // Release any active serial monitor locks before we do anything
-    if (serialReaderRef.current) {
-      try {
-        await serialReaderRef.current.cancel();
-      } catch (e) { }
-      serialReaderRef.current = null;
-    }
+    // Wait for the monitor's read loop to actually exit. Cancelling without
+    // waiting left the stream locked, so the close() below rejected and the
+    // flasher's open() then failed with "The port is already open".
+    await stopSerialMonitor();
     if (activePortRef.current) {
       try {
         await activePortRef.current.close();
@@ -1129,10 +1129,10 @@ export default function App() {
     }
 
     // Release any active serial monitor locks before we do anything
-    if (serialReaderRef.current) {
-      try { await serialReaderRef.current.cancel(); } catch (e) { }
-      serialReaderRef.current = null;
-    }
+    // Wait for the monitor's read loop to actually exit. Cancelling without
+    // waiting left the stream locked, so the close() below rejected and the
+    // flasher's open() then failed with "The port is already open".
+    await stopSerialMonitor();
     if (activePortRef.current) {
       try { await activePortRef.current.close(); } catch (e) { }
       activePortRef.current = null;
@@ -1384,16 +1384,93 @@ export default function App() {
     }
   };
 
+  /**
+   * Stop whatever monitor is running and give the port back.
+   *
+   * Web Serial refuses to close a port while its readable stream is locked by
+   * a reader, so the reader has to be cancelled and its loop allowed to exit
+   * first. Skipping that was how asking for the monitor a second time bricked
+   * the port: close() rejected, open() threw "The port is already open", and
+   * the error path then cleared the ref to the live reader still holding the
+   * lock — after which nothing could release it and every subsequent flash
+   * failed with the same error until the board was physically replugged.
+   */
+  const stopSerialMonitor = async () => {
+    const reader = serialReaderRef.current;
+    serialReaderRef.current = null;
+    if (reader) {
+      try { await reader.cancel(); } catch { /* already gone */ }
+      try { reader.releaseLock(); } catch { /* cancel released it already */ }
+    }
+    const loop = monitorLoopRef.current;
+    monitorLoopRef.current = null;
+    if (loop) { try { await loop; } catch { /* the loop reports its own errors */ } }
+  };
+
+  /** The read loop itself. Runs until the reader is cancelled or the board goes. */
+  const pumpSerialMonitor = async (reader: any) => {
+    const decoder = new TextDecoder();
+
+    // An ESP32 prints its ROM boot log at 74880 baud, so read at 115200 it is
+    // unreadable bytes. Drop whatever arrives in that window so the monitor
+    // opens on the sketch's own output.
+    const bootLogUntil = Date.now() + 600;
+    // Mojibake also comes from a partial UTF-8 sequence or a byte that is not
+    // text at all; neither belongs on screen.
+    const printable = (t: string) =>
+      t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFD]/g, "");
+
+    // Assemble lines. A USB-serial bridge delivers whatever happens to be in
+    // its buffer — often a single byte — and logging each delivery as its own
+    // entry turned one printed line into a column of single characters. Hold
+    // text until a newline, and flush anything left after a pause so a sketch
+    // that never prints a newline still shows up.
+    let pending = "";
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const emit = (line: string) => {
+      const clean = printable(line).trim();
+      if (clean) logToTerminal(`[SERIAL] ${clean}`, "serial");
+    };
+    const scheduleFlush = () => {
+      if (flushTimer) clearTimeout(flushTimer);
+      flushTimer = setTimeout(() => { const t = pending; pending = ""; emit(t); }, 250);
+    };
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (Date.now() < bootLogUntil) continue;   // still inside the boot burst
+        pending += decoder.decode(value, { stream: true });
+        const lines = pending.split(/\r?\n/);
+        pending = lines.pop() ?? "";               // keep the unterminated tail
+        for (const line of lines) emit(line);
+        if (pending) scheduleFlush(); else if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      }
+    } catch (e: any) {
+      // A cancel() during read() lands here; so does an unplug.
+      if (!/cancel/i.test(e?.message || "")) {
+        logToTerminal(`[SERIAL ERROR] ${e.message}`, "error");
+      }
+    } finally {
+      if (flushTimer) clearTimeout(flushTimer);
+      try { reader.releaseLock(); } catch { /* already released */ }
+      if (serialReaderRef.current === reader) serialReaderRef.current = null;
+    }
+  };
+
   // Web Serial monitor for Chrome (after esptool-js flash)
   const startWebSerialMonitor = async (port: any) => {
     wantSerialMonitorRef.current = true;
-    logToTerminal("[SERIAL MONITOR INITIALIZED @ 115200 BAUD]", "serial");
+    // Hand the port back before taking it again. Asking for the monitor while
+    // one is already running is normal — the post-flash monitor starts by
+    // itself, and the user can then ask for it too.
+    await stopSerialMonitor();
     try {
       // Close and reopen unconditionally. Skipping the open when a stream
       // already existed meant the USB-serial bridge kept whatever baud the
       // flasher left it at, and every byte after that was misframed — which
-      // is what filled the monitor with stray characters on a phone. A real
-      // SerialPort was reconfigured by the platform, so the desktop hid it.
+      // is what filled the monitor with stray characters on a phone.
       try { await port.close(); } catch { /* not open, which is fine */ }
       await port.open({ baudRate: 115200 });
       activePortRef.current = port;
@@ -1404,50 +1481,14 @@ export default function App() {
 
       const reader = port.readable.getReader();
       serialReaderRef.current = reader;
-      const decoder = new TextDecoder();
-
-      // An ESP32 prints its ROM boot log at 74880 baud, so read at 115200 it
-      // is unreadable bytes. It only appeared once the post-flash reset
-      // started genuinely rebooting the chip — before that the board sat in
-      // the ROM loader and printed nothing, which is why the desktop looked
-      // clean and a phone did not. Drop whatever arrives in that window so the
-      // monitor opens on the sketch's own output.
-      const bootLogUntil = Date.now() + 600;
-      // Mojibake also comes from a partial UTF-8 sequence or a byte that is
-      // not text at all; neither belongs on screen.
-      const printable = (t: string) =>
-        t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFD]/g, "");
-
-      // Assemble lines. A USB-serial bridge delivers whatever happens to be
-      // in its buffer — often a single byte — and logging each delivery as its
-      // own entry turned one printed line into a column of single characters.
-      // Hold text until a newline, and flush anything left after a pause so a
-      // sketch that never prints a newline still shows up.
-      let pending = "";
-      let flushTimer: ReturnType<typeof setTimeout> | null = null;
-      const emit = (line: string) => {
-        const clean = printable(line).trim();
-        if (clean) logToTerminal(`[SERIAL] ${clean}`, "serial");
-      };
-      const scheduleFlush = () => {
-        if (flushTimer) clearTimeout(flushTimer);
-        flushTimer = setTimeout(() => { const t = pending; pending = ""; emit(t); }, 250);
-      };
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) { reader.releaseLock(); serialReaderRef.current = null; break; }
-        if (Date.now() < bootLogUntil) continue;   // still inside the boot burst
-        pending += decoder.decode(value, { stream: true });
-        const lines = pending.split(/\r?\n/);
-        pending = lines.pop() ?? "";               // keep the unterminated tail
-        for (const line of lines) emit(line);
-        if (pending) scheduleFlush(); else if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-      }
-      if (flushTimer) clearTimeout(flushTimer);
+      // Announced only once the port is genuinely open and read: the old order
+      // printed "INITIALIZED" and then an error on the very next line.
+      logToTerminal("[SERIAL MONITOR INITIALIZED @ 115200 BAUD]", "serial");
+      monitorLoopRef.current = pumpSerialMonitor(reader);
     } catch (e: any) {
       logToTerminal(`[SERIAL ERROR] ${e.message}`, "error");
-      serialReaderRef.current = null;
+      // Never leave the port open-but-locked: the flasher needs it next.
+      await stopSerialMonitor();
     }
   };
 
