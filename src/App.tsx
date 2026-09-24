@@ -44,6 +44,21 @@ import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlo
  * Preference order: the port the user actually connected, then a port whose
  * USB id we recognise as a microcontroller, then any non-Intel port, then ask.
  */
+/**
+ * The baud rate the sketch itself opens Serial at, so the monitor listens at
+ * the same speed. The monitor used to be fixed at 115200: a sketch that called
+ * Serial.begin(9600) — which the agent writes often for AVR boards — produced
+ * bytes that were all misframed at 115200, the monitor filtered them out as
+ * unreadable, and it showed nothing at all. Comments are ignored so a note
+ * like "monitor at 9600" cannot win over the real call.
+ */
+const sketchBaudRate = (src: string): number => {
+  const code = (src || "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  const m = code.match(/\bSerial\.begin\s*\(\s*(\d{3,7})/);
+  const baud = m ? Number(m[1]) : NaN;
+  return Number.isFinite(baud) && baud > 0 ? baud : 115200;
+};
+
 const pickBoardPort = async (
   preferred: any,
   granted: () => Promise<any[]>,
@@ -337,6 +352,11 @@ export default function App() {
   const autoConnectedLogRef = useRef(false);
 
   const [code, setCode] = useState(INITIAL_CODE);
+  // The rate the monitor opens at: whatever the current sketch passes to
+  // Serial.begin(). A ref, because the monitor also starts from closures that
+  // predate the latest code (the agent's reply handler, the USB listeners).
+  const monitorBaudRef = useRef(sketchBaudRate(INITIAL_CODE));
+  useEffect(() => { monitorBaudRef.current = sketchBaudRate(code); }, [code]);
   const [editorFontSize, setEditorFontSize] = useState<number>(14);
   const [editorWordWrap, setEditorWordWrap] = useState<boolean>(true);
 
@@ -1193,6 +1213,9 @@ export default function App() {
     logToTerminal(`[FLASH] Initiating flash to ${board}...`, "info");
 
     const codeToFlash = overrideCode || code;
+    // The monitor that follows must listen at the rate THIS sketch uses, even
+    // when it is newer than the editor state this closure captured.
+    monitorBaudRef.current = sketchBaudRate(codeToFlash);
 
     // Decide flash strategy:
     // - Firefox/Safari: backend PlatformIO CLI (no Web Serial in those browsers)
@@ -1213,6 +1236,7 @@ export default function App() {
 
     if (mcu === "arduino") {
       let avrPort: any = null;
+      let flashed = false;
       try {
         let compiled = binaryData;
         if (!compiled) {
@@ -1240,6 +1264,7 @@ export default function App() {
 
         logToTerminal("[FLASH] Upload complete — the board is running your code.", "success");
         setIsFlashing(false);
+        flashed = true;
         return { success: true };
       } catch (err: any) {
         logToTerminal(`[FLASH] ${err.message}`, "error");
@@ -1249,6 +1274,9 @@ export default function App() {
         // Without this a failed attempt leaves the port claimed, and every
         // later flash in the same session fails for a different reason.
         if (avrPort) { try { await avrPort.close(); } catch { /* already closed */ } }
+        // Show what the new sketch prints, as the ESP32 path always has. Only
+        // once the port is closed above, so the monitor opens a free port.
+        if (flashed && avrPort) void startWebSerialMonitor(avrPort);
       }
     }
 
@@ -1529,7 +1557,8 @@ export default function App() {
       // flasher left it at, and every byte after that was misframed — which
       // is what filled the monitor with stray characters on a phone.
       try { await port.close(); } catch { /* not open, which is fine */ }
-      await port.open({ baudRate: 115200 });
+      const baud = monitorBaudRef.current;
+      await port.open({ baudRate: baud });
       activePortRef.current = port;
 
       if (mcu === "esp32") {
@@ -1540,7 +1569,7 @@ export default function App() {
       serialReaderRef.current = reader;
       // Announced only once the port is genuinely open and read: the old order
       // printed "INITIALIZED" and then an error on the very next line.
-      logToTerminal("[SERIAL MONITOR INITIALIZED @ 115200 BAUD]", "serial");
+      logToTerminal(`[SERIAL MONITOR INITIALIZED @ ${baud} BAUD]`, "serial");
       monitorLoopRef.current = pumpSerialMonitor(reader);
     } catch (e: any) {
       logToTerminal(`[SERIAL ERROR] ${e.message}`, "error");

@@ -361,7 +361,7 @@ for (const kind of ["cdc", "ch34x", "cp210x", "ftdi"]) {
     const ps = v & 3, fact = (v >> 2) & 1;
     return 48000000 / ((1 << (12 - 3 * ps - fact)) * div);
   };
-  for (const want of [115200, 57600, 19200]) {
+  for (const want of [115200, 57600, 38400, 19200, 9600]) {
     let rate = 0;
     const dev = {
       vendorId: 0x1a86, productId: 0x7523, opened: false, configuration: null,
@@ -403,7 +403,7 @@ for (const kind of ["cdc", "ch34x", "cp210x", "ftdi"]) {
     if (whole === 1 && code === 0) return 2000000;
     return 3000000 / (whole + FRACTION[code]);
   };
-  for (const want of [115200, 57600, 19200]) {
+  for (const want of [115200, 57600, 38400, 19200, 9600]) {
     let rate = 0;
     const dev = {
       vendorId: 0x0403, productId: 0x6001, opened: false, configuration: null,
