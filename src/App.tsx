@@ -284,8 +284,12 @@ export default function App() {
   const [mcuPluggedIn, setMcuPluggedIn] = useState(false);
   const mcuPluggedInRef = useRef(false);
 
+  // When the board last came online, so a tap that lands as it connects is
+  // not taken as a request to flash.
+  const boardConnectedAtRef = useRef(0);
   useEffect(() => {
     mcuPluggedInRef.current = mcuPluggedIn;
+    if (mcuPluggedIn) boardConnectedAtRef.current = Date.now();
   }, [mcuPluggedIn]);
   const detectedBoardRef = useRef<string | null>(null);
   const [isTerminalOpen, setIsTerminalOpen] = useState(true);
@@ -2589,7 +2593,19 @@ export default function App() {
                         mcuPluggedIn={mcuPluggedIn}
                         onStopGeneration={handleStopGeneration}
                         isSmartFlashing={isSmartFlashing}
-                        onSmartFlash={() => handleSmartFlash()}
+                        onSmartFlash={() => {
+                          // Smart Flash is disabled until a board connects and
+                          // enables the instant it does — the same instant the
+                          // device chooser closes. On Android the tap that
+                          // confirmed the chooser can land on the page as well,
+                          // and a reconnect then started a compile and flash
+                          // nobody asked for. Ignore taps in that window.
+                          if (Date.now() - boardConnectedAtRef.current < 1500) {
+                            logToTerminal("[SMART FLASH] Ignored a tap that landed as the board connected. Tap Smart Flash again to flash.", "info");
+                            return;
+                          }
+                          handleSmartFlash();
+                        }}
                         onQuotaBlocked={(info) => { setQuotaBlockInfo(info); setIsUpgradeModalOpen(true); }}
                       />
                     </div>
