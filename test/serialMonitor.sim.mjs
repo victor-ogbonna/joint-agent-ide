@@ -185,5 +185,91 @@ const check = (cond, label, extra = "") => {
   check(flashErr === null, "fix: port still usable after five starts");
 }
 
-console.log(bad ? `\n${bad} failing case(s)` : "\nTaking the port twice no longer bricks it.");
+// 4. Two starts that OVERLAP — the post-flash monitor is not awaited, and the
+//    agent's 'monitor' command lands straight after it. Unqueued, the loser's
+//    error path released the winner's reader: INITIALIZED, then no data at
+//    all. Queued (as App.tsx now does), every interleaving ends with a live
+//    monitor. This port opens asynchronously, as a real one does.
+class ChromeLikeStream {
+  constructor(port) { this.port = port; this.locked = false; this.cancelled = false; this.waiters = []; this.queue = []; }
+  getReader() {
+    if (this.locked) throw new TypeError("ReadableStream is locked");
+    this.locked = true;
+    const s = this;
+    return {
+      read: () => s.read(),
+      async cancel() { s.cancelled = true; s.flush(); s.port.stream = null; },
+      releaseLock() { s.locked = false; },
+    };
+  }
+  read() {
+    if (this.queue.length) return Promise.resolve({ value: this.queue.shift(), done: false });
+    if (this.cancelled) return Promise.resolve({ value: undefined, done: true });
+    return new Promise((r) => this.waiters.push(r));
+  }
+  push(bytes) { if (this.cancelled) return; const w = this.waiters.shift(); if (w) w({ value: bytes, done: false }); else this.queue.push(bytes); }
+  flush() { while (this.waiters.length) this.waiters.shift()({ value: undefined, done: true }); }
+}
+
+// Opens and closes take time, and readable is a fresh stream whenever the
+// port is open and the last one was cancelled — as Chrome's SerialPort is.
+class AsyncOpenPort {
+  constructor() { this.state = "closed"; this.stream = null; this.opens = 0; }
+  get readable() {
+    if (this.state !== "opened") return null;
+    if (!this.stream) this.stream = new ChromeLikeStream(this);
+    return this.stream;
+  }
+  async open() {
+    if (this.state === "opened") throw new Error("Failed to execute 'open' on 'SerialPort': The port is already open.");
+    if (this.state === "opening") throw new Error("A call to open() is already in progress.");
+    this.state = "opening";
+    await new Promise(r => setTimeout(r, 20));
+    this.state = "opened"; this.opens++;
+  }
+  async close() {
+    if (this.state !== "opened") throw new Error("The port is already closed.");
+    if (this.stream?.locked) throw new TypeError("Cannot close a port whose stream is locked");
+    if (this.stream) { this.stream.cancelled = true; this.stream.flush(); }
+    this.stream = null;
+    await new Promise(r => setTimeout(r, 5));
+    this.state = "closed";
+  }
+  async setSignals() { await new Promise(r => setTimeout(r, 15)); }
+  emit(text) { this.stream?.push(new TextEncoder().encode(text)); }
+}
+
+const queued = (m) => {
+  let tail = Promise.resolve();
+  const q = (op) => { const run = tail.then(op, op); tail = run.catch(() => {}); return run; };
+  return { ...m, start: (port) => q(() => m.start(port)) };
+};
+
+async function overlapping(m, gapMs) {
+  const port = new AsyncOpenPort();
+  const a = m.start(port);
+  await new Promise(r => setTimeout(r, gapMs));
+  await Promise.all([a, m.start(port)]);
+  await new Promise(r => setTimeout(r, 5));
+  port.emit("Green LED ON\r\n");
+  await new Promise(r => setTimeout(r, 10));
+  return m.state.lines.length;
+}
+
+{
+  let oldDead = 0;
+  for (const gap of [0, 10, 20, 25, 30, 33, 36, 40]) {
+    if ((await overlapping(makeMonitor({ stopFirst: true }), gap)) === 0) oldDead++;
+  }
+  check(oldDead > 0, "unqueued: some overlap leaves the monitor showing nothing", `(${oldDead} of 8 gaps)`);
+
+  const dead = [];
+  for (const gap of [0, 10, 20, 25, 30, 33, 36, 40]) {
+    const m = queued(makeMonitor({ stopFirst: true }));
+    if ((await overlapping(m, gap)) !== 1) dead.push(gap);
+  }
+  check(dead.length === 0, "queued: every overlap ends with data on screen", dead.length ? `(dead at ${dead.join(", ")}ms)` : "");
+}
+
+console.log(bad ? `\n${bad} failing case(s)` : "\nTaking the port twice, or twice at once, no longer loses the monitor.");
 process.exit(bad ? 1 : 0);
