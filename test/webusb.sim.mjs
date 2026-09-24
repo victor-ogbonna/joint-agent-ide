@@ -348,6 +348,47 @@ for (const kind of ["cdc", "ch34x", "cp210x", "ftdi"]) {
   console.log(`  ${ok ? "ok  " : "FAIL"}  ftdi, junk around every reply -> ${verdict}`);
 }
 
+// --- the rate a CH340 is left at after open() ----------------------------
+// Both the divisor register write (0x9a, 0x1312) and a serial init carrying a
+// non-zero index (0xa1) load the baud generator; the index of 0xa1 is itself a
+// divisor/prescaler pair. The 0xa1 0x501f 0xd90a init used to be sent AFTER
+// the divisor, which left the chip at ~19200 whatever was asked: an ESP32
+// still flashed (its ROM autobauds) but its 115200 output arrived as scattered
+// characters on a phone. Decoding follows ch341_get_divisor() in Linux.
+{
+  const ch34xRate = (v) => {
+    const div = 0x100 - ((v >> 8) & 0xff);
+    const ps = v & 3, fact = (v >> 2) & 1;
+    return 48000000 / ((1 << (12 - 3 * ps - fact)) * div);
+  };
+  for (const want of [115200, 57600, 19200]) {
+    let rate = 0;
+    const dev = {
+      vendorId: 0x1a86, productId: 0x7523, opened: false, configuration: null,
+      configurations: [{ interfaces: [{ interfaceNumber: 0, alternates: [{ interfaceClass: 0xff,
+        endpoints: [{ direction: "in", type: "bulk", endpointNumber: 2, packetSize: 32 },
+                    { direction: "out", type: "bulk", endpointNumber: 2, packetSize: 32 }] }] }] }],
+      async open() { this.opened = true; }, async close() { this.opened = false; },
+      async selectConfiguration() { this.configuration = this.configurations[0]; },
+      async claimInterface() {}, async releaseInterface() {}, async clearHalt() {},
+      async controlTransferOut(s) {
+        if (s.request === 0x9a && s.value === 0x1312) rate = ch34xRate(s.index);
+        if (s.request === 0xa1 && s.index !== 0) rate = ch34xRate(s.index);
+        return { status: "ok" };
+      },
+      async transferOut(_e, c) { return { status: "ok", bytesWritten: c.byteLength }; },
+      transferIn() { return new Promise(() => {}); },   // silent line
+    };
+    const port = new WebUsbSerialPort(dev, "ch34x");
+    await port.open({ baudRate: want });
+    const off = Math.abs(rate - want) / want;
+    const ok = off < 0.02;
+    if (!ok) failures++;
+    console.log(`  ${ok ? "ok  " : "FAIL"}  ch34x open(${want}) leaves the chip at ${Math.round(rate)} baud`);
+    port.pumping = false;
+  }
+}
+
 // NOTE: a baud-fallback case lived here and was removed. It exercised the port
 // being closed and reopened at a different rate, and the mock's single packet
 // queue could not model that reliably — it failed roughly a quarter of runs

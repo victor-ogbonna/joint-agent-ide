@@ -584,7 +584,7 @@ export default function App() {
         // reader on an unplug is what the next flash trips over.
         void stopSerialMonitor();
         if (wantSerialMonitorRef.current) {
-          logToTerminal("[SERIAL] Board disconnected — reconnect it and the monitor resumes.", "info");
+          logToTerminal("[SERIAL] Board disconnected — plug it back in. If the monitor does not resume by itself, click Detect Board.", "info");
         }
       }
     };
@@ -770,6 +770,16 @@ export default function App() {
             `[USB] This adapter can't identify the chip behind it, so builds will target this project's board (${mcu.toUpperCase()}).`,
             "info"
           );
+        }
+
+        // Pick the monitor back up if it was running when the board went.
+        // A CH340 or CP210x has no USB serial number, so the browser keeps no
+        // permission for it once it is unplugged and never reports it coming
+        // back — the automatic resume in handleConnect cannot fire for it.
+        // Reconnecting such a board means clicking Detect Board, so resume here.
+        if (wantSerialMonitorRef.current) {
+          logToTerminal("[SERIAL] Board back — resuming the monitor.", "info");
+          void startWebSerialMonitor(port);
         }
       } catch (err: any) {
         if (err.name === 'NotFoundError' || err.message?.includes("No port selected") || err.message?.includes("User rejected")) {
@@ -2708,8 +2718,8 @@ export default function App() {
                               >
                                 Clear <X size={12} />
                               </button>
-                              <button onClick={() => setIsSerialMonitorOpen(false)} className="text-[var(--text-muted)] hover:text-red-500 transition px-1.5 py-0.5 rounded hover:bg-[var(--bg-hover)]">
-                                <X size={12} />
+                              <button onClick={() => setIsSerialMonitorOpen(false)} className="text-[var(--text-muted)] hover:text-red-500 transition px-1.5 py-0.5 rounded hover:bg-[var(--bg-hover)]" title="Delete Serial Monitor">
+                                <Trash2 size={12} />
                               </button>
                             </div>
                           </div>

@@ -224,9 +224,17 @@ export class WebUsbSerialPort {
       }
       case "ch34x": {
         await this.controlOut(0xa1, 0, 0);                    // serial init
+        // A second serial init. Its index is itself a divisor/prescaler pair
+        // (0xd9, 0x0a), so it sets the chip to ~19200 baud. It used to come
+        // LAST, after the real baud, which left every CH340 running at 19200
+        // whatever was asked. An ESP32 flashed anyway (its ROM loader
+        // autobauds, which is why a phone flash took ~6x the desktop's time),
+        // but the sketch's 115200 output arrived as scattered characters, and
+        // an AVR bootloader at a fixed rate never answered. The Linux driver
+        // this came from sets the baud again after it; so do we now.
+        await this.controlOut(0xa1, 0x501f, 0xd90a);
         await this.controlOut(0x9a, 0x1312, ch34xDivisor(baudRate));
         await this.controlOut(0x9a, 0x2518, 0xc3);            // LCR: 8N1, tx+rx on
-        await this.controlOut(0xa1, 0x501f, 0xd90a);          // flow control off
         break;
       }
       case "cp210x": {
