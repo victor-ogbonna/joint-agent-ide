@@ -501,6 +501,8 @@ export default function App() {
   // The in-flight monitor read loop, so stopping one can wait for it to exit
   // rather than assume it has.
   const monitorLoopRef = useRef<Promise<void> | null>(null);
+  // Monitor starts and stops run one at a time, in the order they were asked.
+  const monitorQueueRef = useRef<Promise<void>>(Promise.resolve());
   const abortControllerRef = useRef<AbortController | null>(null);
 
   // Log message helper to Terminal
@@ -1395,7 +1397,26 @@ export default function App() {
    * lock — after which nothing could release it and every subsequent flash
    * failed with the same error until the board was physically replugged.
    */
-  const stopSerialMonitor = async () => {
+  const stopSerialMonitor = () => serializeMonitor(releaseSerialMonitor);
+
+  /**
+   * Run monitor starts and stops strictly one after another.
+   *
+   * Two starts can overlap: the post-flash monitor starts by itself and is not
+   * awaited, and the agent's 'monitor' command arrives straight after it. When
+   * they interleaved, one of them failed ("ReadableStream is locked", or the
+   * port closed underneath it) and its error path then released the monitor
+   * that was current — the OTHER start's healthy reader. The monitor said
+   * INITIALIZED and then showed nothing, in the panel or the terminal.
+   */
+  const serializeMonitor = (op: () => Promise<void>): Promise<void> => {
+    const run = monitorQueueRef.current.then(op, op);
+    monitorQueueRef.current = run.catch(() => { /* each op reports its own errors */ });
+    return run;
+  };
+
+  /** The body of stopSerialMonitor. Only ever called from inside the queue. */
+  const releaseSerialMonitor = async () => {
     const reader = serialReaderRef.current;
     serialReaderRef.current = null;
     if (reader) {
@@ -1460,12 +1481,18 @@ export default function App() {
   };
 
   // Web Serial monitor for Chrome (after esptool-js flash)
-  const startWebSerialMonitor = async (port: any) => {
+  const startWebSerialMonitor = (port: any): Promise<void> => {
     wantSerialMonitorRef.current = true;
+    // Queued, so a start never interleaves with another start or a stop.
+    return serializeMonitor(() => takePortForMonitor(port));
+  };
+
+  /** The body of startWebSerialMonitor. Only ever called from inside the queue. */
+  const takePortForMonitor = async (port: any) => {
     // Hand the port back before taking it again. Asking for the monitor while
     // one is already running is normal — the post-flash monitor starts by
     // itself, and the user can then ask for it too.
-    await stopSerialMonitor();
+    await releaseSerialMonitor();
     try {
       // Close and reopen unconditionally. Skipping the open when a stream
       // already existed meant the USB-serial bridge kept whatever baud the
@@ -1488,7 +1515,8 @@ export default function App() {
     } catch (e: any) {
       logToTerminal(`[SERIAL ERROR] ${e.message}`, "error");
       // Never leave the port open-but-locked: the flasher needs it next.
-      await stopSerialMonitor();
+      // Inside the queue, so what this releases is only what this start took.
+      await releaseSerialMonitor();
     }
   };
 
