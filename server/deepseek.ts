@@ -12,6 +12,8 @@
 // already discounted with no cache objects to create, name, or expire.
 // ---------------------------------------------------------------------------
 
+import { MarkupGuard, parseTextToolCall } from "./toolMarkup.js";
+
 const BASE_URL = "https://api.deepseek.com";
 // The canonical rolling name. "deepseek-v4-flash" was an undocumented alias
 // that the API silently resolves to this same model (verified against
@@ -92,6 +94,11 @@ export interface StreamHandlers {
 
 export interface StreamResult {
   toolCall?: { name: string; args: any };
+  /** A tool call the model wrote into its text instead of making. Kept apart
+   *  from toolCall so the caller decides whether this mode may act on it. */
+  textToolCall?: { name: string; args: any };
+  /** Whether any text actually reached the user once markup was removed. */
+  sentText: boolean;
   outputTokens: number;
 }
 
@@ -131,6 +138,9 @@ export async function streamChat(
   let buffer = "";
   let outputTokens = 0;
   const partial: Record<number, { name: string; args: string }> = {};
+  // Raw tool-call markup never reaches the chat. See server/toolMarkup.ts.
+  let sentText = false;
+  const guard = new MarkupGuard((text) => { sentText = true; handlers.onText(text); });
 
   while (true) {
     const { done, value } = await reader.read();
@@ -160,7 +170,7 @@ export async function streamChat(
       const delta = chunk.choices?.[0]?.delta;
       if (!delta) continue;
 
-      if (delta.content) handlers.onText(delta.content);
+      if (delta.content) guard.push(delta.content);
 
       for (const tc of delta.tool_calls || []) {
         const i = tc.index ?? 0;
@@ -180,6 +190,8 @@ export async function streamChat(
     }
   }
 
+  guard.flush();
+
   const first = partial[0];
   let toolCall: StreamResult["toolCall"];
   if (first?.name) {
@@ -192,7 +204,13 @@ export async function streamChat(
     }
   }
 
-  return { toolCall, outputTokens };
+  const textToolCall = guard.markup ? parseTextToolCall(guard.markup) : undefined;
+  if (guard.markup) {
+    console.warn(`[DeepSeek] withheld ${guard.markup.length} chars of tool-call markup from the chat` +
+      (textToolCall ? ` (read back as ${textToolCall.name})` : ""));
+  }
+
+  return { toolCall, textToolCall, sentText, outputTokens };
 }
 
 /** Non-streaming completion, for the endpoints that just need one JSON blob back. */
