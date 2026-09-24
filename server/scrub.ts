@@ -10,6 +10,12 @@
 export function scrubToolchainNames(text: string): string {
   if (!text) return text;
   return text
+    // Chatter that is about the toolchain itself rather than the user's build.
+    // Renaming these would be worse than leaking them: the self-update banner
+    // would tell a user to pip-install this product, and Project Inspect is a
+    // feature they have no way to reach.
+    .replace(/\*{20,}\r?\n(?:(?!\*{20,})[\s\S])*?there is a new version(?:(?!\*{20,})[\s\S])*?\*{20,}\r?\n?/gi, "")
+    .replace(/^.*Advanced Memory Usage is available via.*\r?\n?/gim, "")
     // Longest first, so a general rule cannot eat a specific one.
     .replace(/PlatformIO Core(\s*\(Core\))?/gi, "Joint-Agent Engine")
     .replace(/PlatformIO Registry/gi, "Joint-Agent Library Registry")

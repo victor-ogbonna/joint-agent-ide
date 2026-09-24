@@ -7,6 +7,10 @@
  * quietly print the wrong brand to a user.
  */
 import { scrubToolchainNames as scrub } from "../server/scrub.js";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 const samples = {
   "build banner + size report": `Processing uno (platform: atmelavr; board: uno; framework: arduino)
@@ -32,6 +36,13 @@ avrdude: stk500v2_ReceiveMessage(): timeout
 *** [upload] Error 1`,
 };
 
+// The strongest sample: stdout captured verbatim from a real `uno` build.
+// Synthetic samples missed the self-update banner and the Project Inspect
+// advert, both of which this caught.
+samples["captured output of a real build"] = fs.readFileSync(
+  path.join(here, "fixtures", "build-uno.txt"), "utf8"
+);
+
 let bad = 0;
 for (const [name, sample] of Object.entries(samples)) {
   const out = scrub(sample);
@@ -53,6 +64,25 @@ for (const [line, what] of untouched) {
   const ok = scrub(line) === line;
   if (!ok) bad++;
   console.log(`  ${ok ? "ok  " : "FAIL"}  ${("keeps " + what).padEnd(28)}${ok ? "" : ` -> ${scrub(line)}`}`);
+}
+
+// Toolchain chatter that must be dropped outright, not renamed: rebranding it
+// would tell a user to pip-install this product, or point at a missing feature.
+const real = scrub(samples["captured output of a real build"]);
+for (const [needle, what] of [
+  ["new version", "self-update banner"],
+  ["pip install", "pip instruction"],
+  ["Project Inspect", "Project Inspect advert"],
+]) {
+  const ok = !real.includes(needle);
+  if (!ok) bad++;
+  console.log(`  ${ok ? "ok  " : "FAIL"}  ${("drops " + what).padEnd(28)}`);
+}
+// ...while the part the user actually wants survives intact.
+for (const [needle, what] of [["[SUCCESS]", "success line"], ["Flash:", "size report"]]) {
+  const ok = real.includes(needle);
+  if (!ok) bad++;
+  console.log(`  ${ok ? "ok  " : "FAIL"}  ${("keeps " + what).padEnd(28)}`);
 }
 
 console.log(bad ? `\n${bad} failing case(s)` : "\nNo toolchain branding survives; build-critical names intact.");
