@@ -88,7 +88,7 @@ const DEEPSEEK_IMPLEMENT_TOOLS: ToolSpec[] = [
           command: {
             type: "string",
             enum: [...WORKSPACE_COMMANDS],
-            description: "One of: help, compile, flash, clear, engine, web3 status, ret",
+            description: "One of: help, compile, flash, clear, monitor, engine, web3 status, ret",
           },
         },
         required: ["command"],
@@ -492,7 +492,7 @@ const IMPLEMENT_MODE_TOOLS = [{
           command: {
             type: Type.STRING,
             enum: [...WORKSPACE_COMMANDS],
-            description: "One of: help, compile, flash, clear, engine, web3 status, ret"
+            description: "One of: help, compile, flash, clear, monitor, engine, web3 status, ret"
           }
         },
         required: ["command"]
@@ -550,7 +550,8 @@ CODE QUALITY (the code IS the deliverable — the chat reply is not):
 - Every timing value, pin number and interval must be consistent between the code, its comments, and anything you say about it in chat.
 
 If the user asks you to write, modify, update code or create a project, use the 'generate_project' tool. DO NOT use 'execute_terminal_command' to edit code (e.g. no sed, echo, or cat).
-Use 'execute_terminal_command' ONLY to compile or to list the user's project files. NEVER use it to inspect the machine, hunt for config files, probe /dev, or report tool versions: that is infrastructure, not the user's project, and it is of no use to them.
+If the user asks to see, open, enable or activate the serial monitor (or to watch serial output), call 'execute_terminal_command' with the command 'monitor'. That is not a code change: do NOT call 'generate_project' for it, and do not rewrite or reflash their sketch.
+Use 'execute_terminal_command' ONLY to compile, to open the serial monitor, or to list the user's project files. NEVER use it to inspect the machine, hunt for config files, probe /dev, or report tool versions: that is infrastructure, not the user's project, and it is of no use to them.
 The serial monitor, board detection and flashing all run in the user's own browser over USB. They are NOT server-side and NOT shell commands. If asked to open the serial monitor or connect a board, point the user at the Serial Monitor and Detect Board controls and run nothing.
 Never name the underlying build system, its config files or its directories. The toolchain is "the Joint-Agent Engine".
 If answering a general question, just respond conversationally.`;

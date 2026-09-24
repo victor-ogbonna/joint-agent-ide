@@ -24,7 +24,7 @@ for (const cmd of fromTheScreenshot) {
 }
 
 console.log("  -- the workspace's own commands still work --");
-for (const cmd of ["help", "compile", "flash", "clear", "engine", "web3 status", "ret", "  Compile  "]) {
+for (const cmd of ["help", "compile", "flash", "clear", "engine", "web3 status", "ret", "monitor", "Serial Monitor", "  Compile  "]) {
   check(isWorkspaceCommand(cmd), `agent may send: '${cmd.trim()}'`);
 }
 

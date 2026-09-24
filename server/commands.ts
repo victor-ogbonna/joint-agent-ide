@@ -14,6 +14,7 @@
  */
 export const WORKSPACE_COMMANDS = [
   "help", "compile", "flash", "clear", "engine", "web3 status", "ret",
+  "monitor", "serial monitor",
 ] as const;
 
 export function isWorkspaceCommand(command: string): boolean {

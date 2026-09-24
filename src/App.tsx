@@ -287,6 +287,7 @@ export default function App() {
   useEffect(() => {
     mcuPluggedInRef.current = mcuPluggedIn;
   }, [mcuPluggedIn]);
+  const detectedBoardRef = useRef<string | null>(null);
   const [isTerminalOpen, setIsTerminalOpen] = useState(true);
   const [isSerialMonitorOpen, setIsSerialMonitorOpen] = useState(false);
   const [isSerialPlotterOpen, setIsSerialPlotterOpen] = useState(false);
@@ -318,6 +319,9 @@ export default function App() {
   const [boardId, setBoardId] = useState<string>("esp32dev");
   const [chatMode, setChatMode] = useState<"plan" | "implement">("plan"); // internal representation, hidden from user
   const [detectedBoard, setDetectedBoard] = useState<string | null>(null);
+  useEffect(() => {
+    detectedBoardRef.current = detectedBoard;
+  }, [detectedBoard]);
   // The catalogue board id behind detectedBoard, when USB identified one exactly.
   const [detectedBoardId, setDetectedBoardId] = useState<string | null>(null);
   // What the USB id reports, as opposed to what the project targets. null when
@@ -853,6 +857,29 @@ export default function App() {
   };
 
   // Execute terminal CLI commands
+  /**
+   * Open the serial monitor on the board that is already connected.
+   *
+   * Asked to "activate serial monitor", the agent had no way to do it: its
+   * whole vocabulary was compile/flash/clear/help/engine/web3/ret. So it fell
+   * back to the only tool that does anything — regenerating the sketch — and
+   * the user watched a rebuild and a reflash instead of their serial output.
+   */
+  const openSerialMonitor = async () => {
+    if (!mcuPluggedInRef.current) {
+      logToTerminal("[SERIAL] No board is connected. Use Detect Board first, then ask again.", "error");
+      return;
+    }
+    setIsSerialMonitorOpen(true);
+    if (isNarrow) { setMobilePane("editor"); setMobileDockTab("serial"); }
+    try {
+      const port = await pickBoardPort(webSerialPortRef.current, grantedBoardPorts, requestBoardPort);
+      await startWebSerialMonitor(port);
+    } catch (err: any) {
+      logToTerminal(`[SERIAL] Could not open the monitor: ${err.message}`, "error");
+    }
+  };
+
   const handleExecuteCommand = (cmd: string, fromAgent = false) => {
     // A command the user typed should echo back; one the agent issued should
     // not. Echoing those put a shell line in the terminal naming the build
@@ -866,6 +893,7 @@ export default function App() {
       logToTerminal("  compile                   Verify & compile the current C++ code", "success");
       logToTerminal("  flash                     Upload the binary code to target board", "success");
       logToTerminal("  clear                     Clear the terminal screen output", "success");
+      logToTerminal("  monitor                   Open the serial monitor on the connected board", "success");
       logToTerminal("  engine                    View Joint-Agent Engine metadata", "success");
       logToTerminal("  web3 status               Print Web3 wallet linkage state", "success");
       logToTerminal("  ret                       Retrieve firmware from connected board", "success");
@@ -884,6 +912,8 @@ export default function App() {
       logToTerminal("  Engine:        Joint-Agent Engine (embedded build core)", "info");
       logToTerminal(`  Host OS:       Linux (Cloud Sandbox)`, "info");
       logToTerminal(`  Framework:     Arduino compiler suite`, "info");
+    } else if (cmdClean === "monitor" || cmdClean === "serial monitor") {
+      void openSerialMonitor();
     } else if (cmdClean === "web3 status") {
       if (walletState.connected) {
         logToTerminal(`Web3 Secure Link Address: ${walletState.address}`, "success");
@@ -1087,7 +1117,13 @@ export default function App() {
   };
 
   const handleFlash = async (binaryData?: any, overrideCode?: string): Promise<{ success: boolean, error?: string }> => {
-    if (!detectedBoard || !mcuPluggedIn) {
+    // Read through refs rather than the values this closure captured. Smart
+    // Flash runs from the agent's response handler, whose closure predates a
+    // USB connection made during that same request — so a board that was
+    // plugged in and working reported "No board detected" once, then flashed
+    // fine on the very next attempt.
+    const board = detectedBoardRef.current;
+    if (!board || !mcuPluggedInRef.current) {
       logToTerminal("[FLASH] ERROR: No board detected. Click 'Auto-Detect Board' first.", "error");
       return { success: false, error: "No board detected." };
     }
@@ -1122,7 +1158,7 @@ export default function App() {
     }
 
     setIsFlashing(true);
-    logToTerminal(`[FLASH] Initiating flash to ${detectedBoard}...`, "info");
+    logToTerminal(`[FLASH] Initiating flash to ${board}...`, "info");
 
     const codeToFlash = overrideCode || code;
 
