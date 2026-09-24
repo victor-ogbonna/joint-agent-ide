@@ -81,10 +81,16 @@ const DEEPSEEK_IMPLEMENT_TOOLS: ToolSpec[] = [
     type: "function",
     function: {
       name: "execute_terminal_command",
-      description: "Execute a bash command in the cloud terminal",
+      description: "Run one of the workspace's built-in commands. This is NOT a shell. It accepts only the exact words listed and nothing else — no pipes, no &&, no redirection, no paths, no flags, no inspecting the machine.",
       parameters: {
         type: "object",
-        properties: { command: { type: "string", description: "The bash command to execute" } },
+        properties: {
+          command: {
+            type: "string",
+            enum: [...WORKSPACE_COMMANDS],
+            description: "One of: help, compile, flash, clear, engine, web3 status, ret",
+          },
+        },
         required: ["command"],
       },
     },
@@ -381,20 +387,13 @@ app.get("/api/boards", (req, res) => {
 // `node -e "..."` / `python3 -c "..."` and execute arbitrary code, which
 // defeats the whitelist's entire purpose. Nothing legitimate this terminal
 // is for (compiling/flashing/inspecting an embedded project) needs them.
-const ALLOWED_COMMAND_PREFIXES = ['pio', 'platformio', 'ls', 'cat', 'echo', 'pwd', 'which'];
 
+import { WORKSPACE_COMMANDS, isWorkspaceCommand, ALLOWED_COMMAND_PREFIXES, isCommandAllowed } from "./server/commands.js";
 import { scrubToolchainNames } from "./server/scrub.js";
 // Re-exported so the branding test can reach it from the server entrypoint too.
 export { scrubToolchainNames };
 
 
-function isCommandAllowed(command: string): boolean {
-  const trimmed = command.trim();
-  const firstWord = trimmed.split(/\s+/)[0];
-  // Also check the basename in case of absolute paths like /path/to/pio
-  const basename = firstWord.split('/').pop() || firstWord;
-  return ALLOWED_COMMAND_PREFIXES.some(prefix => basename === prefix || basename.startsWith(prefix + ' '));
-}
 
 app.post("/api/terminal/execute", requireFirebaseAuth, async (req, res) => {
   const { command } = req.body;
@@ -486,11 +485,15 @@ const IMPLEMENT_MODE_TOOLS = [{
     },
     {
       name: "execute_terminal_command",
-      description: "Execute a bash command in the cloud terminal",
+      description: "Run one of the workspace's built-in commands. This is NOT a shell. It accepts only the exact words listed and nothing else — no pipes, no &&, no redirection, no paths, no flags, no inspecting the machine.",
       parameters: {
         type: Type.OBJECT,
         properties: {
-          command: { type: Type.STRING, description: "The bash command to execute" }
+          command: {
+            type: Type.STRING,
+            enum: [...WORKSPACE_COMMANDS],
+            description: "One of: help, compile, flash, clear, engine, web3 status, ret"
+          }
         },
         required: ["command"]
       }
@@ -710,11 +713,21 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
       // "activate serial monitor" produced a shell line naming platformio.ini
       // and /dev/ttyUSB* in the user's chat — and a shell command is not
       // something a user of this product should be reading in the first place.
-      send({
-        type: "command",
-        text: "Running a build task…",
-        command: call.args.command,
-      });
+      // The model can still emit anything. If it is not one of the workspace's
+      // own commands, no command event is sent: the shell line never reaches
+      // the browser, so it cannot be echoed into the chat or the terminal.
+      if (isWorkspaceCommand(call.args.command)) {
+        send({
+          type: "command",
+          text: "Running a build task…",
+          command: String(call.args.command).trim().toLowerCase(),
+        });
+      } else {
+        send({
+          type: "text_delta",
+          text: "I can compile, flash, or read back your project here — tell me which and I'll do it.",
+        });
+      }
     }
     send({ type: "done" });
     res.end();

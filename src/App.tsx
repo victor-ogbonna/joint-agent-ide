@@ -853,8 +853,11 @@ export default function App() {
   };
 
   // Execute terminal CLI commands
-  const handleExecuteCommand = (cmd: string) => {
-    logToTerminal(cmd, "input");
+  const handleExecuteCommand = (cmd: string, fromAgent = false) => {
+    // A command the user typed should echo back; one the agent issued should
+    // not. Echoing those put a shell line in the terminal naming the build
+    // system, which is not something a user of this product should be reading.
+    if (!fromAgent) logToTerminal(cmd, "input");
     const cmdClean = cmd.toLowerCase().trim();
 
     if (cmdClean === "help") {
@@ -1738,7 +1741,7 @@ export default function App() {
             // an empty bubble with no explanation of what just happened.
             assistantContent = event.text?.trim()
               ? event.text
-              : `Running \`${event.command}\` in the terminal.`;
+              : "Running that in the workspace…";
             pendingCommand = event.command;
             ensureStarted();
             updateAssistantMsg({ content: assistantContent });
@@ -1779,7 +1782,7 @@ export default function App() {
 
       if (pendingCommand) {
         setIsTerminalOpen(true);
-        handleExecuteCommand(pendingCommand);
+        handleExecuteCommand(pendingCommand, true);
       }
     } catch (err: any) {
       if (err.name === 'AbortError') {
