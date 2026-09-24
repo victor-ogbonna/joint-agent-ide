@@ -249,7 +249,19 @@ export class WebUsbSerialPort {
       case "ftdi": {
         const port = this.ifaceNumber + 1;
         await this.controlOut(0x00, 0x0000, port);                        // SIO_RESET
-        await this.controlOut(0x03, ftdiDivisor(baudRate), port);         // baud
+        // Baud. The divisor is 17 bits and its top bit travels in wIndex,
+        // not wValue. On a single-port chip (FT232R, every FTDI Arduino)
+        // wIndex is ONLY that bit — the port number goes in wIndex just for
+        // multi-port chips (FT2232/FT4232), shifted up a byte. Sending the
+        // port number (1) here set divisor bit 16 on an FT232R, which turned
+        // 115200 into ~113740 baud: 1.3% slow, against an ATmega at 115200
+        // that is already 2.1% fast. 3.4% apart is at the edge of what a
+        // UART tolerates — replies lost the odd byte and the bridge flagged
+        // framing errors. Matches ftdi_sio.c change_speed() and libftdi.
+        const div = ftdiDivisor(baudRate);
+        const multiPort = (this.device.configuration?.interfaces?.length ?? 1) > 1;
+        const baudIndex = multiPort ? (((div >> 16) << 8) | port) : (div >> 16);
+        await this.controlOut(0x03, div & 0xffff, baudIndex);
         await this.controlOut(0x04, 0x0008, port);                        // 8N1
         // Latency timer. 16ms (the default) makes a request/response protocol
         // crawl, but 1ms is too far the other way: an idle FTDI answers every
@@ -452,7 +464,8 @@ export function ftdiDivisor(baud: number): number {
   const frac = SUB[scaled & 7];
   let value = (whole & 0x3fff) | (frac << 14);
   if (whole === 1 && frac === 0) value = 0;       // 3M baud
-  return value & 0xffff;
+  // Up to 17 bits: bit 16 belongs in wIndex, which configure() puts there.
+  return value & 0x1ffff;
 }
 
 /** What the browser can currently see, for diagnosing an empty picker. */

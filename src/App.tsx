@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Sparkles, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe} from "lucide-react";
+import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Sparkles, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip } from "recharts";
@@ -284,8 +284,12 @@ export default function App() {
   const [mcuPluggedIn, setMcuPluggedIn] = useState(false);
   const mcuPluggedInRef = useRef(false);
 
+  // When the board last came online, so a tap that lands as it connects is
+  // not taken as a request to flash.
+  const boardConnectedAtRef = useRef(0);
   useEffect(() => {
     mcuPluggedInRef.current = mcuPluggedIn;
+    if (mcuPluggedIn) boardConnectedAtRef.current = Date.now();
   }, [mcuPluggedIn]);
   const detectedBoardRef = useRef<string | null>(null);
   const [isTerminalOpen, setIsTerminalOpen] = useState(true);
@@ -584,7 +588,7 @@ export default function App() {
         // reader on an unplug is what the next flash trips over.
         void stopSerialMonitor();
         if (wantSerialMonitorRef.current) {
-          logToTerminal("[SERIAL] Board disconnected — plug it back in. If the monitor does not resume by itself, click Detect Board.", "info");
+          logToTerminal("[SERIAL] Board disconnected — plug it back in. If the monitor does not resume by itself, click Reconnect in the Serial Monitor.", "info");
         }
       }
     };
@@ -892,6 +896,22 @@ export default function App() {
     } catch (err: any) {
       logToTerminal(`[SERIAL] Could not open the monitor: ${err.message}`, "error");
     }
+  };
+
+  /**
+   * The monitor's Reconnect button. A CH340 or CP210x has no USB serial
+   * number, so after a replug the browser has forgotten it and only a click
+   * can hand it back. With the board still known, restart the monitor on it;
+   * otherwise go through Detect Board, which resumes the monitor once the
+   * board is picked.
+   */
+  const reconnectSerialMonitor = async () => {
+    if (mcuPluggedInRef.current) {
+      await openSerialMonitor();
+      return;
+    }
+    wantSerialMonitorRef.current = true;
+    await handleAutoDetect();
   };
 
   const handleExecuteCommand = (cmd: string, fromAgent = false) => {
@@ -2573,7 +2593,19 @@ export default function App() {
                         mcuPluggedIn={mcuPluggedIn}
                         onStopGeneration={handleStopGeneration}
                         isSmartFlashing={isSmartFlashing}
-                        onSmartFlash={() => handleSmartFlash()}
+                        onSmartFlash={() => {
+                          // Smart Flash is disabled until a board connects and
+                          // enables the instant it does — the same instant the
+                          // device chooser closes. On Android the tap that
+                          // confirmed the chooser can land on the page as well,
+                          // and a reconnect then started a compile and flash
+                          // nobody asked for. Ignore taps in that window.
+                          if (Date.now() - boardConnectedAtRef.current < 1500) {
+                            logToTerminal("[SMART FLASH] Ignored a tap that landed as the board connected. Tap Smart Flash again to flash.", "info");
+                            return;
+                          }
+                          handleSmartFlash();
+                        }}
                         onQuotaBlocked={(info) => { setQuotaBlockInfo(info); setIsUpgradeModalOpen(true); }}
                       />
                     </div>
@@ -2694,6 +2726,13 @@ export default function App() {
                               </span>
                             </div>
                             <div className="flex items-center gap-1.5">
+                              <button
+                                onClick={() => { void reconnectSerialMonitor(); }}
+                                className="flex items-center gap-1 text-[10px] text-[var(--text-muted)] hover:text-[var(--text-main)] transition px-1.5 py-0.5 rounded hover:bg-[var(--bg-hover)]"
+                                title="Reconnect the board and restart streaming"
+                              >
+                                Reconnect <RefreshCw size={12} />
+                              </button>
                               <button
                                 onClick={() => setAutoScrollSerial(!autoScrollSerial)}
                                 className={`flex items-center gap-1 text-[10px] transition px-1.5 py-0.5 rounded ${autoScrollSerial ? 'text-green-500 bg-green-500/10' : 'text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]'}`}

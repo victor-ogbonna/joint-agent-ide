@@ -389,6 +389,47 @@ for (const kind of ["cdc", "ch34x", "cp210x", "ftdi"]) {
   }
 }
 
+// --- the rate an FT232R is left at after open() ---------------------------
+// SET_BAUDRATE carries a 17-bit divisor: wValue holds bits 0-15 and, on a
+// single-port chip, wIndex bit 0 is divisor bit 16. The adapter used to send
+// the port number (1) there, which an FT232R reads as a fraction code and
+// turns 115200 into ~113740 baud. Decoding follows ftdi_sio.c / libftdi.
+{
+  const FRACTION = [0, 0.5, 0.25, 0.125, 0.375, 0.625, 0.75, 0.875];
+  const ft232rRate = (value, index) => {
+    const whole = value & 0x3fff;
+    const code = ((index & 1) << 2) | ((value >> 14) & 3);
+    if (whole === 0 && code === 0) return 3000000;
+    if (whole === 1 && code === 0) return 2000000;
+    return 3000000 / (whole + FRACTION[code]);
+  };
+  for (const want of [115200, 57600, 19200]) {
+    let rate = 0;
+    const dev = {
+      vendorId: 0x0403, productId: 0x6001, opened: false, configuration: null,
+      configurations: [{ interfaces: [{ interfaceNumber: 0, alternates: [{ interfaceClass: 0xff,
+        endpoints: [{ direction: "in", type: "bulk", endpointNumber: 1, packetSize: 64 },
+                    { direction: "out", type: "bulk", endpointNumber: 2, packetSize: 64 }] }] }] }],
+      async open() { this.opened = true; }, async close() { this.opened = false; },
+      async selectConfiguration() { this.configuration = this.configurations[0]; },
+      async claimInterface() {}, async releaseInterface() {}, async clearHalt() {},
+      async controlTransferOut(s) {
+        if (s.request === 0x03) rate = ft232rRate(s.value, s.index);
+        return { status: "ok" };
+      },
+      async transferOut(_e, c) { return { status: "ok", bytesWritten: c.byteLength }; },
+      transferIn() { return new Promise(() => {}); },   // silent line
+    };
+    const port = new WebUsbSerialPort(dev, "ftdi");
+    await port.open({ baudRate: want });
+    const off = Math.abs(rate - want) / want;
+    const ok = off < 0.005;
+    if (!ok) failures++;
+    console.log(`  ${ok ? "ok  " : "FAIL"}  ftdi FT232R open(${want}) leaves the chip at ${Math.round(rate)} baud`);
+    port.pumping = false;
+  }
+}
+
 // NOTE: a baud-fallback case lived here and was removed. It exercised the port
 // being closed and reopened at a different rate, and the mock's single packet
 // queue could not model that reliably — it failed roughly a quarter of runs
