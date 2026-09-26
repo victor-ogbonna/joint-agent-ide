@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { MarkupGuard, parseTextToolCall } from "./toolMarkup.js";
+import { loadAdminConfig } from "./adminConfig.js";
 
 const BASE_URL = "https://api.deepseek.com";
 // The canonical rolling name. "deepseek-v4-flash" was an undocumented alias
@@ -87,7 +88,12 @@ export const LITE_MODEL: ModelProfile = {
   id: "lite",
   label: "Gemini",
   baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-  apiKey: () => process.env.GEMINI_API_KEY,
+  // The same key the rest of the app's Gemini use reads: one saved from the
+  // /admin page wins over .env, so swapping the key there swaps it here too.
+  apiKey: () => {
+    const saved = loadAdminConfig().geminiApiKey;
+    return (typeof saved === "string" && saved) ? saved : process.env.GEMINI_API_KEY;
+  },
   model: process.env.LITE_MODEL || "gemini-2.5-flash-lite",
   maxOutputTokens: LITE_MAX_OUTPUT_TOKENS,
   // Not relied on: an unsupported option must not break every lite request.
