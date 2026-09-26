@@ -125,6 +125,11 @@ export class WebUsbSerialPort {
     return { usbVendorId: this.device.vendorId, usbProductId: this.device.productId };
   }
 
+  /** Which driver this board needs: "cdc" is a standard USB-serial device. */
+  get bridgeKind(): BridgeKind {
+    return this.kind;
+  }
+
   get opened(): boolean {
     return this.device.opened && this.readable !== null;
   }

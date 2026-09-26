@@ -57,6 +57,15 @@ import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlo
  */
 const monitorText = (text: string): string => text.replace(/^\[SERIAL\] /, "");
 
+/** Android: offer Web Serial first, once a standard USB-serial board has been seen. */
+const PREFER_WEB_SERIAL_KEY = "android.preferWebSerial";
+const readPreferWebSerial = (): boolean => {
+  try { return localStorage.getItem(PREFER_WEB_SERIAL_KEY) === "1"; } catch { return false; }
+};
+const writePreferWebSerial = (): void => {
+  try { localStorage.setItem(PREFER_WEB_SERIAL_KEY, "1"); } catch { /* storage off: asked again next time */ }
+};
+
 const pickBoardPort = async (
   preferred: any,
   granted: () => Promise<any[]>,
@@ -704,6 +713,17 @@ export default function App() {
     if (serial) {
       serial.addEventListener("connect", handleConnect);
       serial.addEventListener("disconnect", handleDisconnect);
+      // A board already plugged in when the page opens raises no connect
+      // event, so adopt one this site was allowed before — the way a phone
+      // is usually used: board in first, page second. Intel's internal UART
+      // is never a board.
+      (async () => {
+        try {
+          const ports: any[] = await serial.getPorts();
+          const port = ports.find((p) => { try { return p.getInfo().usbVendorId !== 0x8086; } catch { return false; } });
+          if (port && !mcuPluggedInRef.current) handleConnect({ target: port });
+        } catch { /* nothing granted, or getPorts unavailable */ }
+      })();
     }
     if (usb) {
       // A USBDevice has no getInfo(), so it cannot go through handleConnect —
@@ -727,6 +747,10 @@ export default function App() {
   // backend's string path was kept, so every browser-side operation fell back
   // to getPorts()[0].
   const webSerialPortRef = useRef<any>(null);
+  // Android: route the next Detect Board to WebUSB (after an empty Web Serial
+  // chooser), and whether Web Serial showed nothing this session.
+  const nextDetectUsesUsbRef = useRef(false);
+  const webSerialEmptyRef = useRef(false);
   const serialWsRef = useRef<WebSocket | null>(null);
   const hasWebSerial = "serial" in navigator;
   // Chrome on Android has no Web Serial but does have WebUSB, which is enough:
@@ -744,22 +768,59 @@ export default function App() {
    * no longer dead-ends on whichever API happened to be present.
    */
   const requestBoardPort = async (): Promise<any> => {
-    // Android exposes navigator.serial but never lists a port on it, so
-    // trying Web Serial first there guarantees an empty chooser the user has
-    // to dismiss before the real one appears. Ask WebUSB first instead.
-    const androidFirst = /Android/.test(navigator.userAgent) && hasWebUsb;
+    const android = /Android/.test(navigator.userAgent) && hasWebUsb;
 
-    if (androidFirst) {
-      try {
-        logToTerminal("[USB] Opening the WebUSB chooser…", "info");
-        const p = await requestUsbSerialPort();
-        logToTerminal("[USB] Transport: WebUSB.", "info");
-        return p;
-      } catch (err: any) {
-        if (!hasWebSerial || err?.name !== "NotFoundError") throw err;
-        logToTerminal("[USB] No WebUSB device chosen. Trying Web Serial...", "info");
-        return await (navigator as any).serial.requestPort();
+    /**
+     * Android has two routes to a board, and each board needs a particular one.
+     *
+     * A board with a standard USB-serial chip (a genuine Uno or Mega's
+     * ATmega16U2, an ESP32-S3's native USB) is often held by the phone itself,
+     * and WebUSB then cannot claim it: "Unable to claim interface", whatever
+     * is closed or replugged. Chrome's Web Serial on Android (Chrome 148 and
+     * later) reaches those boards through its own USB handling — the same
+     * route the desktop uses, including connecting automatically on plug-in.
+     *
+     * Vendor bridges (CH340, FTDI, CP210x) are not standard USB serial, so
+     * Web Serial cannot see them there: they stay on WebUSB, which drives
+     * their chips directly.
+     *
+     * A board's chip is only known once it is picked, and a tap allows one
+     * device chooser. So the first time a standard board is picked through
+     * WebUSB, it is remembered and the user taps Detect Board once more; from
+     * then on Web Serial is offered first. If Web Serial then has nothing to
+     * offer — a CH340 board, or a Chrome without wired Web Serial — the next
+     * tap goes back to WebUSB, and a standard board is not bounced again.
+     */
+    if (android) {
+      const preferSerial = hasWebSerial && readPreferWebSerial() && !nextDetectUsesUsbRef.current;
+      nextDetectUsesUsbRef.current = false;
+      if (preferSerial) {
+        try {
+          logToTerminal("[USB] Opening the Web Serial chooser (standard USB-serial boards)…", "info");
+          const p = await (navigator as any).serial.requestPort();
+          logToTerminal("[USB] Transport: Web Serial.", "info");
+          webSerialEmptyRef.current = false;
+          return p;
+        } catch (err: any) {
+          if (err?.name !== "NotFoundError") throw err;
+          nextDetectUsesUsbRef.current = true;
+          webSerialEmptyRef.current = true;
+          throw new Error("No standard USB-serial board was picked. For a board with a CH340 or FTDI chip, tap Detect Board again.");
+        }
       }
+
+      logToTerminal("[USB] Opening the WebUSB chooser…", "info");
+      const p = await requestUsbSerialPort();
+      if (p.bridgeKind === "cdc" && hasWebSerial && !webSerialEmptyRef.current) {
+        writePreferWebSerial();
+        throw new Error(
+          `${describePort(p)} uses standard USB serial, which this phone connects through Web Serial. ` +
+          "Tap Detect Board once more and pick it again — from then on it connects that way, and automatically when plugged in."
+        );
+      }
+      logToTerminal("[USB] Transport: WebUSB.", "info");
+      warnIfKnownLimited(p);
+      return p;
     }
 
     if (hasWebSerial) {
