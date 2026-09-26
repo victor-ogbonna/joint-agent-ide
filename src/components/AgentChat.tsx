@@ -720,7 +720,7 @@ export default function AgentChat({
             }}
             disabled={isLoading || isTranscribing}
             rows={3}
-            className="w-full bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-md px-3 py-2 text-xs text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-orange-500 transition resize-none terminal-scrollbar overflow-hidden"
+            className="chat-input w-full border rounded-md px-3 py-2 text-xs text-[var(--text-main)] focus:outline-none focus:border-orange-500 transition resize-none terminal-scrollbar overflow-hidden"
             placeholder={isTranscribing ? "Transcribing audio..." : "Ask Joint-Agent..."}
             style={{ minHeight: '64px', maxHeight: '384px', maxWidth: '150%' }}
           />

@@ -152,10 +152,18 @@ export class WebUsbSerialPort {
 
     try {
       await this.device.claimInterface(this.ifaceNumber);
-    } catch (e: any) {
-      throw new Error(
-        `Could not claim the USB device (${e?.message || e}). On Android, close any other app using it and reconnect the cable.`
-      );
+    } catch {
+      // One clean retry. A claim left over from an earlier open that never
+      // released it — an attempt that died mid-flight — is freed by closing
+      // the device, and the second claim then succeeds.
+      try {
+        try { await this.device.close(); } catch { /* not open */ }
+        await this.device.open();
+        if (!this.device.configuration) await this.device.selectConfiguration(1);
+        await this.device.claimInterface(this.ifaceNumber);
+      } catch (e: any) {
+        throw new Error(this.describeClaimFailure(e));
+      }
     }
     if (this.commIfaceNumber !== null && this.commIfaceNumber !== this.ifaceNumber) {
       // Best effort: the control interface is what carries CDC line coding.
@@ -168,6 +176,26 @@ export class WebUsbSerialPort {
     this.writable = new WritableStream<Uint8Array>({
       write: async (chunk) => { await this.device.transferOut(this.epOut, chunk); },
     });
+  }
+
+  /**
+   * Why a claim failed, naming the device so a log can be read without
+   * guessing. A standard USB-serial board (CDC-ACM: a genuine Uno or Mega's
+   * ATmega16U2, a Leonardo, an ESP32-S3) is the case to explain: many Android
+   * phones build the system's own serial driver in, it takes such devices the
+   * moment they are plugged in, and a web page has no way to take one back.
+   * CH340, CP210x and FTDI bridges have no such driver on a phone, which is
+   * why those boards flash from one and a genuine Mega may not.
+   */
+  private describeClaimFailure(e: any): string {
+    const id = `0x${this.device.vendorId.toString(16).padStart(4, "0")}:0x${this.device.productId.toString(16).padStart(4, "0")}`;
+    const base = `Could not claim the USB device ${id} (${this.kind}, interface ${this.ifaceNumber}): ${e?.message || e}.`;
+    if (this.kind === "cdc") {
+      return `${base} This board uses standard USB serial. Close any other tab or app using it, unplug and replug it, and try again. ` +
+        `If it still fails, this phone's own serial driver has taken the board, and a browser cannot take it back — ` +
+        `flash it from a computer in Chrome or Edge, or use a board with a CH340 or FTDI chip, which phones leave alone.`;
+    }
+    return `${base} Close any other tab or app using it, unplug and replug it, and try again.`;
   }
 
   /** Locate the bulk IN/OUT pair, preferring a CDC data interface when present. */
