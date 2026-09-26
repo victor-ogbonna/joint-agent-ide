@@ -52,12 +52,14 @@ import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlo
  * unreadable, and it showed nothing at all. Comments are ignored so a note
  * like "monitor at 9600" cannot win over the real call.
  */
-const sketchBaudRate = (src: string): number => {
+const sketchSerialBaud = (src: string): number | null => {
   const code = (src || "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
   const m = code.match(/\bSerial\.begin\s*\(\s*(\d{3,7})/);
   const baud = m ? Number(m[1]) : NaN;
-  return Number.isFinite(baud) && baud > 0 ? baud : 115200;
+  return Number.isFinite(baud) && baud > 0 ? baud : null;
 };
+/** The rate the monitor opens at: the sketch's own, or 115200 when it has none. */
+const sketchBaudRate = (src: string): number => sketchSerialBaud(src) ?? 115200;
 
 /**
  * A serial line as the monitor panel shows it: what the board sent, without
@@ -408,7 +410,16 @@ export default function App() {
   // Serial.begin(). A ref, because the monitor also starts from closures that
   // predate the latest code (the agent's reply handler, the USB listeners).
   const monitorBaudRef = useRef(sketchBaudRate(INITIAL_CODE));
-  useEffect(() => { monitorBaudRef.current = sketchBaudRate(code); }, [code]);
+  // Whether the sketch opens Serial at all; without it the monitor has
+  // nothing to show, whatever rate it listens at.
+  const sketchOpensSerialRef = useRef(sketchSerialBaud(INITIAL_CODE) !== null);
+  // The editor's code, for requests made from closures older than it.
+  const codeRef = useRef(INITIAL_CODE);
+  useEffect(() => {
+    monitorBaudRef.current = sketchBaudRate(code);
+    sketchOpensSerialRef.current = sketchSerialBaud(code) !== null;
+    codeRef.current = code;
+  }, [code]);
   const [editorFontSize, setEditorFontSize] = useState<number>(14);
   const [editorWordWrap, setEditorWordWrap] = useState<boolean>(true);
 
@@ -476,6 +487,10 @@ export default function App() {
   // Terminal & Chats
   const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  // The latest handleSendMessage, for sends started from older closures (the
+  // agent's command handler); refreshed on every render below.
+  const sendMessageRef = useRef<((text: string, modeOverride?: "plan" | "implement", images?: string[]) => Promise<void>) | null>(null);
+  const autoSerialRequestAtRef = useRef(0);
   // How full the conversation's context budget is, as the model last counted
   // it. null until the first reply of a session on this project.
   const [contextUsage, setContextUsage] = useState<{ used: number; limit: number } | null>(null);
@@ -823,6 +838,14 @@ export default function App() {
         }
         const port = await requestBoardPort();
         webSerialPortRef.current = port;
+        // Anything still holding the port — a running monitor above all —
+        // has to let go first, or open() fails with "The port is already open".
+        await stopSerialMonitor();
+        if (activePortRef.current) {
+          try { await activePortRef.current.close(); } catch { /* already closed */ }
+          activePortRef.current = null;
+        }
+        try { await port.close(); } catch { /* not open, the normal case */ }
         await port.open({ baudRate: 115200 });
         const info = await port.getInfo();
         await port.close();
@@ -969,7 +992,29 @@ export default function App() {
    * back to the only tool that does anything — regenerating the sketch — and
    * the user watched a rebuild and a reflash instead of their serial output.
    */
-  const openSerialMonitor = async () => {
+  const openSerialMonitor = async (fromAgent = false) => {
+    // Asked for the monitor, but the sketch never opens Serial: it would sit
+    // empty. When the agent was asked, have it add serial output instead —
+    // the flash that follows starts the monitor by itself. Once a minute at
+    // most, so a sketch that still lacks it cannot loop.
+    if (!sketchOpensSerialRef.current) {
+      if (fromAgent && Date.now() - autoSerialRequestAtRef.current > 60_000) {
+        autoSerialRequestAtRef.current = Date.now();
+        logToTerminal("[SERIAL] Your sketch doesn't open the serial port yet — asking the agent to add serial output.", "info");
+        setTimeout(() => {
+          void sendMessageRef.current?.(
+            "Add serial monitor output to the current sketch: call Serial.begin(115200) in setup() and print clear, " +
+            "useful lines with Serial.println() — what the sketch is doing, readings and state changes. Keep every " +
+            "existing pin, behaviour and timing exactly as it is.",
+            "implement",
+          );
+          // After the reply that asked for the monitor has rendered, so the
+          // send includes it.
+        }, 300);
+        return;
+      }
+      logToTerminal("[SERIAL] Your sketch never calls Serial.begin(), so the monitor will stay empty. Ask the agent to add serial output.", "info");
+    }
     if (!mcuPluggedInRef.current) {
       logToTerminal("[SERIAL] No board is connected. Use Detect Board first, then ask again.", "error");
       return;
@@ -1033,7 +1078,7 @@ export default function App() {
       logToTerminal(`  Host OS:       Linux (Cloud Sandbox)`, "info");
       logToTerminal(`  Framework:     Arduino compiler suite`, "info");
     } else if (cmdClean === "monitor" || cmdClean === "serial monitor") {
-      void openSerialMonitor();
+      void openSerialMonitor(fromAgent);
     } else if (cmdClean === "web3 status") {
       if (walletState.connected) {
         logToTerminal(`Web3 Secure Link Address: ${walletState.address}`, "success");
@@ -1286,6 +1331,7 @@ export default function App() {
     // The monitor that follows must listen at the rate THIS sketch uses, even
     // when it is newer than the editor state this closure captured.
     monitorBaudRef.current = sketchBaudRate(codeToFlash);
+    sketchOpensSerialRef.current = sketchSerialBaud(codeToFlash) !== null;
 
     // Decide flash strategy:
     // - Firefox/Safari: backend PlatformIO CLI (no Web Serial in those browsers)
@@ -1639,7 +1685,16 @@ export default function App() {
       serialReaderRef.current = reader;
       // Announced only once the port is genuinely open and read: the old order
       // printed "INITIALIZED" and then an error on the very next line.
-      logToTerminal(`[SERIAL MONITOR INITIALIZED @ ${baud} BAUD]`, "serial");
+      // Say which board and where the rate came from, so a wrong rate is
+      // obvious rather than a silent, empty monitor.
+      const boardName = (detectedBoardRef.current || "").replace(/^Connected:\s*/, "").replace(/\s*\(VID.*$/, "")
+        || (mcu === "esp32" ? "ESP32" : "Arduino");
+      logToTerminal(
+        sketchOpensSerialRef.current
+          ? `[SERIAL MONITOR INITIALIZED @ ${baud} BAUD] ${boardName} — the rate your sketch sets with Serial.begin(${baud}).`
+          : `[SERIAL MONITOR INITIALIZED @ ${baud} BAUD] ${boardName} — your sketch never calls Serial.begin(), so nothing will appear until it does.`,
+        "serial"
+      );
       monitorLoopRef.current = pumpSerialMonitor(reader);
     } catch (e: any) {
       logToTerminal(`[SERIAL ERROR] ${e.message}`, "error");
@@ -1970,7 +2025,9 @@ export default function App() {
         "/api/ai/chat",
         // Messages folded into a summary are still shown but no longer sent:
         // the summary stands in for them.
-        { messages: newMessages.filter((m) => !m.compacted), mcu, boardId, chatMode: effectiveMode },
+        // The sketch in the editor goes along, so the agent changes it rather
+        // than writing a new one blind.
+        { messages: newMessages.filter((m) => !m.compacted), mcu, boardId, chatMode: effectiveMode, currentCode: codeRef.current },
         (event) => {
           if (event.type === "text_delta") {
             assistantContent += event.text;
@@ -2068,6 +2125,10 @@ export default function App() {
       abortControllerRef.current = null;
     }
   };
+
+  // Refreshed every render, so a send started from an older closure uses
+  // the current conversation, not the one that closure captured.
+  sendMessageRef.current = handleSendMessage;
 
   const handleApplyProjectUpdate = (update: {
     code?: string;
@@ -2428,6 +2489,16 @@ export default function App() {
               </span>
               <button
                 onClick={() => {
+                  // Give the port back. The monitor that starts after a flash
+                  // held it open, so Detect Board's own open() then failed
+                  // with "The port is already open" until the cable was pulled.
+                  void (async () => {
+                    await stopSerialMonitor();
+                    if (activePortRef.current) {
+                      try { await activePortRef.current.close(); } catch { /* already closed */ }
+                      activePortRef.current = null;
+                    }
+                  })();
                   setDetectedBoard(null);
                   setDetectedBoardId(null);
                   setDetectedMcu(null);

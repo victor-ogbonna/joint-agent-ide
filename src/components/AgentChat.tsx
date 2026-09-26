@@ -637,7 +637,7 @@ export default function AgentChat({
               >
                 <div
                   className={`max-w-[85%] rounded-xl px-3.5 py-2.5 text-xs leading-relaxed space-y-2.5 shadow-sm ${
-                    msg.role === "user" ? "bg-[var(--bg-surface)] border border-[var(--border-main)] text-[var(--text-main)] rounded-br-none"
+                    msg.role === "user" ? "bg-[var(--bg-surface)] border border-orange-500/60 text-[var(--text-main)] rounded-br-none"
                       : "bg-[var(--bg-surface)] border border-[var(--border-main)] text-[var(--text-main)] rounded-bl-none"
                   }`}
                 >
@@ -873,7 +873,7 @@ export default function AgentChat({
             }}
             disabled={isLoading || isTranscribing}
             rows={3}
-            className="w-full bg-[var(--bg-surface)] border border-orange-500/60 rounded-md px-3 py-2 text-xs text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 transition resize-none terminal-scrollbar overflow-hidden"
+            className="w-full bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-md px-3 py-2 text-xs text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-orange-500 transition resize-none terminal-scrollbar overflow-hidden"
             placeholder={isTranscribing ? "Transcribing audio..." : "Ask Joint-Agent..."}
             style={{ minHeight: '64px', maxHeight: '384px', maxWidth: '150%' }}
           />
