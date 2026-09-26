@@ -84,13 +84,25 @@ export const PRO_MODEL: ModelProfile = {
 };
 
 export const LITE_MAX_OUTPUT_TOKENS = 5000;
+/**
+ * The lite model. By default Gemini 2.5 Flash-Lite through Gemini's
+ * OpenAI-compatible endpoint, on the app's Gemini key. Any other
+ * OpenAI-compatible provider works with no code change: set LITE_API_KEY and
+ * LITE_BASE_URL (OpenRouter by default when a key is set) and LITE_MODEL to
+ * the provider's model id.
+ */
+const LITE_OWN_PROVIDER = !!process.env.LITE_API_KEY;
 export const LITE_MODEL: ModelProfile = {
   id: "lite",
-  label: "Gemini",
-  baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-  // The same key the rest of the app's Gemini use reads: one saved from the
-  // /admin page wins over .env, so swapping the key there swaps it here too.
+  label: LITE_OWN_PROVIDER ? "Lite model" : "Gemini",
+  baseUrl: LITE_OWN_PROVIDER
+    ? (process.env.LITE_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/+$/, "")
+    : "https://generativelanguage.googleapis.com/v1beta/openai",
+  // Without its own provider: the same key the rest of the app's Gemini use
+  // reads. One saved from the /admin page wins over .env, so swapping the key
+  // there swaps it here too.
   apiKey: () => {
+    if (LITE_OWN_PROVIDER) return process.env.LITE_API_KEY;
     const saved = loadAdminConfig().geminiApiKey;
     return (typeof saved === "string" && saved) ? saved : process.env.GEMINI_API_KEY;
   },

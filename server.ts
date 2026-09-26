@@ -607,6 +607,10 @@ Do NOT tell the user to switch modes or click any button. Just state the plan an
 // Chat endpoint with function calling
 app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
   const { messages, mcu, chatMode, boardId } = req.body;
+  // The sketch in the user's editor. The agent used to see only the chat,
+  // so every change was written blind: asked to adjust one thing, it had no
+  // way to know the pins and logic already there.
+  const currentCode = typeof req.body.currentCode === "string" ? req.body.currentCode.slice(0, 60000).trim() : "";
   if (!messages) return res.status(400).json({ error: "Messages required." });
 
   // Reject an empty submit before it reaches the model. Without this, pressing
@@ -686,7 +690,12 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     // summary, tell the browser which messages it replaced, and carry on.
     let history = conversation;
     let compactionTokens = 0;
-    const plan = planCompaction(systemText, conversation);
+    const codeNote = currentCode
+      ? "The sketch currently in the user's editor is below. \"The code\" means this sketch: when asked for a change, " +
+        "change this code and keep everything else in it — pins, wiring, timing, behaviour — exactly as it is, unless the " +
+        "user asks otherwise.\n```cpp\n" + currentCode + "\n```"
+      : "";
+    const plan = planCompaction(systemText + codeNote, conversation);
     if (plan.compact) {
       send({ type: "tool_progress", text: "Conversation is nearly full — summarizing the earlier part…" });
       try {
@@ -726,6 +735,9 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
             ] }
           : { role: m.role, content: m.content }),
     ];
+    // Just before the newest message: everything ahead of it stays a stable
+    // prefix, which DeepSeek caches and bills at a fraction of the price.
+    if (codeNote) dsMessages.splice(dsMessages.length - 1, 0, { role: "system", content: codeNote });
 
     const runChat = (msgs: ChatMessage[]) => streamChat(
       msgs,
