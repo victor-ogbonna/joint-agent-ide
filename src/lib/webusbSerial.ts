@@ -13,6 +13,8 @@
  * ftdi_sio.c) and the USB CDC-ACM spec, which are the authoritative sources.
  */
 
+import { usbChipName, usbId } from "./usbChips";
+
 type Signals = { dataTerminalReady?: boolean; requestToSend?: boolean };
 
 export type BridgeKind = "cdc" | "ch34x" | "cp210x" | "ftdi";
@@ -201,7 +203,8 @@ export class WebUsbSerialPort {
    * why those boards flash from one and a genuine Mega may not.
    */
   private describeClaimFailure(e: any): string {
-    const id = `0x${this.device.vendorId.toString(16).padStart(4, "0")}:0x${this.device.productId.toString(16).padStart(4, "0")}`;
+    const chip = usbChipName(this.device.vendorId, this.device.productId);
+    const id = usbId(this.device.vendorId, this.device.productId) + (chip ? `, USB chip ${chip}` : "");
     // Which interfaces this browser already holds: if none, something outside
     // the page (another app, or the phone's own driver) has the board.
     let held = "";

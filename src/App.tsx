@@ -29,6 +29,7 @@ import { flashAvr } from "./lib/avrFlash";
 import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts, describeVisibleUsbDevices } from "./lib/webusbSerial";
 import { createProject, getProject, updateProject, renameProject, listProjects, deleteProject, ProjectSummary, trimMessagesForStorage } from "./lib/projects";
 import { sketchBaudRate, sketchOpensSerial, sketchSerial } from "./lib/sketchBaud";
+import { usbChipName } from "./lib/usbChips";
 import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlock, primeLastKnownBlock, QuotaBlockedInfo } from "./lib/aiClient";
 
 /**
@@ -140,6 +141,16 @@ function describeSerialSupport(): { supported: boolean; reason: string; advice: 
 // bare "Arduino" VID does not, and guessing there would preselect the wrong
 // build target. It is a default for the New Project dialog, never an override.
 const getBoardInfo = (vendorId: number | undefined, productId: number | undefined): { name: string, type: MCUType | null, boardId?: string } | null => {
+  const info = getBoardInfoBase(vendorId, productId);
+  if (!info) return null;
+  // Name the USB chip too, e.g. "Arduino Mega 2560 (ATmega16U2)", the way a
+  // bridge was already named "(FTDI FT232R)".
+  const chip = usbChipName(vendorId, productId);
+  if (!chip || info.name.includes(chip)) return info;
+  return { ...info, name: info.name.startsWith("USB serial device") ? `USB serial device (${chip})` : `${info.name} (${chip})` };
+};
+
+const getBoardInfoBase = (vendorId: number | undefined, productId: number | undefined): { name: string, type: MCUType | null, boardId?: string } | null => {
   if (!vendorId) return null;
 
   if (vendorId === 0x2341) {

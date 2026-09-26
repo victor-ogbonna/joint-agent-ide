@@ -481,6 +481,27 @@ for (const kind of ["cdc", "ch34x", "cp210x", "ftdi"]) {
   }
 }
 
+// --- naming the USB chip behind a board -------------------------------------
+{
+  const { usbChipName } = await bundle("src/lib/usbChips.ts", "usbChips.mjs");
+  const cases = [
+    [0x2341, 0x0042, "ATmega16U2", "genuine Mega 2560 R3"],
+    [0x2341, 0x0043, "ATmega16U2", "genuine Uno R3"],
+    [0x2341, 0x0010, "ATmega8U2", "original Mega 2560"],
+    [0x0403, 0x6001, "FTDI FT232R", "FT232R board (the Uno in the report)"],
+    [0x1a86, 0x7523, "CH340", "CH340 clone"],
+    [0x10c4, 0xea60, "CP2102", "CP2102 ESP32 devkit"],
+    [0x303a, 0x1001, "ESP32 native USB", "ESP32-S3 native USB"],
+  ];
+  let allOk = true;
+  for (const [v, p, want, label] of cases) {
+    const got = usbChipName(v, p);
+    if (got !== want) { allOk = false; console.log(`        ${label}: got ${got}, want ${want}`); }
+  }
+  if (!allOk) failures++;
+  console.log(`  ${allOk ? "ok  " : "FAIL"}  the USB chip is named for Arduino, FTDI, CH340, CP2102 and ESP32 boards`);
+}
+
 // NOTE: a baud-fallback case lived here and was removed. It exercised the port
 // being closed and reopened at a different rate, and the mock's single packet
 // queue could not model that reliably — it failed roughly a quarter of runs
