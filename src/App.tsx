@@ -61,6 +61,33 @@ const monitorText = (text: string): string => text.replace(/^\[SERIAL\] /, "");
 // first and ask for a second tap. That flow is gone; clear what it left.
 try { localStorage.removeItem("android.preferWebSerial"); } catch { /* storage off */ }
 
+/**
+ * What to tell someone whose genuine Arduino a phone will not release.
+ *
+ * On Android, a board whose USB chip is standard USB serial — a genuine Mega
+ * or Uno's ATmega16U2 — is taken by the phone's own cdc_acm driver, and Chrome
+ * is not allowed to detach it (chrome://device-log: "Not allowed to detach
+ * interface 1 attached to driver cdc_acm"). No browser API can reach it. A
+ * CH340 or FTDI USB-serial adapter on the board's serial pins can: Android has
+ * no driver for those, and the app already flashes through them.
+ */
+const phoneHeldBoardGuidance = (vendorId?: number, productId?: number): string[] => {
+  const info = getBoardInfo(vendorId, productId);
+  const board = info?.name || "board";
+  const short = /Mega/.test(board) ? "Mega" : /Uno/.test(board) ? "Uno" : "board";
+  return [
+    `[USB] This phone's own USB-serial driver has taken your ${board}, and Android does not let a browser take it back. ` +
+      `It connects normally from a computer. On this phone, connect it through a CH340 or FTDI USB-to-serial adapter instead (set to 5V):`,
+    `  • Adapter GND → ${short} GND`,
+    `  • Adapter TX  → ${short} RX0 (pin 0)`,
+    `  • Adapter RX  → ${short} TX0 (pin 1)`,
+    `  • Adapter DTR → 0.1 µF capacitor → ${short} RESET`,
+    `  • Adapter 5V  → ${short} 5V (or power the ${short} separately)`,
+    `[USB] Leave the ${short}'s own USB port unplugged, plug the adapter into the phone and tap Detect Board. ` +
+      `It shows up as a CH340 or FTDI device, and flashing and the serial monitor then work as normal.`,
+  ];
+};
+
 const pickBoardPort = async (
   preferred: any,
   granted: () => Promise<any[]>,
@@ -920,6 +947,10 @@ export default function App() {
         // it could only ever answer "No serial devices found. Connect a
         // microcontroller and try again" — advice that cannot work and that
         // buried the real error above it.
+        if (err?.code === "HELD_BY_PHONE_DRIVER") {
+          phoneHeldBoardGuidance(err.usbVendorId, err.usbProductId).forEach((line, i) => logToTerminal(line, i === 0 ? "error" : "info"));
+          return;
+        }
         logToTerminal(`[USB] ${err.message}`, "error");
       }
     } else {
@@ -1400,6 +1431,11 @@ export default function App() {
         flashed = true;
         return { success: true };
       } catch (err: any) {
+        if (err?.code === "HELD_BY_PHONE_DRIVER") {
+          phoneHeldBoardGuidance(err.usbVendorId, err.usbProductId).forEach((line, i) => logToTerminal(line, i === 0 ? "error" : "info"));
+          setIsFlashing(false);
+          return { success: false, error: "This phone will not release the board to the browser; use a CH340 or FTDI adapter (see the terminal)." };
+        }
         logToTerminal(`[FLASH] ${err.message}`, "error");
         setIsFlashing(false);
         return { success: false, error: err.message };

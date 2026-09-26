@@ -473,9 +473,11 @@ for (const kind of ["cdc", "ch34x", "cp210x", "ftdi"]) {
   {
     const dev = mk("never");
     const port = new WebUsbSerialPort(dev, "cdc");
-    let err = "";
-    try { await port.open({ baudRate: 115200 }); } catch (e) { err = e.message; }
-    const ok = /0x2341:0x0042/.test(err) && /held by this page: none/.test(err) && /restart the phone/.test(err);
+    let err = "", code = "";
+    try { await port.open({ baudRate: 115200 }); } catch (e) { err = e.message; code = e.code; }
+    // The app turns this code into adapter wiring for the board.
+    const ok = /0x2341:0x0042/.test(err) && /held by this page: none/.test(err) && /restart the phone/.test(err)
+      && code === "HELD_BY_PHONE_DRIVER";
     if (!ok) failures++;
     console.log(`  ${ok ? "ok  " : "FAIL"}  a board that stays held fails with its id, what the page holds, and what to do`);
   }

@@ -181,7 +181,13 @@ export class WebUsbSerialPort {
           await new Promise((r) => setTimeout(r, 300));
           await reclaim();
         } catch (e: any) {
-          throw new Error(this.describeClaimFailure(e));
+          const failure: any = new Error(this.describeClaimFailure(e));
+          // A standard USB-serial board the phone's own driver holds: the app
+          // turns this into wiring instructions for a USB-serial adapter.
+          if (this.kind === "cdc") failure.code = "HELD_BY_PHONE_DRIVER";
+          failure.usbVendorId = this.device.vendorId;
+          failure.usbProductId = this.device.productId;
+          throw failure;
         }
       }
     }
