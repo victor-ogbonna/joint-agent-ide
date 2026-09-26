@@ -86,6 +86,29 @@ async function postWithRetry(path: string, body: any, label: string): Promise<Re
   throw lastErr;
 }
 
+/**
+ * Output budget for one reply. 8192 was too small: a whole game for a 20x4
+ * LCD, plus the wiring and explanation the same tool call carries, ran out of
+ * room mid-call, the half-written arguments could not be parsed, and the user
+ * was told "I didn't catch that" while "display hello world" worked fine.
+ * A model that refuses the larger budget gets the old one, once, and keeps it.
+ */
+const LARGE_OUTPUT_TOKENS = 32768;
+const SAFE_OUTPUT_TOKENS = 8192;
+let maxOutputTokens = LARGE_OUTPUT_TOKENS;
+
+async function postChat(body: any, label: string): Promise<Response> {
+  try {
+    return await postWithRetry("/chat/completions", { ...body, max_tokens: maxOutputTokens }, label);
+  } catch (err: any) {
+    const tooLarge = /DeepSeek 400:/.test(err?.message || "") && /max_tokens/i.test(err?.message || "");
+    if (!tooLarge || maxOutputTokens === SAFE_OUTPUT_TOKENS) throw err;
+    console.warn(`[DeepSeek] max_tokens ${maxOutputTokens} refused; using ${SAFE_OUTPUT_TOKENS} from now on`);
+    maxOutputTokens = SAFE_OUTPUT_TOKENS;
+    return await postWithRetry("/chat/completions", { ...body, max_tokens: maxOutputTokens }, label);
+  }
+}
+
 export interface StreamHandlers {
   onText: (delta: string) => void;
   /** Called while a tool call's arguments accumulate, so the UI can show progress. */
@@ -99,6 +122,8 @@ export interface StreamResult {
   textToolCall?: { name: string; args: any };
   /** Whether any text actually reached the user once markup was removed. */
   sentText: boolean;
+  /** The reply stopped because it hit the output limit, not because it ended. */
+  truncated: boolean;
   outputTokens: number;
 }
 
@@ -116,8 +141,7 @@ export async function streamChat(
   tools: ToolSpec[] | undefined,
   handlers: StreamHandlers
 ): Promise<StreamResult> {
-  const res = await postWithRetry(
-    "/chat/completions",
+  const res = await postChat(
     {
       model: DEEPSEEK_MODEL,
       messages,
@@ -125,7 +149,6 @@ export async function streamChat(
       // Ask for usage on the final chunk so token accounting stays exact
       // instead of being estimated from character counts.
       stream_options: { include_usage: true },
-      max_tokens: 8192,
       ...(tools?.length ? { tools, tool_choice: "auto" } : {}),
     },
     "chat stream"
@@ -140,6 +163,7 @@ export async function streamChat(
   const partial: Record<number, { name: string; args: string }> = {};
   // Raw tool-call markup never reaches the chat. See server/toolMarkup.ts.
   let sentText = false;
+  let finishReason = "";
   const guard = new MarkupGuard((text) => { sentText = true; handlers.onText(text); });
 
   while (true) {
@@ -167,6 +191,7 @@ export async function streamChat(
 
       if (chunk.usage?.completion_tokens) outputTokens = chunk.usage.completion_tokens;
 
+      if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
       const delta = chunk.choices?.[0]?.delta;
       if (!delta) continue;
 
@@ -210,7 +235,10 @@ export async function streamChat(
       (textToolCall ? ` (read back as ${textToolCall.name})` : ""));
   }
 
-  return { toolCall, textToolCall, sentText, outputTokens };
+  const truncated = finishReason === "length";
+  if (truncated) console.warn(`[DeepSeek] reply hit the ${maxOutputTokens}-token output limit`);
+
+  return { toolCall, textToolCall, sentText, truncated, outputTokens };
 }
 
 /** Non-streaming completion, for the endpoints that just need one JSON blob back. */
@@ -218,12 +246,10 @@ export async function completeChat(
   messages: ChatMessage[],
   opts: { jsonMode?: boolean } = {}
 ): Promise<{ text: string; outputTokens: number }> {
-  const res = await postWithRetry(
-    "/chat/completions",
+  const res = await postChat(
     {
       model: DEEPSEEK_MODEL,
       messages,
-      max_tokens: 8192,
       ...(opts.jsonMode ? { response_format: { type: "json_object" } } : {}),
     },
     "completion"

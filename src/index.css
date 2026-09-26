@@ -806,24 +806,3 @@ pre[class*="language-"] {
 .app-bottom-nav {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
-
-/*
- * The agent chat's message field: an orange tint. A translucent orange over
- * the chat's own background, so it reads as the same orange in light and dark
- * and needs no colour functions a browser might lack (a color-mix() version
- * compiled to a SOLID orange fallback, on which light text fails). 18% orange
- * keeps typed text above 10:1 in both themes. The usual muted placeholder
- * would drop to ~3:1 on the tint, so the placeholder is the theme's own text
- * colour at 65% opacity, which stays above 4.5:1 in both.
- * In the components layer, so focus:border-orange-500 still wins on focus.
- */
-@layer components {
-  .chat-input {
-    background-color: rgba(249, 115, 22, 0.18);
-    border-color: rgba(249, 115, 22, 0.45);
-  }
-  .chat-input::placeholder {
-    color: var(--text-main);
-    opacity: 0.65;
-  }
-}

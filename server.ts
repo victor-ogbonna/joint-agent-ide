@@ -672,8 +672,8 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
       })),
     ];
 
-    const { toolCall, textToolCall, sentText, outputTokens } = await streamChat(
-      dsMessages,
+    const runChat = (msgs: ChatMessage[]) => streamChat(
+      msgs,
       chatMode === "plan" ? undefined : DEEPSEEK_IMPLEMENT_TOOLS,
       {
         onText: (text) => send({ type: "text_delta", text }),
@@ -695,6 +695,27 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
         })(),
       }
     );
+
+    let result = await runChat(dsMessages);
+    let outputTokens = result.outputTokens;
+    // Out of room before the tool call finished: its arguments were cut off
+    // and cannot be used, and nothing reached the user. Ask once more for a
+    // compact version rather than answer "I didn't catch that" to a request
+    // that was perfectly clear, just large.
+    if (result.truncated && !result.toolCall && !result.textToolCall && !result.sentText && chatMode !== "plan") {
+      send({ type: "tool_progress", text: "That's a big one — writing a more compact version…" });
+      result = await runChat([
+        ...dsMessages,
+        {
+          role: "system",
+          content: "Your previous reply ran out of output space before the tool call was complete, so nothing was delivered. " +
+            "Call generate_project again with the complete sketch written compactly: no long comment blocks, no repeated code " +
+            "(use loops and helper functions), and a brief explanation.",
+        },
+      ]);
+      outputTokens += result.outputTokens;
+    }
+    const { toolCall, textToolCall, sentText } = result;
 
     // A call the model wrote out as markup instead of making is still the call
     // it meant. Plan mode offers no tools, so there the only one honoured is
@@ -748,7 +769,9 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
         type: "text_delta",
         text: textToolCall && chatMode === "plan"
           ? "Turn off Plan Mode and ask again, and I'll make that change."
-          : "I didn't catch that — could you say it another way?",
+          : result.truncated
+            ? "That was too big to write in one reply. Ask for it in two steps — for example the display and graphics first, then the game logic."
+            : "I didn't catch that — could you say it another way?",
       });
     }
     send({ type: "done" });
