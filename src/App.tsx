@@ -282,6 +282,43 @@ type MobilePane = "files" | "agent" | "editor";
 export default function App() {
   const { user, signOut } = useAuth();
   const isNarrow = useIsNarrowScreen();
+
+  /**
+   * On a phone, run the workspace fullscreen. The navigation bar sat right
+   * where a thumb rests, and a stray tap on Home or Back threw the user out
+   * of their workspace mid-task. Fullscreen hides the system bars; a swipe
+   * from the edge brings them back for a moment, which is Android's own
+   * immersive behaviour. If the user leaves fullscreen, or a USB permission
+   * prompt takes it away, the next tap on the workspace restores it.
+   *
+   * Entering fullscreen uses up the tap's user activation, and the WebUSB
+   * and Web Serial choosers need that same activation. So taps on buttons,
+   * links and fields are left alone: Detect Board must still open its
+   * chooser. Only taps on the workspace itself enter fullscreen.
+   *
+   * iPhone Safari has no element fullscreen, so there this does nothing.
+   */
+  useEffect(() => {
+    // A touch-only device, in either orientation — not just a narrow window,
+    // since a phone turned sideways is wider than the narrow layout's cutoff.
+    const touchOnly = window.matchMedia?.("(hover: none) and (pointer: coarse)").matches;
+    if (!touchOnly) return;
+    const doc: any = document;
+    const root: any = document.documentElement;
+    const request = root.requestFullscreen || root.webkitRequestFullscreen;
+    if (!request) return;
+    const INTERACTIVE = 'button, a, input, textarea, select, label, [role="button"], [contenteditable="true"]';
+    const onTap = (e: MouseEvent) => {
+      if (doc.fullscreenElement || doc.webkitFullscreenElement) return;
+      const target = e.target as Element | null;
+      if (target?.closest?.(INTERACTIVE)) return;
+      try {
+        Promise.resolve(request.call(root, { navigationUI: "hide" })).catch(() => { /* refused: stay as is */ });
+      } catch { /* refused: stay as is */ }
+    };
+    document.addEventListener("click", onTap);
+    return () => document.removeEventListener("click", onTap);
+  }, []);
   const [selectedPane, setSelectedPane] = useState<MobilePane>("editor");
   const [appMode, setAppMode] = useState<AppMode>("agentic");
   const [theme, setTheme] = useState<AppTheme>("dark");
