@@ -15,7 +15,8 @@ import { SerialPort } from 'serialport';
 import { ReadlineParser } from '@serialport/parser-readline';
 import { loadAdminConfig, saveAdminConfig } from './server/adminConfig';
 import { readAccessLists, sanitiseEmailList } from './server/access';
-import { requireAuthAndQuota, requireFirebaseAuth, incrementTokenUsage, FREE_TOKEN_CAP, PAID_TOKEN_CAP, getOrCreateUserDoc } from './server/quota';
+import { requireAuthAndQuota, requireFirebaseAuth, incrementTokenUsage, FREE_TOKEN_CAP, PAID_TOKEN_CAP, getOrCreateUserDoc, LITE_STATUS, LITE_DAILY_COMPILES, consumeCompile, tierOf, liteCompilesLeft } from './server/quota';
+import { accessLevelFor } from './server/access';
 import { registerPaystackRoutes } from './server/paystack';
 import { registerWaitlistRoutes } from './server/waitlist';
 import { registerFeedbackRoutes } from './server/feedback';
@@ -24,8 +25,9 @@ import { registerFirebaseAuthProxy } from './server/firebaseAuthProxy';
 import { detectLibDeps } from './server/libraryDeps';
 import { loadBoardCatalog, getBoardCatalog, getBoardById, boardFamily, resolveBoard, describeBoardForPrompt, describeFamilyForPrompt, BoardInfo } from './server/boards';
 import { getCachedContentName } from './server/geminiCache';
-import { streamChat, completeChat, isDeepSeekConfigured, DEEPSEEK_MODEL, ChatMessage, ToolSpec } from './server/deepseek';
-import { CONTEXT_BUDGET_TOKENS, ConversationMessage, planCompaction, SUMMARY_INSTRUCTION, transcriptOf } from './server/context';
+import { streamChat, completeChat, isDeepSeekConfigured, DEEPSEEK_MODEL, ChatMessage, ToolSpec, modelFor } from './server/deepseek';
+import { CONTEXT_BUDGET_TOKENS, ConversationMessage, planCompaction, SUMMARY_INSTRUCTION, transcriptOf, KEEP_RECENT_MESSAGES, attachedImages } from './server/context';
+
 
 // Same two tools as the Gemini declarations below, restated as JSON Schema —
 // DeepSeek is OpenAI-compatible, so `type` is a plain string rather than
@@ -362,11 +364,16 @@ app.get("/api/quota/status", requireFirebaseAuth, async (req, res) => {
   const isPaid = doc.subscriptionStatus === "active";
   const tokenCap = isPaid ? PAID_TOKEN_CAP : FREE_TOKEN_CAP;
   const tokensUsed = isPaid ? doc.cycleTokensUsed : doc.lifetimeFreeTokensUsed;
+  const tier = tierOf(doc, accessLevelFor(req.email ?? null, req.emailVerified === true));
   res.json({
     subscriptionStatus: doc.subscriptionStatus,
     tokensUsed,
     tokenCap,
-    blocked: tokensUsed >= tokenCap,
+    // A free user past the cap is on the lite tier, not blocked.
+    blocked: isPaid && tokensUsed >= tokenCap,
+    tier,
+    liteCompilesLeft: tier === "lite" ? liteCompilesLeft(doc) : null,
+    liteDailyCompiles: LITE_DAILY_COMPILES,
   });
 });
 
@@ -641,6 +648,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
         role: m.role === "user" ? "user" : "assistant",
         content: m.content,
         isContextSummary: m.isContextSummary === true,
+        images: attachedImages(m.images),
       }));
 
     // Context caching: only worth attempting in implement mode (plan mode's
@@ -667,6 +675,12 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     // unchanged — which is exactly the prefix DeepSeek caches automatically,
     // so the Gemini explicit-cache machinery has no equivalent to port.
     const systemText = buildChatSystemInstruction(mcuDescription, mcuPowerPin, chatMode);
+    // Free users past their free tokens are answered by the lite model.
+    const lite = req.quota!.subscriptionStatus === LITE_STATUS;
+    const model = modelFor(lite);
+    // Lets the browser tell the user, the moment it happens, that the free
+    // tokens are spent and the lite tier has taken over.
+    send({ type: "tier", tier: lite ? "lite" : "full" });
 
     // Full at AUTOCOMPACT_AT: fold everything but the recent tail into a
     // summary, tell the browser which messages it replaced, and carry on.
@@ -679,7 +693,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
         const summary = await completeChat([
           { role: "system", content: SUMMARY_INSTRUCTION },
           { role: "user", content: transcriptOf(plan.older) },
-        ]);
+        ], {}, model);
         compactionTokens = summary.outputTokens;
         const text = summary.text.trim();
         if (text) {
@@ -697,11 +711,20 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
       }
     }
 
+    // Images ride along with the message they were attached to, as long as
+    // it is among the recent tail; older ones are left out rather than
+    // resent on every request.
+    const imagesFrom = Math.max(0, history.length - KEEP_RECENT_MESSAGES);
     const dsMessages: ChatMessage[] = [
       { role: "system", content: systemText },
-      ...history.map((m): ChatMessage => m.isContextSummary
+      ...history.map((m, i): ChatMessage => m.isContextSummary
         ? { role: "system", content: `Summary of the earlier conversation, which you no longer see in full:\n${m.content}` }
-        : { role: m.role, content: m.content }),
+        : m.role === "user" && m.images?.length && i >= imagesFrom
+          ? { role: "user", content: [
+              { type: "text", text: m.content },
+              ...m.images.map((url) => ({ type: "image_url" as const, image_url: { url } })),
+            ] }
+          : { role: m.role, content: m.content }),
     ];
 
     const runChat = (msgs: ChatMessage[]) => streamChat(
@@ -725,7 +748,8 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
             });
           };
         })(),
-      }
+      },
+      model,
     );
 
     let result = await runChat(dsMessages);
@@ -734,7 +758,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     // and cannot be used, and nothing reached the user. Ask once more for a
     // compact version rather than answer "I didn't catch that" to a request
     // that was perfectly clear, just large.
-    if (result.truncated && !result.toolCall && !result.textToolCall && !result.sentText && chatMode !== "plan") {
+    if (result.truncated && !result.toolCall && !result.textToolCall && !result.sentText && chatMode !== "plan" && !lite) {
       send({ type: "tool_progress", text: "That's a big one — writing a more compact version…" });
       result = await runChat([
         ...dsMessages,
@@ -807,7 +831,9 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
         text: textToolCall && chatMode === "plan"
           ? "Turn off Plan Mode and ask again, and I'll make that change."
           : result.truncated
-            ? "That was too big to write in one reply. Ask for it in two steps — for example the display and graphics first, then the game logic."
+            ? (lite
+              ? "That's more than the Lite tier can write in one reply. Ask for it in smaller steps, or subscribe to Pro for full-size projects."
+              : "That was too big to write in one reply. Ask for it in two steps — for example the display and graphics first, then the game logic.")
             : "I didn't catch that — could you say it another way?",
       });
     }
@@ -912,7 +938,7 @@ Wire colours: #EF4444 power, #000000 GND, #3B82F6 signal.
 All four top-level keys are required. Do not wrap the JSON in markdown fences.`,
       },
       { role: "user", content: `Create: ${prompt}` },
-    ], { jsonMode: true });
+    ], { jsonMode: true }, modelFor(req.quota!.subscriptionStatus === LITE_STATUS));
 
     await incrementTokenUsage(req.uid!, req.quota!.subscriptionStatus, response.outputTokens);
 
@@ -973,7 +999,7 @@ Respond with a single JSON object and nothing else, in exactly this shape:
 Both keys are required. Do not wrap the JSON in markdown fences.`,
       },
       { role: "user", content: `CODE:\n${code}\n\nERROR:\n${error}` },
-    ], { jsonMode: true });
+    ], { jsonMode: true }, modelFor(req.quota!.subscriptionStatus === LITE_STATUS));
 
     await incrementTokenUsage(req.uid!, req.quota!.subscriptionStatus, response.outputTokens);
 
@@ -1267,6 +1293,24 @@ app.post("/api/ai/transcribe", requireAuthAndQuota, async (req, res) => {
 app.post("/api/compile", requireFirebaseAuth, async (req, res) => {
   const { code, mcu, boardId } = req.body;
   if (!code || !mcu) return res.status(400).json({ error: "Code and MCU are required." });
+
+  // The lite tier compiles LITE_DAILY_COMPILES times a day; every other tier
+  // without limit. Counted before the build, so a failed build still counts.
+  let liteCompilesLeftAfter: number | null = null;
+  try {
+    const spend = await consumeCompile(req.uid!, req.email ?? null, req.emailVerified === true);
+    if (!spend.allowed) {
+      return res.status(429).json({
+        error: `The Lite tier includes ${LITE_DAILY_COMPILES} compiles a day, and today's are used. They reset at midnight UTC — or subscribe to Pro for unlimited compiles.`,
+        code: "LITE_COMPILE_LIMIT",
+      });
+    }
+    liteCompilesLeftAfter = spend.left;
+  } catch (err: any) {
+    // A counting failure must not stop anyone compiling.
+    console.error("[Quota] compile count failed:", err?.message || err);
+  }
+  res.setHeader("X-Lite-Compiles-Left", liteCompilesLeftAfter === null ? "unlimited" : String(liteCompilesLeftAfter));
 
   const board = resolveBoard(boardId, mcu);
 

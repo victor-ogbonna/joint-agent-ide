@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { motion } from "motion/react";
-import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Square, Code, X} from "lucide-react";
+import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Square, Code, X, Camera, Sparkles} from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -10,7 +10,7 @@ import { callAiEndpoint, QuotaBlockedInfo } from "../lib/aiClient";
 
 interface AgentChatProps {
   messages: ChatMessage[];
-  onSendMessage: (text: string, modeOverride?: "plan" | "implement") => void;
+  onSendMessage: (text: string, modeOverride?: "plan" | "implement", images?: string[]) => void;
   isLoading: boolean;
   mcu: MCUType;
   chatMode: "plan" | "implement";
@@ -28,6 +28,39 @@ interface AgentChatProps {
   onQuotaBlocked?: (info: QuotaBlockedInfo) => void;
   /** How full the conversation's context budget is, as the model counted it. */
   contextUsage?: { used: number; limit: number } | null;
+  /** Show the one-time note that the user is now on the lite tier. */
+  liteNotice?: boolean;
+  onDismissLiteNotice?: () => void;
+  onUpgrade?: () => void;
+}
+
+/** Images per message, and the longest side they are scaled down to. A phone
+ *  photo is 12+ megapixels; the model reads a 1600px image just as well, and
+ *  the upload is a fraction of the size. */
+const MAX_IMAGES = 4;
+const MAX_IMAGE_SIDE = 1600;
+
+/** Read an image file and return it as a downscaled JPEG data URL. */
+function loadImage(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const scale = Math.min(1, MAX_IMAGE_SIDE / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) { reject(new Error("Could not read that image.")); return; }
+      ctx.fillStyle = "#fff"; // transparent PNGs would otherwise turn black
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/jpeg", 0.85));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error(`"${file.name}" is not an image this browser can read.`)); };
+    img.src = url;
+  });
 }
 
 /**
@@ -283,9 +316,18 @@ export default function AgentChat({
   isSmartFlashing,
   onSmartFlash,
   onQuotaBlocked,
-  contextUsage
+  contextUsage,
+  liteNotice,
+  onDismissLiteNotice,
+  onUpgrade
 }: AgentChatProps) {
   const [input, setInput] = useState("");
+  const [images, setImages] = useState<string[]>([]);
+  const [imageError, setImageError] = useState("");
+  // The camera button is for phones and tablets, where capture opens the
+  // camera directly. On a desktop the same input would just open a file picker.
+  const [touchDevice] = useState(() =>
+    typeof window !== "undefined" && !!window.matchMedia?.("(hover: none) and (pointer: coarse)").matches);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const chatBottomRef = useRef<HTMLDivElement>(null);
@@ -467,22 +509,42 @@ export default function AgentChat({
     }
   };
 
-  const handleFileUpload = () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.multiple = true;
-    input.onchange = () => {
-      // Stub file upload logic
-      alert("Document upload functionality would process the file here.");
-    };
-    input.click();
+  const addImages = async (files: FileList | null) => {
+    if (!files?.length) return;
+    setImageError("");
+    const room = MAX_IMAGES - images.length;
+    if (room <= 0) { setImageError(`Up to ${MAX_IMAGES} images per message.`); return; }
+    const picked = Array.from(files).filter((f) => f.type.startsWith("image/")).slice(0, room);
+    if (!picked.length) { setImageError("Only images can be attached."); return; }
+    try {
+      const loaded = await Promise.all(picked.map(loadImage));
+      setImages((prev) => [...prev, ...loaded].slice(0, MAX_IMAGES));
+      if (files.length > room) setImageError(`Up to ${MAX_IMAGES} images per message — the rest were left out.`);
+    } catch (err: any) {
+      setImageError(err?.message || "Could not read that image.");
+    }
   };
+
+  // The + button attaches images: a photo of a wiring diagram, a datasheet
+  // page, a breadboard. It used to be a stub that showed an alert.
+  const pickImages = (fromCamera: boolean) => {
+    const el = document.createElement("input");
+    el.type = "file";
+    el.accept = "image/*";
+    el.multiple = !fromCamera;
+    if (fromCamera) el.setAttribute("capture", "environment");
+    el.onchange = () => { void addImages(el.files); };
+    el.click();
+  };
+  const handleFileUpload = () => pickImages(false);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || isLoading) return;
-    onSendMessage(input.trim());
+    if ((!input.trim() && images.length === 0) || isLoading) return;
+    onSendMessage(input.trim() || "Here is an image.", undefined, images.length ? images : undefined);
     setInput("");
+    setImages([]);
+    setImageError("");
   };
 
   return (
@@ -579,6 +641,13 @@ export default function AgentChat({
                       : "bg-[var(--bg-surface)] border border-[var(--border-main)] text-[var(--text-main)] rounded-bl-none"
                   }`}
                 >
+                  {msg.images && msg.images.length > 0 && (
+                    <div className="flex gap-1.5 flex-wrap">
+                      {msg.images.map((src, i) => (
+                        <img key={i} src={src} alt={`Attached image ${i + 1}`} className="max-h-40 max-w-[10rem] rounded-md border border-[var(--border-main)] object-cover" />
+                      ))}
+                    </div>
+                  )}
                   {/* Normal Text Content */}
                   <div className="prose prose-sm dark:prose-invert max-w-none break-words chat-prose">
                     <MessageMarkdown
@@ -728,6 +797,19 @@ export default function AgentChat({
       </div>
 
       {/* Input Form Box */}
+      {liteNotice && (
+        <div className="mx-2 sm:mx-3 mb-1 flex items-start gap-2 rounded-lg border border-orange-500/40 bg-[var(--bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--text-main)] shrink-0">
+          <Sparkles size={13} className="text-orange-500 shrink-0 mt-0.5" />
+          <span className="flex-1">
+            Your free Pro tokens are used up, so you're now on the <b>Lite</b> tier: a less capable model, no auto-debug, and 5 compiles a day.{" "}
+            <button type="button" onClick={onUpgrade} className="font-semibold text-orange-500 hover:underline">Subscribe to Pro</button>{" "}
+            for the full agent.
+          </span>
+          <button type="button" onClick={onDismissLiteNotice} className="text-[var(--text-muted)] hover:text-[var(--text-main)] shrink-0" title="Dismiss">
+            <X size={12} />
+          </button>
+        </div>
+      )}
       <form
         onSubmit={handleSubmit}
         className="bg-[var(--bg-root)] border-t border-[var(--border-main)] p-2 sm:p-3 flex items-center gap-1.5 sm:gap-2 shrink-0"
@@ -736,11 +818,39 @@ export default function AgentChat({
           type="button"
           onClick={handleFileUpload}
           className="p-2 text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] rounded-md transition shrink-0"
-          title="Add media"
+          title="Attach images"
         >
           <Plus size={16} />
         </button>
+        {touchDevice && (
+          <button
+            type="button"
+            onClick={() => pickImages(true)}
+            className="p-2 text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] rounded-md transition shrink-0"
+            title="Take a photo"
+          >
+            <Camera size={16} />
+          </button>
+        )}
         <div className="flex-1 min-w-0 overflow-x-auto">
+          {images.length > 0 && (
+            <div className="flex gap-1.5 mb-1.5 flex-wrap">
+              {images.map((src, i) => (
+                <div key={i} className="relative w-12 h-12 rounded-md overflow-hidden border border-[var(--border-main)] shrink-0">
+                  <img src={src} alt={`Attachment ${i + 1}`} className="w-full h-full object-cover" />
+                  <button
+                    type="button"
+                    onClick={() => setImages((prev) => prev.filter((_, j) => j !== i))}
+                    className="absolute top-0 right-0 bg-black/60 text-white rounded-bl p-0.5"
+                    title="Remove"
+                  >
+                    <X size={10} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {imageError && <p className="mb-1 text-[10px] text-red-500">{imageError}</p>}
           <textarea
             value={input}
             onChange={(e) => {

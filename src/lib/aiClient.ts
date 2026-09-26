@@ -129,6 +129,7 @@ export type ChatStreamEvent =
   | { type: "command"; text: string; command: string }
   | { type: "tool_progress"; text: string }
   | { type: "context"; used: number; limit: number }
+  | { type: "tier"; tier: string }
   | { type: "context_compacted"; summary: string; compactedIds: string[] }
   | { type: "done" };
 

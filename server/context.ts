@@ -21,7 +21,13 @@ export interface ConversationMessage {
   role: "user" | "assistant";
   content: string;
   isContextSummary?: boolean;
+  /** Attached images, as data URLs. */
+  images?: string[];
 }
+
+/** What one attached image costs, counted generously: a 1600px image is
+ *  typically well under this. Its base64 text says nothing about its tokens. */
+export const IMAGE_TOKENS = 1600;
 
 /**
  * A deliberately cautious estimate, used only to decide BEFORE a request
@@ -36,7 +42,8 @@ export function estimateTokens(text: string): number {
 
 export function estimateConversation(systemText: string, messages: ConversationMessage[]): number {
   // A few tokens of framing per message on top of its text.
-  return estimateTokens(systemText) + messages.reduce((n, m) => n + estimateTokens(m.content) + 4, 0);
+  return estimateTokens(systemText) +
+    messages.reduce((n, m) => n + estimateTokens(m.content) + 4 + (m.images?.length || 0) * IMAGE_TOKENS, 0);
 }
 
 /**
@@ -69,6 +76,22 @@ export function transcriptOf(messages: ConversationMessage[]): string {
   return messages
     .map((m) => m.isContextSummary
       ? `[Earlier summary]\n${m.content}`
-      : `${m.role === "user" ? "User" : "Agent"}: ${m.content}`)
+      : `${m.role === "user" ? "User" : "Agent"}: ${m.content}` +
+        (m.images?.length ? ` [attached ${m.images.length} image${m.images.length === 1 ? "" : "s"}]` : ""))
     .join("\n\n");
+}
+
+/**
+ * The images a chat message may carry: at most 4, each an inline JPEG, PNG,
+ * WebP or GIF data URL of at most 6 MB. Anything else is dropped rather than
+ * forwarded to the model.
+ */
+export function attachedImages(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const ok = raw
+    .filter((u): u is string => typeof u === "string"
+      && /^data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(u)
+      && u.length <= 6_000_000)
+    .slice(0, 4);
+  return ok.length ? ok : undefined;
 }

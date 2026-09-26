@@ -18,6 +18,7 @@ export interface StoredMessage {
   isPlanResponse?: boolean;
   isContextSummary?: boolean;
   compacted?: boolean;
+  images?: string[];
 }
 
 export interface ProjectData {
@@ -112,9 +113,12 @@ export function trimMessagesForStorage(messages: StoredMessage[]): StoredMessage
     .map((m) => ({
       id: m.id,
       role: m.role,
-      content: m.content.length > MAX_MESSAGE_CHARS
+      content: (m.content.length > MAX_MESSAGE_CHARS
         ? m.content.slice(0, MAX_MESSAGE_CHARS) + "\n\n[truncated]"
-        : m.content,
+        : m.content)
+        // Images are not saved (a project document has a size limit a photo
+        // would exceed); say one was there so the conversation still reads.
+        + (m.images?.length ? `\n\n[${m.images.length} image${m.images.length === 1 ? "" : "s"} attached]` : ""),
       timestamp: m.timestamp,
       ...(m.isPlanResponse ? { isPlanResponse: true } : {}),
       ...(m.isContextSummary ? { isContextSummary: true } : {}),

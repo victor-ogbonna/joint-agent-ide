@@ -70,6 +70,9 @@ export interface ChatMessage {
   isContextSummary?: boolean;
   /** Folded into a summary: still shown, no longer sent to the model. */
   compacted?: boolean;
+  /** Images the user attached, as data URLs. Sent to the model; not kept in
+   *  saved projects, which have a size limit an image would blow through. */
+  images?: string[];
   suggestedProjectUpdate?: {
     code?: string;
     description?: string;
