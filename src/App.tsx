@@ -59,6 +59,14 @@ const sketchBaudRate = (src: string): number => {
   return Number.isFinite(baud) && baud > 0 ? baud : 115200;
 };
 
+/**
+ * A serial line as the monitor panel shows it: what the board sent, without
+ * the "[SERIAL] " tag. The tag stays in the terminal, where board output sits
+ * among the app's own messages and needs telling apart; in the monitor every
+ * line is board output, so the tag was only noise.
+ */
+const monitorText = (text: string): string => text.replace(/^\[SERIAL\] /, "");
+
 const pickBoardPort = async (
   preferred: any,
   granted: () => Promise<any[]>,
@@ -2808,7 +2816,7 @@ export default function App() {
                               </button>
                               <button
                                 onClick={() => {
-                                  const text = terminalLines.filter(l => l.type === "serial").map(l => l.text).join('\n');
+                                  const text = terminalLines.filter(l => l.type === "serial").map(l => monitorText(l.text)).join('\n');
                                   navigator.clipboard.writeText(text);
                                 }}
                                 className="flex items-center gap-1 text-[10px] text-[var(--text-muted)] hover:text-[var(--text-main)] transition px-1.5 py-0.5 rounded hover:bg-[var(--bg-hover)]"
@@ -2832,7 +2840,7 @@ export default function App() {
                             {terminalLines.filter(line => line.type === "serial").map((line) => (
                               <div key={line.id} className="flex items-start gap-1.5">
                                 <span className="text-[10px] text-[var(--text-muted)] select-none font-mono mt-0.5 shrink-0">{line.timestamp}</span>
-                                <pre className="whitespace-pre-wrap font-mono flex-1">{line.text}</pre>
+                                <pre className="whitespace-pre-wrap font-mono flex-1">{monitorText(line.text)}</pre>
                               </div>
                             ))}
                             {terminalLines.filter(line => line.type === "serial").length === 0 && (
@@ -2895,7 +2903,7 @@ export default function App() {
       {isNarrow && (
         <nav className="app-bottom-nav shrink-0 flex border-t border-[var(--border-main)] bg-[var(--bg-panel)]">
           {([
-            { id: "files" as const, label: "Files", icon: FolderOpen },
+            { id: "files" as const, label: "Workspace", icon: FolderOpen },
             ...(appMode === "agentic" ? [{ id: "agent" as const, label: "Agent", icon: Bot }] : []),
             { id: "editor" as const, label: "Code", icon: Code },
           ]).map(({ id, label, icon: Icon }) => (
