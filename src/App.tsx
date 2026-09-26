@@ -376,6 +376,13 @@ export default function App() {
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  // "lite" once a free user has spent their free tokens: a less capable
+  // model, no auto-debug, a daily compile allowance. A ref as well, because
+  // Smart Flash runs from closures that predate the latest state.
+  const [tier, setTier] = useState<string | null>(null);
+  const tierRef = useRef<string | null>(null);
+  useEffect(() => { tierRef.current = tier; }, [tier]);
+  const [liteNoticeOpen, setLiteNoticeOpen] = useState(false);
   const [usageInfo, setUsageInfo] = useState<{ tokensUsed: number; tokenCap: number; subscriptionStatus: string } | null>(null);
   const [isCancelingSubscription, setIsCancelingSubscription] = useState(false);
 
@@ -469,6 +476,9 @@ export default function App() {
   // Terminal & Chats
   const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  // How full the conversation's context budget is, as the model last counted
+  // it. null until the first reply of a session on this project.
+  const [contextUsage, setContextUsage] = useState<{ used: number; limit: number } | null>(null);
 
   useEffect(() => {
     if (autoScrollSerial && serialMonitorRef.current) {
@@ -488,6 +498,7 @@ export default function App() {
         const res = await fetch("/api/quota/status", { headers: { Authorization: `Bearer ${idToken}` } });
         if (!res.ok) return;
         const status = await res.json();
+        if (status.tier) setTier(status.tier);
         if (status.blocked) {
           const info: QuotaBlockedInfo = { tier: status.subscriptionStatus === "active" ? "paid" : "free", tokensUsed: status.tokensUsed, tokenCap: status.tokenCap };
           setQuotaBlockInfo(info);
@@ -498,6 +509,16 @@ export default function App() {
       }
     })();
   }, [user]);
+
+  // Tell a user once, briefly, that they have moved to the lite tier.
+  useEffect(() => {
+    if (tier !== "lite" || !user) return;
+    const key = `liteNoticeSeen:${user.uid}`;
+    try { if (localStorage.getItem(key)) return; localStorage.setItem(key, "1"); } catch { /* storage off: show it anyway */ }
+    setLiteNoticeOpen(true);
+    logToTerminal("[PLAN] Your free Pro tokens are used up. You're now on the Lite tier: a less capable model, no auto-debug, and 5 compiles a day. Subscribe to Pro for the full agent.", "info");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tier, user]);
 
   const handleOpenProfileMenu = () => {
     setIsMenuOpen((open) => !open);
@@ -1039,6 +1060,10 @@ export default function App() {
         throw new Error(`Server returned an invalid response (Compilation failed or timed out): ${response.statusText}`);
       }
 
+      const liteLeft = response.headers.get("X-Lite-Compiles-Left");
+      if (liteLeft && liteLeft !== "unlimited") {
+        logToTerminal(`[COMPILER] Lite tier: ${liteLeft} compile${liteLeft === "1" ? "" : "s"} left today.`, "info");
+      }
       if (data.success) {
         logToTerminal(`[COMPILER] Build succeeded! Binary size: ${Math.round(data.binary.length * 0.75)} bytes.`, "success");
         setIsCompiling(false);
@@ -1831,6 +1856,14 @@ export default function App() {
       return;
     }
 
+    // Auto-debug is a Pro feature. The lite tier stops at the compile error;
+    // the Debug button and the agent can still be asked to fix it.
+    if (!compileResult.success && tierRef.current === "lite") {
+      logToTerminal("[SMART FLASH] Compile failed. Auto-debug is part of Pro — fix the error above, press Debug, or ask the agent. Subscribe to Pro to have Smart Flash fix and retry automatically.", "error");
+      setIsSmartFlashing(false);
+      return;
+    }
+
     while (!compileResult.success && attempt < MAX_ATTEMPTS) {
       attempt++;
       logToTerminal(`[SMART FLASH] Compile error detected. AI auto-debug attempt ${attempt}/${MAX_ATTEMPTS}...`, "error");
@@ -1879,13 +1912,14 @@ export default function App() {
     }
   };
 
-  const handleSendMessage = async (text: string, modeOverride?: "plan" | "implement") => {
+  const handleSendMessage = async (text: string, modeOverride?: "plan" | "implement", images?: string[]) => {
     const requestProjectId = currentProjectIdRef.current;
     const newUserMsg: ChatMessage = {
       id: Math.random().toString(),
       role: "user",
       content: text,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      ...(images?.length ? { images } : {}),
     };
 
     const newMessages = [...chatMessages, newUserMsg];
@@ -1934,12 +1968,36 @@ export default function App() {
     try {
       const result = await streamChatEndpoint(
         "/api/ai/chat",
-        { messages: newMessages, mcu, boardId, chatMode: effectiveMode },
+        // Messages folded into a summary are still shown but no longer sent:
+        // the summary stands in for them.
+        { messages: newMessages.filter((m) => !m.compacted), mcu, boardId, chatMode: effectiveMode },
         (event) => {
           if (event.type === "text_delta") {
             assistantContent += event.text;
             ensureStarted();
             updateAssistantMsg({ content: assistantContent });
+          } else if (event.type === "tier") {
+            setTier(event.tier);
+          } else if (event.type === "context") {
+            setContextUsage({ used: event.used, limit: event.limit });
+          } else if (event.type === "context_compacted") {
+            // The server folded these messages into a summary before answering.
+            // Keep them on screen, mark them, and put the summary after them.
+            const folded = new Set<string>(event.compactedIds || []);
+            setChatMessages((prev) => {
+              const marked = prev.map((m) => (folded.has(m.id) || m.isContextSummary) && !m.compacted ? { ...m, compacted: true } : m);
+              let at = 0;
+              marked.forEach((m, i) => { if (m.compacted) at = i + 1; });
+              const summaryMsg: ChatMessage = {
+                id: Math.random().toString(),
+                role: "assistant",
+                content: event.summary,
+                timestamp: Date.now(),
+                isContextSummary: true,
+              };
+              return [...marked.slice(0, at), summaryMsg, ...marked.slice(at)];
+            });
+            logToTerminal("[AI AGENT] Conversation was nearly full — the earlier part is now summarized, so the agent can keep going.", "info");
           } else if (event.type === "project_update") {
             assistantContent = event.text;
             projectUpdate = event.projectUpdate;
@@ -2052,6 +2110,7 @@ export default function App() {
       setMcu(board.family);
       setBoardId(board.id);
       setChatMessages([]); // a brand new project starts with no conversation
+      setContextUsage(null);
       // The terminal is per-project too: build output, flash logs and serial
       // traffic from the previous board were carrying over and reading as if
       // they belonged to the project just created.
@@ -2099,6 +2158,7 @@ export default function App() {
         setCurrentProjectId(null);
         setCurrentProjectName("");
         setChatMessages([]);
+        setContextUsage(null);
         setTerminalLines([]);
       }
       logToTerminal(`[PROJECT] Deleted "${name}".`, "info");
@@ -2179,6 +2239,7 @@ export default function App() {
       // panel, so reopening a project lost every question and answer that led
       // to the code — the user got a finished sketch with no history.
       setChatMessages((data.messages || []) as any);
+      setContextUsage(null);
       setShowProjectsBrowser(false);
       logToTerminal(`[PROJECT] Opened "${data.name}".`, "success");
     } catch (err: any) {
@@ -2667,6 +2728,10 @@ export default function App() {
                         mcuPluggedIn={mcuPluggedIn}
                         onStopGeneration={handleStopGeneration}
                         isSmartFlashing={isSmartFlashing}
+                        contextUsage={contextUsage}
+                        liteNotice={liteNoticeOpen}
+                        onDismissLiteNotice={() => setLiteNoticeOpen(false)}
+                        onUpgrade={() => { setLiteNoticeOpen(false); setIsUpgradeModalOpen(true); }}
                         onSmartFlash={() => {
                           // Smart Flash is disabled until a board connects and
                           // enables the instant it does — the same instant the

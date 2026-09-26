@@ -23,9 +23,14 @@ const BASE_URL = "https://api.deepseek.com";
 // Rolling means a newer flash release is picked up with no code change.
 export const DEEPSEEK_MODEL = "deepseek-flash";
 
+/** Text, or text and images in the OpenAI-compatible parts format. */
+export type MessageContent =
+  | string
+  | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: MessageContent;
 }
 
 export interface ToolSpec {
@@ -41,11 +46,67 @@ export function isDeepSeekConfigured(): boolean {
   return !!process.env.DEEPSEEK_API_KEY;
 }
 
-function authHeaders() {
-  return {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`,
-  };
+/**
+ * Which model answers, and how much it may write. Both are OpenAI-compatible
+ * chat endpoints, so one client serves them.
+ *
+ * PRO_MODEL is DeepSeek V4.1 Flash: subscribers, and free users while their
+ * free tokens last. LITE_MODEL answers free users once those tokens are gone:
+ * a deliberately less capable and cheaper model, with a much smaller output
+ * budget, reached through Gemini's OpenAI-compatible endpoint. LITE_MODEL
+ * (env) changes which one without a code change.
+ */
+export interface ModelProfile {
+  id: "pro" | "lite";
+  label: string;
+  baseUrl: string;
+  apiKey: () => string | undefined;
+  model: string;
+  /** Output cap for one reply. */
+  maxOutputTokens: number;
+  /** Whether the endpoint accepts stream_options.include_usage. */
+  streamUsage: boolean;
+}
+
+export const PRO_MODEL: ModelProfile = {
+  id: "pro",
+  label: "DeepSeek",
+  baseUrl: BASE_URL,
+  apiKey: () => process.env.DEEPSEEK_API_KEY,
+  model: DEEPSEEK_MODEL,
+  // 8192 was too small: a whole game for a 20x4 LCD, plus the wiring and
+  // explanation the same tool call carries, ran out of room mid-call, the
+  // half-written arguments could not be parsed, and the user was told "I
+  // didn't catch that" while "display hello world" worked fine.
+  maxOutputTokens: 40000,
+  streamUsage: true,
+};
+
+export const LITE_MAX_OUTPUT_TOKENS = 5000;
+export const LITE_MODEL: ModelProfile = {
+  id: "lite",
+  label: "Gemini",
+  baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+  apiKey: () => process.env.GEMINI_API_KEY,
+  model: process.env.LITE_MODEL || "gemini-2.5-flash-lite",
+  maxOutputTokens: LITE_MAX_OUTPUT_TOKENS,
+  // Not relied on: an unsupported option must not break every lite request.
+  streamUsage: false,
+};
+
+export function isModelConfigured(profile: ModelProfile): boolean {
+  return !!profile.apiKey();
+}
+
+/**
+ * The model for a request. A lite account gets LITE_MODEL; if that model has
+ * no key configured, it gets the pro model under the lite output cap rather
+ * than an error, so the tier's limits still hold.
+ */
+export function modelFor(lite: boolean): ModelProfile {
+  if (!lite) return PRO_MODEL;
+  if (isModelConfigured(LITE_MODEL)) return LITE_MODEL;
+  return { ...PRO_MODEL, id: "lite", maxOutputTokens: LITE_MAX_OUTPUT_TOKENS };
 }
 
 // Same shape of transient failure Gemini had, so the same narrow policy:
@@ -57,33 +118,56 @@ function isRetryable(status: number): boolean {
   return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
-async function postWithRetry(path: string, body: any, label: string): Promise<Response> {
+const FATAL = /^\S+ \d{3}:/;
+
+async function postWithRetry(profile: ModelProfile, path: string, body: any, label: string): Promise<Response> {
   let lastErr: any;
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
     try {
-      const res = await fetch(`${BASE_URL}${path}`, {
+      const res = await fetch(`${profile.baseUrl}${path}`, {
         method: "POST",
-        headers: authHeaders(),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${profile.apiKey()}`,
+        },
         body: JSON.stringify(body),
       });
       if (res.ok) return res;
 
       const detail = await res.text();
       if (!isRetryable(res.status) || attempt === RETRY_DELAYS_MS.length) {
-        throw new Error(`DeepSeek ${res.status}: ${detail.slice(0, 400)}`);
+        throw new Error(`${profile.label} ${res.status}: ${detail.slice(0, 400)}`);
       }
-      lastErr = new Error(`DeepSeek ${res.status}`);
+      lastErr = new Error(`${profile.label} ${res.status}`);
     } catch (err: any) {
       // A thrown non-retryable error above must not be swallowed into a retry.
-      if (/DeepSeek \d{3}:/.test(err?.message || "")) throw err;
+      if (FATAL.test(err?.message || "")) throw err;
       lastErr = err;
       if (attempt === RETRY_DELAYS_MS.length) break;
     }
     const wait = RETRY_DELAYS_MS[attempt] + Math.floor(Math.random() * 400);
-    console.warn(`[DeepSeek] ${label} failed (attempt ${attempt + 1}) — retrying in ${wait}ms`);
+    console.warn(`[${profile.label}] ${label} failed (attempt ${attempt + 1}) — retrying in ${wait}ms`);
     await new Promise((r) => setTimeout(r, wait));
   }
   throw lastErr;
+}
+
+/** A model that refuses its configured output cap gets 8192, once, and keeps it. */
+const SAFE_OUTPUT_TOKENS = 8192;
+const refusedCap = new Set<string>();
+
+async function postChat(profile: ModelProfile, body: any, label: string): Promise<Response> {
+  const cap = () => refusedCap.has(profile.id) ? Math.min(SAFE_OUTPUT_TOKENS, profile.maxOutputTokens) : profile.maxOutputTokens;
+  try {
+    return await postWithRetry(profile, "/chat/completions", { ...body, max_tokens: cap() }, label);
+  } catch (err: any) {
+    const msg = err?.message || "";
+    const tooLarge = / 400:/.test(msg) && /max_tokens|max_output|maxOutputTokens/i.test(msg);
+    if (!tooLarge || refusedCap.has(profile.id) || profile.maxOutputTokens <= SAFE_OUTPUT_TOKENS) throw err;
+    console.warn(`[${profile.label}] max_tokens ${profile.maxOutputTokens} refused; using ${SAFE_OUTPUT_TOKENS} from now on`);
+    refusedCap.add(profile.id);
+    return await postWithRetry(profile, "/chat/completions", { ...body, max_tokens: cap() }, label);
+  }
 }
 
 export interface StreamHandlers {
@@ -99,6 +183,10 @@ export interface StreamResult {
   textToolCall?: { name: string; args: any };
   /** Whether any text actually reached the user once markup was removed. */
   sentText: boolean;
+  /** The reply stopped because it hit the output limit, not because it ended. */
+  truncated: boolean;
+  /** Tokens the request itself used, as the model counted them. */
+  promptTokens: number;
   outputTokens: number;
 }
 
@@ -114,32 +202,34 @@ export interface StreamResult {
 export async function streamChat(
   messages: ChatMessage[],
   tools: ToolSpec[] | undefined,
-  handlers: StreamHandlers
+  handlers: StreamHandlers,
+  profile: ModelProfile = PRO_MODEL,
 ): Promise<StreamResult> {
-  const res = await postWithRetry(
-    "/chat/completions",
+  const res = await postChat(
+    profile,
     {
-      model: DEEPSEEK_MODEL,
+      model: profile.model,
       messages,
       stream: true,
       // Ask for usage on the final chunk so token accounting stays exact
       // instead of being estimated from character counts.
-      stream_options: { include_usage: true },
-      max_tokens: 8192,
+      ...(profile.streamUsage ? { stream_options: { include_usage: true } } : {}),
       ...(tools?.length ? { tools, tool_choice: "auto" } : {}),
     },
     "chat stream"
   );
 
   const reader = res.body?.getReader();
-  if (!reader) throw new Error("DeepSeek returned no response stream.");
+  if (!reader) throw new Error(`${profile.label} returned no response stream.`);
 
   const decoder = new TextDecoder();
   let buffer = "";
   let outputTokens = 0;
+  let promptTokens = 0;
   const partial: Record<number, { name: string; args: string }> = {};
   // Raw tool-call markup never reaches the chat. See server/toolMarkup.ts.
   let sentText = false;
+  let finishReason = "";
   const guard = new MarkupGuard((text) => { sentText = true; handlers.onText(text); });
 
   while (true) {
@@ -166,7 +256,9 @@ export async function streamChat(
       }
 
       if (chunk.usage?.completion_tokens) outputTokens = chunk.usage.completion_tokens;
+      if (chunk.usage?.prompt_tokens) promptTokens = chunk.usage.prompt_tokens;
 
+      if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
       const delta = chunk.choices?.[0]?.delta;
       if (!delta) continue;
 
@@ -200,30 +292,33 @@ export async function streamChat(
     } catch (err) {
       // Truncated/invalid arguments: better to drop the call and let the text
       // response stand than to hand the UI a half-parsed project payload.
-      console.error(`[DeepSeek] tool call ${first.name} had unparseable arguments:`, err);
+      console.error(`[${profile.label}] tool call ${first.name} had unparseable arguments:`, err);
     }
   }
 
   const textToolCall = guard.markup ? parseTextToolCall(guard.markup) : undefined;
   if (guard.markup) {
-    console.warn(`[DeepSeek] withheld ${guard.markup.length} chars of tool-call markup from the chat` +
+    console.warn(`[${profile.label}] withheld ${guard.markup.length} chars of tool-call markup from the chat` +
       (textToolCall ? ` (read back as ${textToolCall.name})` : ""));
   }
 
-  return { toolCall, textToolCall, sentText, outputTokens };
+  const truncated = finishReason === "length";
+  if (truncated) console.warn(`[${profile.label}] reply hit the output limit`);
+
+  return { toolCall, textToolCall, sentText, truncated, promptTokens, outputTokens };
 }
 
 /** Non-streaming completion, for the endpoints that just need one JSON blob back. */
 export async function completeChat(
   messages: ChatMessage[],
-  opts: { jsonMode?: boolean } = {}
+  opts: { jsonMode?: boolean } = {},
+  profile: ModelProfile = PRO_MODEL,
 ): Promise<{ text: string; outputTokens: number }> {
-  const res = await postWithRetry(
-    "/chat/completions",
+  const res = await postChat(
+    profile,
     {
-      model: DEEPSEEK_MODEL,
+      model: profile.model,
       messages,
-      max_tokens: 8192,
       ...(opts.jsonMode ? { response_format: { type: "json_object" } } : {}),
     },
     "completion"

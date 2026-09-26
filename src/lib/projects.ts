@@ -16,6 +16,9 @@ export interface StoredMessage {
   content: string;
   timestamp: number;
   isPlanResponse?: boolean;
+  isContextSummary?: boolean;
+  compacted?: boolean;
+  images?: string[];
 }
 
 export interface ProjectData {
@@ -101,15 +104,24 @@ export const MAX_STORED_MESSAGES = 60;
 const MAX_MESSAGE_CHARS = 20000;
 
 export function trimMessagesForStorage(messages: StoredMessage[]): StoredMessage[] {
-  return messages
-    .slice(-MAX_STORED_MESSAGES)
+  const kept = messages.slice(-MAX_STORED_MESSAGES);
+  // The latest summary is the agent's memory of everything before it; keep it
+  // even when it has scrolled past the storage cap.
+  const summary = [...messages].reverse().find((m) => m.isContextSummary);
+  if (summary && !kept.includes(summary)) kept.unshift(summary);
+  return kept
     .map((m) => ({
       id: m.id,
       role: m.role,
-      content: m.content.length > MAX_MESSAGE_CHARS
+      content: (m.content.length > MAX_MESSAGE_CHARS
         ? m.content.slice(0, MAX_MESSAGE_CHARS) + "\n\n[truncated]"
-        : m.content,
+        : m.content)
+        // Images are not saved (a project document has a size limit a photo
+        // would exceed); say one was there so the conversation still reads.
+        + (m.images?.length ? `\n\n[${m.images.length} image${m.images.length === 1 ? "" : "s"} attached]` : ""),
       timestamp: m.timestamp,
       ...(m.isPlanResponse ? { isPlanResponse: true } : {}),
+      ...(m.isContextSummary ? { isContextSummary: true } : {}),
+      ...(m.compacted ? { compacted: true } : {}),
     }));
 }

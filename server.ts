@@ -15,7 +15,8 @@ import { SerialPort } from 'serialport';
 import { ReadlineParser } from '@serialport/parser-readline';
 import { loadAdminConfig, saveAdminConfig } from './server/adminConfig';
 import { readAccessLists, sanitiseEmailList } from './server/access';
-import { requireAuthAndQuota, requireFirebaseAuth, incrementTokenUsage, FREE_TOKEN_CAP, PAID_TOKEN_CAP, getOrCreateUserDoc } from './server/quota';
+import { requireAuthAndQuota, requireFirebaseAuth, incrementTokenUsage, FREE_TOKEN_CAP, PAID_TOKEN_CAP, getOrCreateUserDoc, LITE_STATUS, LITE_DAILY_COMPILES, consumeCompile, tierOf, liteCompilesLeft } from './server/quota';
+import { accessLevelFor } from './server/access';
 import { registerPaystackRoutes } from './server/paystack';
 import { registerWaitlistRoutes } from './server/waitlist';
 import { registerFeedbackRoutes } from './server/feedback';
@@ -24,7 +25,9 @@ import { registerFirebaseAuthProxy } from './server/firebaseAuthProxy';
 import { detectLibDeps } from './server/libraryDeps';
 import { loadBoardCatalog, getBoardCatalog, getBoardById, boardFamily, resolveBoard, describeBoardForPrompt, describeFamilyForPrompt, BoardInfo } from './server/boards';
 import { getCachedContentName } from './server/geminiCache';
-import { streamChat, completeChat, isDeepSeekConfigured, DEEPSEEK_MODEL, ChatMessage, ToolSpec } from './server/deepseek';
+import { streamChat, completeChat, isDeepSeekConfigured, DEEPSEEK_MODEL, ChatMessage, ToolSpec, modelFor } from './server/deepseek';
+import { CONTEXT_BUDGET_TOKENS, ConversationMessage, planCompaction, SUMMARY_INSTRUCTION, transcriptOf, KEEP_RECENT_MESSAGES, attachedImages } from './server/context';
+
 
 // Same two tools as the Gemini declarations below, restated as JSON Schema —
 // DeepSeek is OpenAI-compatible, so `type` is a plain string rather than
@@ -361,11 +364,16 @@ app.get("/api/quota/status", requireFirebaseAuth, async (req, res) => {
   const isPaid = doc.subscriptionStatus === "active";
   const tokenCap = isPaid ? PAID_TOKEN_CAP : FREE_TOKEN_CAP;
   const tokensUsed = isPaid ? doc.cycleTokensUsed : doc.lifetimeFreeTokensUsed;
+  const tier = tierOf(doc, accessLevelFor(req.email ?? null, req.emailVerified === true));
   res.json({
     subscriptionStatus: doc.subscriptionStatus,
     tokensUsed,
     tokenCap,
-    blocked: tokensUsed >= tokenCap,
+    // A free user past the cap is on the lite tier, not blocked.
+    blocked: isPaid && tokensUsed >= tokenCap,
+    tier,
+    liteCompilesLeft: tier === "lite" ? liteCompilesLeft(doc) : null,
+    liteDailyCompiles: LITE_DAILY_COMPILES,
   });
 });
 
@@ -630,16 +638,18 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
   const { description: mcuDescription, powerPin: mcuPowerPin, specs, family } = describeBoardForPrompt(boardId, mcu);
 
   try {
-    // The client resends the full accumulated conversation every turn, which
-    // grows input-token cost linearly with session length. Older turns add
-    // little value once the conversation is long, so cap what's actually
-    // sent to Gemini regardless of how much history the client is holding.
-    const CHAT_HISTORY_WINDOW = 16;
-    const windowedMessages = messages.length > CHAT_HISTORY_WINDOW ? messages.slice(-CHAT_HISTORY_WINDOW) : messages;
-    const formattedMessages = windowedMessages.map((m: any) => ({
-      role: m.role === "user" ? "user" : "model",
-      parts: [{ text: m.content }]
-    }));
+    // The whole conversation goes to the model, against a token budget the
+    // user can see (server/context.ts). It used to be cut to the last 16
+    // messages without a word, so a long session silently forgot its start.
+    const conversation: ConversationMessage[] = (messages as any[])
+      .filter((m) => m && typeof m.content === "string")
+      .map((m) => ({
+        id: typeof m.id === "string" ? m.id : undefined,
+        role: m.role === "user" ? "user" : "assistant",
+        content: m.content,
+        isContextSummary: m.isContextSummary === true,
+        images: attachedImages(m.images),
+      }));
 
     // Context caching: only worth attempting in implement mode (plan mode's
     // instruction is too short to ever clear Gemini's ~1024-token caching
@@ -664,16 +674,61 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     // rather than a separate field, and it sits at the front of every request
     // unchanged — which is exactly the prefix DeepSeek caches automatically,
     // so the Gemini explicit-cache machinery has no equivalent to port.
+    const systemText = buildChatSystemInstruction(mcuDescription, mcuPowerPin, chatMode);
+    // Free users past their free tokens are answered by the lite model.
+    const lite = req.quota!.subscriptionStatus === LITE_STATUS;
+    const model = modelFor(lite);
+    // Lets the browser tell the user, the moment it happens, that the free
+    // tokens are spent and the lite tier has taken over.
+    send({ type: "tier", tier: lite ? "lite" : "full" });
+
+    // Full at AUTOCOMPACT_AT: fold everything but the recent tail into a
+    // summary, tell the browser which messages it replaced, and carry on.
+    let history = conversation;
+    let compactionTokens = 0;
+    const plan = planCompaction(systemText, conversation);
+    if (plan.compact) {
+      send({ type: "tool_progress", text: "Conversation is nearly full — summarizing the earlier part…" });
+      try {
+        const summary = await completeChat([
+          { role: "system", content: SUMMARY_INSTRUCTION },
+          { role: "user", content: transcriptOf(plan.older) },
+        ], {}, model);
+        compactionTokens = summary.outputTokens;
+        const text = summary.text.trim();
+        if (text) {
+          history = [{ role: "assistant", content: text, isContextSummary: true }, ...plan.recent];
+          send({
+            type: "context_compacted",
+            summary: text,
+            compactedIds: plan.older.map((m) => m.id).filter(Boolean),
+          });
+        }
+      } catch (err: any) {
+        // Better an oversized request than none: the model's own window is
+        // larger than the budget, so this still goes through.
+        console.error("[Context] compaction failed:", err?.message || err);
+      }
+    }
+
+    // Images ride along with the message they were attached to, as long as
+    // it is among the recent tail; older ones are left out rather than
+    // resent on every request.
+    const imagesFrom = Math.max(0, history.length - KEEP_RECENT_MESSAGES);
     const dsMessages: ChatMessage[] = [
-      { role: "system", content: buildChatSystemInstruction(mcuDescription, mcuPowerPin, chatMode) },
-      ...formattedMessages.map((m) => ({
-        role: (m.role === "model" ? "assistant" : "user") as "assistant" | "user",
-        content: m.parts[0].text,
-      })),
+      { role: "system", content: systemText },
+      ...history.map((m, i): ChatMessage => m.isContextSummary
+        ? { role: "system", content: `Summary of the earlier conversation, which you no longer see in full:\n${m.content}` }
+        : m.role === "user" && m.images?.length && i >= imagesFrom
+          ? { role: "user", content: [
+              { type: "text", text: m.content },
+              ...m.images.map((url) => ({ type: "image_url" as const, image_url: { url } })),
+            ] }
+          : { role: m.role, content: m.content }),
     ];
 
-    const { toolCall, textToolCall, sentText, outputTokens } = await streamChat(
-      dsMessages,
+    const runChat = (msgs: ChatMessage[]) => streamChat(
+      msgs,
       chatMode === "plan" ? undefined : DEEPSEEK_IMPLEMENT_TOOLS,
       {
         onText: (text) => send({ type: "text_delta", text }),
@@ -693,8 +748,35 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
             });
           };
         })(),
-      }
+      },
+      model,
     );
+
+    let result = await runChat(dsMessages);
+    let outputTokens = result.outputTokens;
+    // Out of room before the tool call finished: its arguments were cut off
+    // and cannot be used, and nothing reached the user. Ask once more for a
+    // compact version rather than answer "I didn't catch that" to a request
+    // that was perfectly clear, just large.
+    if (result.truncated && !result.toolCall && !result.textToolCall && !result.sentText && chatMode !== "plan" && !lite) {
+      send({ type: "tool_progress", text: "That's a big one — writing a more compact version…" });
+      result = await runChat([
+        ...dsMessages,
+        {
+          role: "system",
+          content: "Your previous reply ran out of output space before the tool call was complete, so nothing was delivered. " +
+            "Call generate_project again with the complete sketch written compactly: no long comment blocks, no repeated code " +
+            "(use loops and helper functions), and a brief explanation.",
+        },
+      ]);
+      outputTokens += result.outputTokens;
+    }
+    const { toolCall, textToolCall, sentText } = result;
+    outputTokens += compactionTokens;
+    // How full the conversation is, as the model counted it, for the meter.
+    if (result.promptTokens) {
+      send({ type: "context", used: result.promptTokens, limit: CONTEXT_BUDGET_TOKENS });
+    }
 
     // A call the model wrote out as markup instead of making is still the call
     // it meant. Plan mode offers no tools, so there the only one honoured is
@@ -748,7 +830,11 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
         type: "text_delta",
         text: textToolCall && chatMode === "plan"
           ? "Turn off Plan Mode and ask again, and I'll make that change."
-          : "I didn't catch that — could you say it another way?",
+          : result.truncated
+            ? (lite
+              ? "That's more than the Lite tier can write in one reply. Ask for it in smaller steps, or subscribe to Pro for full-size projects."
+              : "That was too big to write in one reply. Ask for it in two steps — for example the display and graphics first, then the game logic.")
+            : "I didn't catch that — could you say it another way?",
       });
     }
     send({ type: "done" });
@@ -852,7 +938,7 @@ Wire colours: #EF4444 power, #000000 GND, #3B82F6 signal.
 All four top-level keys are required. Do not wrap the JSON in markdown fences.`,
       },
       { role: "user", content: `Create: ${prompt}` },
-    ], { jsonMode: true });
+    ], { jsonMode: true }, modelFor(req.quota!.subscriptionStatus === LITE_STATUS));
 
     await incrementTokenUsage(req.uid!, req.quota!.subscriptionStatus, response.outputTokens);
 
@@ -913,7 +999,7 @@ Respond with a single JSON object and nothing else, in exactly this shape:
 Both keys are required. Do not wrap the JSON in markdown fences.`,
       },
       { role: "user", content: `CODE:\n${code}\n\nERROR:\n${error}` },
-    ], { jsonMode: true });
+    ], { jsonMode: true }, modelFor(req.quota!.subscriptionStatus === LITE_STATUS));
 
     await incrementTokenUsage(req.uid!, req.quota!.subscriptionStatus, response.outputTokens);
 
@@ -1207,6 +1293,24 @@ app.post("/api/ai/transcribe", requireAuthAndQuota, async (req, res) => {
 app.post("/api/compile", requireFirebaseAuth, async (req, res) => {
   const { code, mcu, boardId } = req.body;
   if (!code || !mcu) return res.status(400).json({ error: "Code and MCU are required." });
+
+  // The lite tier compiles LITE_DAILY_COMPILES times a day; every other tier
+  // without limit. Counted before the build, so a failed build still counts.
+  let liteCompilesLeftAfter: number | null = null;
+  try {
+    const spend = await consumeCompile(req.uid!, req.email ?? null, req.emailVerified === true);
+    if (!spend.allowed) {
+      return res.status(429).json({
+        error: `The Lite tier includes ${LITE_DAILY_COMPILES} compiles a day, and today's are used. They reset at midnight UTC — or subscribe to Pro for unlimited compiles.`,
+        code: "LITE_COMPILE_LIMIT",
+      });
+    }
+    liteCompilesLeftAfter = spend.left;
+  } catch (err: any) {
+    // A counting failure must not stop anyone compiling.
+    console.error("[Quota] compile count failed:", err?.message || err);
+  }
+  res.setHeader("X-Lite-Compiles-Left", liteCompilesLeftAfter === null ? "unlimited" : String(liteCompilesLeftAfter));
 
   const board = resolveBoard(boardId, mcu);
 

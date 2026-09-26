@@ -6,6 +6,14 @@ import { accessLevelFor, bypassesLaunchLock, LAUNCH_LOCKED_CODE, LAUNCH_LOCKED_M
 
 /** Sentinel subscription status for accounts whose usage is never counted. */
 export const UNMETERED_STATUS = "unmetered";
+/**
+ * Sentinel subscription status for a free user whose free tokens are spent.
+ * They are no longer refused: they are answered by the less capable LITE
+ * model, with no auto-debug and LITE_DAILY_COMPILES compiles a day, until
+ * they subscribe. Their usage is counted separately, for monitoring only.
+ */
+export const LITE_STATUS = "lite";
+export const LITE_DAILY_COMPILES = 5;
 
 declare global {
   namespace Express {
@@ -13,6 +21,7 @@ declare global {
       uid?: string;
       quota?: { subscriptionStatus: string; tokensUsed: number; tokenCap: number };
       email?: string | null;
+      emailVerified?: boolean;
     }
   }
 }
@@ -52,6 +61,10 @@ export interface UserQuotaDoc {
   paystackSubscriptionCode: string | null;
   paystackEmailToken: string | null;
   currentPeriodEnd: Timestamp | null;
+  liteTokensUsed: number;
+  /** UTC date (YYYY-MM-DD) the lite compile count below belongs to. */
+  liteCompileDay: string | null;
+  liteCompileCount: number;
 }
 
 const DEFAULT_USER_DOC: UserQuotaDoc = {
@@ -62,6 +75,9 @@ const DEFAULT_USER_DOC: UserQuotaDoc = {
   paystackSubscriptionCode: null,
   paystackEmailToken: null,
   currentPeriodEnd: null,
+  liteTokensUsed: 0,
+  liteCompileDay: null,
+  liteCompileCount: 0,
 };
 
 export async function getOrCreateUserDoc(uid: string): Promise<UserQuotaDoc> {
@@ -81,6 +97,9 @@ export async function getOrCreateUserDoc(uid: string): Promise<UserQuotaDoc> {
     paystackSubscriptionCode: data.paystackSubscriptionCode ?? null,
     paystackEmailToken: data.paystackEmailToken ?? null,
     currentPeriodEnd: data.currentPeriodEnd ?? null,
+    liteTokensUsed: data.liteTokensUsed ?? 0,
+    liteCompileDay: data.liteCompileDay ?? null,
+    liteCompileCount: data.liteCompileCount ?? 0,
   };
 }
 
@@ -124,7 +143,51 @@ export async function requireFirebaseAuth(req: Request, res: Response, next: Nex
   if (!launchLockCheck(who, res)) return;
   req.uid = who.uid;
   req.email = who.email;
+  req.emailVerified = who.emailVerified;
   next();
+}
+
+export type Tier = "unmetered" | "pro" | "free" | "lite";
+
+/** Where an account stands: paid or granted Pro, free with tokens left, or
+ *  free with them spent (lite). */
+export function tierOf(doc: UserQuotaDoc, level: string): Tier {
+  if (level === "unmetered") return "unmetered";
+  if (doc.subscriptionStatus === "active" || level === "pro") return "pro";
+  return doc.lifetimeFreeTokensUsed >= FREE_TOKEN_CAP ? "lite" : "free";
+}
+
+export function utcDay(d = new Date()): string {
+  return d.toISOString().slice(0, 10);
+}
+
+/** Lite compiles left today. */
+export function liteCompilesLeft(doc: UserQuotaDoc, today = utcDay()): number {
+  const used = doc.liteCompileDay === today ? doc.liteCompileCount : 0;
+  return Math.max(0, LITE_DAILY_COMPILES - used);
+}
+
+/**
+ * Spend one of a lite account's daily compiles. Every other tier compiles
+ * without limit. Transactional, so two compiles at once cannot both take
+ * the last one.
+ */
+export async function consumeCompile(uid: string, email: string | null, emailVerified: boolean): Promise<{ allowed: boolean; left: number | null }> {
+  const level = accessLevelFor(email, emailVerified);
+  if (level === "unmetered") return { allowed: true, left: null };
+  const ref = adminDb.collection("users").doc(uid);
+  return adminDb.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const data: any = snap.exists ? snap.data() : {};
+    const doc = { ...DEFAULT_USER_DOC, ...data } as UserQuotaDoc;
+    if (tierOf(doc, level) !== "lite") return { allowed: true, left: null };
+    const today = utcDay();
+    const left = liteCompilesLeft(doc, today);
+    if (left <= 0) return { allowed: false, left: 0 };
+    const used = doc.liteCompileDay === today ? doc.liteCompileCount : 0;
+    tx.set(ref, { liteCompileDay: today, liteCompileCount: used + 1, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    return { allowed: true, left: left - 1 };
+  });
 }
 
 // Auth + token-cap enforcement — for every route that calls Gemini.
@@ -164,6 +227,16 @@ export async function requireAuthAndQuota(req: Request, res: Response, next: Nex
   const tokenCap = isPaid ? PAID_TOKEN_CAP : FREE_TOKEN_CAP;
   const tokensUsed = isPaid ? doc.cycleTokensUsed : doc.lifetimeFreeTokensUsed;
 
+  // A free user past their free tokens is not refused: the lite model
+  // answers them from here on, with its own limits, until they subscribe.
+  if (!isPaid && tokensUsed >= tokenCap) {
+    req.uid = uid;
+    req.email = who.email;
+    req.emailVerified = who.emailVerified;
+    req.quota = { subscriptionStatus: LITE_STATUS, tokensUsed, tokenCap };
+    return next();
+  }
+
   if (tokensUsed >= tokenCap) {
     return res.status(402).json({
       error: isPaid ? "You've used this cycle's AI tokens — they'll refresh on your next billing date." : "You've used up your free AI tokens.",
@@ -176,6 +249,7 @@ export async function requireAuthAndQuota(req: Request, res: Response, next: Nex
 
   req.uid = uid;
   req.email = who.email;
+  req.emailVerified = who.emailVerified;
   req.quota = { subscriptionStatus: doc.subscriptionStatus, tokensUsed, tokenCap };
   next();
 }
@@ -186,7 +260,9 @@ export async function requireAuthAndQuota(req: Request, res: Response, next: Nex
 export async function incrementTokenUsage(uid: string, subscriptionStatus: string, tokens: number): Promise<void> {
   if (!tokens || tokens <= 0) return;
   if (subscriptionStatus === UNMETERED_STATUS) return;
-  const field = subscriptionStatus === "active" ? "cycleTokensUsed" : "lifetimeFreeTokensUsed";
+  const field = subscriptionStatus === "active" ? "cycleTokensUsed"
+    : subscriptionStatus === LITE_STATUS ? "liteTokensUsed"
+    : "lifetimeFreeTokensUsed";
   try {
     await adminDb.collection("users").doc(uid).update({
       [field]: FieldValue.increment(tokens),

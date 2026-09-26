@@ -128,6 +128,9 @@ export type ChatStreamEvent =
   | { type: "project_update"; text: string; projectUpdate: any }
   | { type: "command"; text: string; command: string }
   | { type: "tool_progress"; text: string }
+  | { type: "context"; used: number; limit: number }
+  | { type: "tier"; tier: string }
+  | { type: "context_compacted"; summary: string; compactedIds: string[] }
   | { type: "done" };
 
 // For /api/ai/chat specifically — reads the server-sent-events stream and
