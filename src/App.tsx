@@ -469,6 +469,9 @@ export default function App() {
   // Terminal & Chats
   const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  // How full the conversation's context budget is, as the model last counted
+  // it. null until the first reply of a session on this project.
+  const [contextUsage, setContextUsage] = useState<{ used: number; limit: number } | null>(null);
 
   useEffect(() => {
     if (autoScrollSerial && serialMonitorRef.current) {
@@ -1934,12 +1937,34 @@ export default function App() {
     try {
       const result = await streamChatEndpoint(
         "/api/ai/chat",
-        { messages: newMessages, mcu, boardId, chatMode: effectiveMode },
+        // Messages folded into a summary are still shown but no longer sent:
+        // the summary stands in for them.
+        { messages: newMessages.filter((m) => !m.compacted), mcu, boardId, chatMode: effectiveMode },
         (event) => {
           if (event.type === "text_delta") {
             assistantContent += event.text;
             ensureStarted();
             updateAssistantMsg({ content: assistantContent });
+          } else if (event.type === "context") {
+            setContextUsage({ used: event.used, limit: event.limit });
+          } else if (event.type === "context_compacted") {
+            // The server folded these messages into a summary before answering.
+            // Keep them on screen, mark them, and put the summary after them.
+            const folded = new Set<string>(event.compactedIds || []);
+            setChatMessages((prev) => {
+              const marked = prev.map((m) => (folded.has(m.id) || m.isContextSummary) && !m.compacted ? { ...m, compacted: true } : m);
+              let at = 0;
+              marked.forEach((m, i) => { if (m.compacted) at = i + 1; });
+              const summaryMsg: ChatMessage = {
+                id: Math.random().toString(),
+                role: "assistant",
+                content: event.summary,
+                timestamp: Date.now(),
+                isContextSummary: true,
+              };
+              return [...marked.slice(0, at), summaryMsg, ...marked.slice(at)];
+            });
+            logToTerminal("[AI AGENT] Conversation was nearly full — the earlier part is now summarized, so the agent can keep going.", "info");
           } else if (event.type === "project_update") {
             assistantContent = event.text;
             projectUpdate = event.projectUpdate;
@@ -2052,6 +2077,7 @@ export default function App() {
       setMcu(board.family);
       setBoardId(board.id);
       setChatMessages([]); // a brand new project starts with no conversation
+      setContextUsage(null);
       // The terminal is per-project too: build output, flash logs and serial
       // traffic from the previous board were carrying over and reading as if
       // they belonged to the project just created.
@@ -2099,6 +2125,7 @@ export default function App() {
         setCurrentProjectId(null);
         setCurrentProjectName("");
         setChatMessages([]);
+        setContextUsage(null);
         setTerminalLines([]);
       }
       logToTerminal(`[PROJECT] Deleted "${name}".`, "info");
@@ -2179,6 +2206,7 @@ export default function App() {
       // panel, so reopening a project lost every question and answer that led
       // to the code — the user got a finished sketch with no history.
       setChatMessages((data.messages || []) as any);
+      setContextUsage(null);
       setShowProjectsBrowser(false);
       logToTerminal(`[PROJECT] Opened "${data.name}".`, "success");
     } catch (err: any) {
@@ -2667,6 +2695,7 @@ export default function App() {
                         mcuPluggedIn={mcuPluggedIn}
                         onStopGeneration={handleStopGeneration}
                         isSmartFlashing={isSmartFlashing}
+                        contextUsage={contextUsage}
                         onSmartFlash={() => {
                           // Smart Flash is disabled until a board connects and
                           // enables the instant it does — the same instant the

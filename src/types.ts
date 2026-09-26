@@ -65,6 +65,11 @@ export interface ChatMessage {
   timestamp: number;
   suggestions?: string[];
   isPlanResponse?: boolean;
+  /** The agent's summary of everything before it, made when the conversation
+   *  filled its context budget. Sent to the model in place of those messages. */
+  isContextSummary?: boolean;
+  /** Folded into a summary: still shown, no longer sent to the model. */
+  compacted?: boolean;
   suggestedProjectUpdate?: {
     code?: string;
     description?: string;

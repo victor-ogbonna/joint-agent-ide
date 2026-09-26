@@ -16,6 +16,8 @@ export interface StoredMessage {
   content: string;
   timestamp: number;
   isPlanResponse?: boolean;
+  isContextSummary?: boolean;
+  compacted?: boolean;
 }
 
 export interface ProjectData {
@@ -101,8 +103,12 @@ export const MAX_STORED_MESSAGES = 60;
 const MAX_MESSAGE_CHARS = 20000;
 
 export function trimMessagesForStorage(messages: StoredMessage[]): StoredMessage[] {
-  return messages
-    .slice(-MAX_STORED_MESSAGES)
+  const kept = messages.slice(-MAX_STORED_MESSAGES);
+  // The latest summary is the agent's memory of everything before it; keep it
+  // even when it has scrolled past the storage cap.
+  const summary = [...messages].reverse().find((m) => m.isContextSummary);
+  if (summary && !kept.includes(summary)) kept.unshift(summary);
+  return kept
     .map((m) => ({
       id: m.id,
       role: m.role,
@@ -111,5 +117,7 @@ export function trimMessagesForStorage(messages: StoredMessage[]): StoredMessage
         : m.content,
       timestamp: m.timestamp,
       ...(m.isPlanResponse ? { isPlanResponse: true } : {}),
+      ...(m.isContextSummary ? { isContextSummary: true } : {}),
+      ...(m.compacted ? { compacted: true } : {}),
     }));
 }

@@ -26,6 +26,29 @@ interface AgentChatProps {
     connections?: SchematicConnection[];
   }) => void;
   onQuotaBlocked?: (info: QuotaBlockedInfo) => void;
+  /** How full the conversation's context budget is, as the model counted it. */
+  contextUsage?: { used: number; limit: number } | null;
+}
+
+/**
+ * How much of the conversation's context budget is used. At 98% the server
+ * folds the earlier conversation into a summary, so this never reads "full".
+ */
+function ContextMeter({ used, limit }: { used: number; limit: number }) {
+  const pct = Math.min(100, Math.round((used / limit) * 100));
+  const tone = pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-500" : "bg-emerald-500";
+  return (
+    <div
+      className="flex items-center gap-1.5 text-[10px] text-[var(--text-muted)] tabular-nums shrink-0"
+      title={`Context: ${used.toLocaleString()} of ${limit.toLocaleString()} tokens used. At 98% the earlier conversation is summarized automatically so the agent can keep going.`}
+    >
+      <span>Context</span>
+      <span className="relative w-12 h-1.5 rounded-full bg-[var(--bg-hover)] overflow-hidden" aria-hidden="true">
+        <span className={`absolute inset-y-0 left-0 rounded-full ${tone}`} style={{ width: `${Math.max(pct, 2)}%` }} />
+      </span>
+      <span>{pct}%</span>
+    </div>
+  );
 }
 
 // A clarifying question's answer box. Kept as a stable, module-level
@@ -259,7 +282,8 @@ export default function AgentChat({
   onStopGeneration,
   isSmartFlashing,
   onSmartFlash,
-  onQuotaBlocked
+  onQuotaBlocked,
+  contextUsage
 }: AgentChatProps) {
   const [input, setInput] = useState("");
   const [isRecording, setIsRecording] = useState(false);
@@ -475,6 +499,8 @@ export default function AgentChat({
             </h2>
           </div>
         </div>
+        <div className="flex items-center gap-3 shrink-0">
+        {contextUsage && <ContextMeter used={contextUsage.used} limit={contextUsage.limit} />}
         <button
           type="button"
           onClick={onSmartFlash}
@@ -485,6 +511,7 @@ export default function AgentChat({
           <Zap size={12} className={isSmartFlashing ? "animate-pulse" : ""} />
           {isSmartFlashing ? "Flashing..." : "Smart Flash"}
         </button>
+        </div>
         </div>
       {/* Message Feed Canvas */}
       <div className="flex-1 p-4 overflow-y-auto space-y-4 terminal-scrollbar bg-[var(--bg-panel)]">
@@ -522,7 +549,23 @@ export default function AgentChat({
           </div>
         ) : (
           <div className="space-y-4">
-            {messages.map((msg, index) => (
+            {messages.map((msg, index) => msg.isContextSummary ? (
+              // Where the conversation was folded into a summary. Everything
+              // above this line is still here to read but is no longer sent to
+              // the agent; the summary below stands in for it.
+              <div key={msg.id} className="flex items-center gap-2 text-[10px] text-[var(--text-muted)]">
+                <span className="flex-1 border-t border-[var(--border-main)]" />
+                <details className="max-w-[85%]">
+                  <summary className="cursor-pointer select-none text-center list-none">
+                    Earlier conversation summarized to free up context · show summary
+                  </summary>
+                  <div className="mt-2 whitespace-pre-wrap rounded-lg border border-[var(--border-main)] bg-[var(--bg-surface)] px-3 py-2 text-[11px] leading-relaxed text-[var(--text-main)]">
+                    {msg.content}
+                  </div>
+                </details>
+                <span className="flex-1 border-t border-[var(--border-main)]" />
+              </div>
+            ) : (
               <motion.div
                 key={msg.id}
                 initial={{ opacity: 0, y: 8 }}

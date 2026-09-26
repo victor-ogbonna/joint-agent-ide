@@ -124,6 +124,8 @@ export interface StreamResult {
   sentText: boolean;
   /** The reply stopped because it hit the output limit, not because it ended. */
   truncated: boolean;
+  /** Tokens the request itself used, as the model counted them. */
+  promptTokens: number;
   outputTokens: number;
 }
 
@@ -160,6 +162,7 @@ export async function streamChat(
   const decoder = new TextDecoder();
   let buffer = "";
   let outputTokens = 0;
+  let promptTokens = 0;
   const partial: Record<number, { name: string; args: string }> = {};
   // Raw tool-call markup never reaches the chat. See server/toolMarkup.ts.
   let sentText = false;
@@ -190,6 +193,7 @@ export async function streamChat(
       }
 
       if (chunk.usage?.completion_tokens) outputTokens = chunk.usage.completion_tokens;
+      if (chunk.usage?.prompt_tokens) promptTokens = chunk.usage.prompt_tokens;
 
       if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
       const delta = chunk.choices?.[0]?.delta;
@@ -238,7 +242,7 @@ export async function streamChat(
   const truncated = finishReason === "length";
   if (truncated) console.warn(`[DeepSeek] reply hit the ${maxOutputTokens}-token output limit`);
 
-  return { toolCall, textToolCall, sentText, truncated, outputTokens };
+  return { toolCall, textToolCall, sentText, truncated, promptTokens, outputTokens };
 }
 
 /** Non-streaming completion, for the endpoints that just need one JSON blob back. */

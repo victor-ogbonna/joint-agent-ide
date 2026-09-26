@@ -25,6 +25,7 @@ import { detectLibDeps } from './server/libraryDeps';
 import { loadBoardCatalog, getBoardCatalog, getBoardById, boardFamily, resolveBoard, describeBoardForPrompt, describeFamilyForPrompt, BoardInfo } from './server/boards';
 import { getCachedContentName } from './server/geminiCache';
 import { streamChat, completeChat, isDeepSeekConfigured, DEEPSEEK_MODEL, ChatMessage, ToolSpec } from './server/deepseek';
+import { CONTEXT_BUDGET_TOKENS, ConversationMessage, planCompaction, SUMMARY_INSTRUCTION, transcriptOf } from './server/context';
 
 // Same two tools as the Gemini declarations below, restated as JSON Schema —
 // DeepSeek is OpenAI-compatible, so `type` is a plain string rather than
@@ -630,16 +631,17 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
   const { description: mcuDescription, powerPin: mcuPowerPin, specs, family } = describeBoardForPrompt(boardId, mcu);
 
   try {
-    // The client resends the full accumulated conversation every turn, which
-    // grows input-token cost linearly with session length. Older turns add
-    // little value once the conversation is long, so cap what's actually
-    // sent to Gemini regardless of how much history the client is holding.
-    const CHAT_HISTORY_WINDOW = 16;
-    const windowedMessages = messages.length > CHAT_HISTORY_WINDOW ? messages.slice(-CHAT_HISTORY_WINDOW) : messages;
-    const formattedMessages = windowedMessages.map((m: any) => ({
-      role: m.role === "user" ? "user" : "model",
-      parts: [{ text: m.content }]
-    }));
+    // The whole conversation goes to the model, against a token budget the
+    // user can see (server/context.ts). It used to be cut to the last 16
+    // messages without a word, so a long session silently forgot its start.
+    const conversation: ConversationMessage[] = (messages as any[])
+      .filter((m) => m && typeof m.content === "string")
+      .map((m) => ({
+        id: typeof m.id === "string" ? m.id : undefined,
+        role: m.role === "user" ? "user" : "assistant",
+        content: m.content,
+        isContextSummary: m.isContextSummary === true,
+      }));
 
     // Context caching: only worth attempting in implement mode (plan mode's
     // instruction is too short to ever clear Gemini's ~1024-token caching
@@ -664,12 +666,42 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     // rather than a separate field, and it sits at the front of every request
     // unchanged — which is exactly the prefix DeepSeek caches automatically,
     // so the Gemini explicit-cache machinery has no equivalent to port.
+    const systemText = buildChatSystemInstruction(mcuDescription, mcuPowerPin, chatMode);
+
+    // Full at AUTOCOMPACT_AT: fold everything but the recent tail into a
+    // summary, tell the browser which messages it replaced, and carry on.
+    let history = conversation;
+    let compactionTokens = 0;
+    const plan = planCompaction(systemText, conversation);
+    if (plan.compact) {
+      send({ type: "tool_progress", text: "Conversation is nearly full — summarizing the earlier part…" });
+      try {
+        const summary = await completeChat([
+          { role: "system", content: SUMMARY_INSTRUCTION },
+          { role: "user", content: transcriptOf(plan.older) },
+        ]);
+        compactionTokens = summary.outputTokens;
+        const text = summary.text.trim();
+        if (text) {
+          history = [{ role: "assistant", content: text, isContextSummary: true }, ...plan.recent];
+          send({
+            type: "context_compacted",
+            summary: text,
+            compactedIds: plan.older.map((m) => m.id).filter(Boolean),
+          });
+        }
+      } catch (err: any) {
+        // Better an oversized request than none: the model's own window is
+        // larger than the budget, so this still goes through.
+        console.error("[Context] compaction failed:", err?.message || err);
+      }
+    }
+
     const dsMessages: ChatMessage[] = [
-      { role: "system", content: buildChatSystemInstruction(mcuDescription, mcuPowerPin, chatMode) },
-      ...formattedMessages.map((m) => ({
-        role: (m.role === "model" ? "assistant" : "user") as "assistant" | "user",
-        content: m.parts[0].text,
-      })),
+      { role: "system", content: systemText },
+      ...history.map((m): ChatMessage => m.isContextSummary
+        ? { role: "system", content: `Summary of the earlier conversation, which you no longer see in full:\n${m.content}` }
+        : { role: m.role, content: m.content }),
     ];
 
     const runChat = (msgs: ChatMessage[]) => streamChat(
@@ -716,6 +748,11 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
       outputTokens += result.outputTokens;
     }
     const { toolCall, textToolCall, sentText } = result;
+    outputTokens += compactionTokens;
+    // How full the conversation is, as the model counted it, for the meter.
+    if (result.promptTokens) {
+      send({ type: "context", used: result.promptTokens, limit: CONTEXT_BUDGET_TOKENS });
+    }
 
     // A call the model wrote out as markup instead of making is still the call
     // it meant. Plan mode offers no tools, so there the only one honoured is
