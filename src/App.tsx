@@ -2903,7 +2903,7 @@ export default function App() {
       {isNarrow && (
         <nav className="app-bottom-nav shrink-0 flex border-t border-[var(--border-main)] bg-[var(--bg-panel)]">
           {([
-            { id: "files" as const, label: "Files", icon: FolderOpen },
+            { id: "files" as const, label: "Workspace", icon: FolderOpen },
             ...(appMode === "agentic" ? [{ id: "agent" as const, label: "Agent", icon: Bot }] : []),
             { id: "editor" as const, label: "Code", icon: Code },
           ]).map(({ id, label, icon: Icon }) => (
