@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { motion } from "motion/react";
-import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Square, Code, X, Camera, Sparkles} from "lucide-react";
+import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Square, Code, X, Sparkles} from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -324,8 +324,7 @@ export default function AgentChat({
   const [input, setInput] = useState("");
   const [images, setImages] = useState<string[]>([]);
   const [imageError, setImageError] = useState("");
-  // The camera button is for phones and tablets, where capture opens the
-  // camera directly. On a desktop the same input would just open a file picker.
+  // On a phone or tablet the picker offers the camera as well as the gallery.
   const [touchDevice] = useState(() =>
     typeof window !== "undefined" && !!window.matchMedia?.("(hover: none) and (pointer: coarse)").matches);
   const [isRecording, setIsRecording] = useState(false);
@@ -527,16 +526,28 @@ export default function AgentChat({
 
   // The + button attaches images: a photo of a wiring diagram, a datasheet
   // page, a breadboard. It used to be a stub that showed an alert.
-  const pickImages = (fromCamera: boolean) => {
+  //
+  // One button for both on a phone: without `capture`, Android's picker
+  // offers Camera alongside Photos and Files. `multiple` is left off there,
+  // because with it Android can drop the Camera option — tap + again for more.
+  // The input is attached to the page while the picker is open: some Android
+  // browsers discard a detached input before it reports the chosen file,
+  // which is how a separate camera button ended up opening nothing.
+  const handleFileUpload = () => {
     const el = document.createElement("input");
     el.type = "file";
     el.accept = "image/*";
-    el.multiple = !fromCamera;
-    if (fromCamera) el.setAttribute("capture", "environment");
-    el.onchange = () => { void addImages(el.files); };
+    el.multiple = !touchDevice;
+    el.style.display = "none";
+    document.body.appendChild(el);
+    const done = () => { el.remove(); window.removeEventListener("focus", onFocus); };
+    // Cancelled pickers fire no change event; the page regaining focus is the
+    // signal to clean up, a moment later so a real change is handled first.
+    const onFocus = () => setTimeout(() => { if (!el.files?.length) done(); }, 1000);
+    el.onchange = () => { void addImages(el.files).finally(done); };
+    window.addEventListener("focus", onFocus);
     el.click();
   };
-  const handleFileUpload = () => pickImages(false);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -818,20 +829,10 @@ export default function AgentChat({
           type="button"
           onClick={handleFileUpload}
           className="p-2 text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] rounded-md transition shrink-0"
-          title="Attach images"
+          title={touchDevice ? "Add a photo (camera or gallery)" : "Attach images"}
         >
           <Plus size={16} />
         </button>
-        {touchDevice && (
-          <button
-            type="button"
-            onClick={() => pickImages(true)}
-            className="p-2 text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] rounded-md transition shrink-0"
-            title="Take a photo"
-          >
-            <Camera size={16} />
-          </button>
-        )}
         <div className="flex-1 min-w-0 overflow-x-auto">
           {images.length > 0 && (
             <div className="flex gap-1.5 mb-1.5 flex-wrap">

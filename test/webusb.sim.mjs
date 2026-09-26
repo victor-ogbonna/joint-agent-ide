@@ -430,6 +430,57 @@ for (const kind of ["cdc", "ch34x", "cp210x", "ftdi"]) {
   }
 }
 
+// --- a board the phone keeps holding until it is reset ---------------------
+// A Mega whose cable dropped out mid-flash stayed unclaimable, though the same
+// phone had flashed it before. Closing and reopening did not free it; a USB
+// reset does, so open() must get there rather than give up.
+{
+  const mk = (freedBy) => {
+    let reset = false;
+    const dev = {
+      vendorId: 0x2341, productId: 0x0042, opened: false, configuration: null,
+      configurations: [{ interfaces: [
+        { interfaceNumber: 0, claimed: false, alternates: [{ interfaceClass: 0x02, endpoints: [] }] },
+        { interfaceNumber: 1, claimed: false, alternates: [{ interfaceClass: 0x0a,
+          endpoints: [{ direction: "in", type: "bulk", endpointNumber: 3, packetSize: 64 },
+                      { direction: "out", type: "bulk", endpointNumber: 4, packetSize: 64 }] }] },
+      ] }],
+      resets: 0,
+      async open() { this.opened = true; }, async close() { this.opened = false; },
+      async selectConfiguration() { this.configuration = this.configurations[0]; },
+      async reset() { this.resets++; reset = true; },
+      async claimInterface(n) {
+        if (freedBy === "reset" && !reset) throw new DOMException("Unable to claim interface.", "NetworkError");
+        if (freedBy === "never") throw new DOMException("Unable to claim interface.", "NetworkError");
+      },
+      async releaseInterface() {}, async clearHalt() {},
+      async controlTransferOut() { return { status: "ok" }; },
+      async transferOut(_e, c) { return { status: "ok", bytesWritten: c.byteLength }; },
+      transferIn() { return new Promise(() => {}); },
+    };
+    return dev;
+  };
+  {
+    const dev = mk("reset");
+    const port = new WebUsbSerialPort(dev, "cdc");
+    let err = null;
+    try { await port.open({ baudRate: 115200 }); } catch (e) { err = e.message; }
+    const ok = !err && dev.resets === 1;
+    if (!ok) failures++;
+    console.log(`  ${ok ? "ok  " : "FAIL"}  a board held until reset is claimed after one USB reset${err ? "  (" + err + ")" : ""}`);
+    port.pumping = false;
+  }
+  {
+    const dev = mk("never");
+    const port = new WebUsbSerialPort(dev, "cdc");
+    let err = "";
+    try { await port.open({ baudRate: 115200 }); } catch (e) { err = e.message; }
+    const ok = /0x2341:0x0042/.test(err) && /held by this page: none/.test(err) && /restart the phone/.test(err);
+    if (!ok) failures++;
+    console.log(`  ${ok ? "ok  " : "FAIL"}  a board that stays held fails with its id, what the page holds, and what to do`);
+  }
+}
+
 // NOTE: a baud-fallback case lived here and was removed. It exercised the port
 // being closed and reopened at a different rate, and the mock's single packet
 // queue could not model that reliably — it failed roughly a quarter of runs

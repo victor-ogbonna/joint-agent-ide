@@ -153,16 +153,29 @@ export class WebUsbSerialPort {
     try {
       await this.device.claimInterface(this.ifaceNumber);
     } catch {
-      // One clean retry. A claim left over from an earlier open that never
-      // released it — an attempt that died mid-flight — is freed by closing
-      // the device, and the second claim then succeeds.
-      try {
+      // Recovery, in increasing force. A claim left over from an earlier open
+      // that never released it — an attempt that died mid-flight — is freed
+      // by closing the device. A hold that survives that (a Mega whose cable
+      // dropped out mid-flash stayed unclaimable on a phone that had flashed
+      // it before) gets a USB reset: the device drops off the bus and comes
+      // back as if replugged, which clears what a close cannot.
+      const reclaim = async () => {
         try { await this.device.close(); } catch { /* not open */ }
         await this.device.open();
         if (!this.device.configuration) await this.device.selectConfiguration(1);
         await this.device.claimInterface(this.ifaceNumber);
-      } catch (e: any) {
-        throw new Error(this.describeClaimFailure(e));
+      };
+      try {
+        await reclaim();
+      } catch {
+        try {
+          try { if (!this.device.opened) await this.device.open(); } catch { /* reset below will say */ }
+          await this.device.reset();
+          await new Promise((r) => setTimeout(r, 300));
+          await reclaim();
+        } catch (e: any) {
+          throw new Error(this.describeClaimFailure(e));
+        }
       }
     }
     if (this.commIfaceNumber !== null && this.commIfaceNumber !== this.ifaceNumber) {
@@ -189,11 +202,20 @@ export class WebUsbSerialPort {
    */
   private describeClaimFailure(e: any): string {
     const id = `0x${this.device.vendorId.toString(16).padStart(4, "0")}:0x${this.device.productId.toString(16).padStart(4, "0")}`;
-    const base = `Could not claim the USB device ${id} (${this.kind}, interface ${this.ifaceNumber}): ${e?.message || e}.`;
+    // Which interfaces this browser already holds: if none, something outside
+    // the page (another app, or the phone's own driver) has the board.
+    let held = "";
+    try {
+      const ifaces = this.device.configuration?.interfaces || [];
+      held = " Interfaces held by this page: " +
+        (ifaces.filter((i: any) => i.claimed).map((i: any) => i.interfaceNumber).join(", ") || "none") + ".";
+    } catch { /* diagnostics only */ }
+    const base = `Could not claim the USB device ${id} (${this.kind}, interface ${this.ifaceNumber}): ${e?.message || e}.${held}`;
     if (this.kind === "cdc") {
-      return `${base} This board uses standard USB serial. Close any other tab or app using it, unplug and replug it, and try again. ` +
-        `If it still fails, this phone's own serial driver has taken the board, and a browser cannot take it back — ` +
-        `flash it from a computer in Chrome or Edge, or use a board with a CH340 or FTDI chip, which phones leave alone.`;
+      return `${base} Something outside this page is holding the board. Close other apps that use USB, unplug it, ` +
+        `restart the phone, plug it back in (tap Cancel if the phone offers to open another app for it), then try again. ` +
+        `If it still fails, this phone's own serial driver has the board and a browser cannot take it back — ` +
+        `flash it from a computer in Chrome or Edge.`;
     }
     return `${base} Close any other tab or app using it, unplug and replug it, and try again.`;
   }

@@ -28,6 +28,7 @@ import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
 import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts, describeVisibleUsbDevices } from "./lib/webusbSerial";
 import { createProject, getProject, updateProject, renameProject, listProjects, deleteProject, ProjectSummary, trimMessagesForStorage } from "./lib/projects";
+import { sketchBaudRate, sketchOpensSerial, sketchSerial } from "./lib/sketchBaud";
 import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlock, primeLastKnownBlock, QuotaBlockedInfo } from "./lib/aiClient";
 
 /**
@@ -44,22 +45,8 @@ import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlo
  * Preference order: the port the user actually connected, then a port whose
  * USB id we recognise as a microcontroller, then any non-Intel port, then ask.
  */
-/**
- * The baud rate the sketch itself opens Serial at, so the monitor listens at
- * the same speed. The monitor used to be fixed at 115200: a sketch that called
- * Serial.begin(9600) — which the agent writes often for AVR boards — produced
- * bytes that were all misframed at 115200, the monitor filtered them out as
- * unreadable, and it showed nothing at all. Comments are ignored so a note
- * like "monitor at 9600" cannot win over the real call.
- */
-const sketchSerialBaud = (src: string): number | null => {
-  const code = (src || "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-  const m = code.match(/\bSerial\.begin\s*\(\s*(\d{3,7})/);
-  const baud = m ? Number(m[1]) : NaN;
-  return Number.isFinite(baud) && baud > 0 ? baud : null;
-};
-/** The rate the monitor opens at: the sketch's own, or 115200 when it has none. */
-const sketchBaudRate = (src: string): number => sketchSerialBaud(src) ?? 115200;
+// Which rate the sketch opens Serial at: src/lib/sketchBaud.ts.
+
 
 /**
  * A serial line as the monitor panel shows it: what the board sent, without
@@ -412,12 +399,15 @@ export default function App() {
   const monitorBaudRef = useRef(sketchBaudRate(INITIAL_CODE));
   // Whether the sketch opens Serial at all; without it the monitor has
   // nothing to show, whatever rate it listens at.
-  const sketchOpensSerialRef = useRef(sketchSerialBaud(INITIAL_CODE) !== null);
+  const sketchOpensSerialRef = useRef(sketchOpensSerial(INITIAL_CODE));
+  // Whether that rate could be read from the sketch, or 115200 is a guess.
+  const sketchBaudKnownRef = useRef(sketchSerial(INITIAL_CODE)?.baud != null);
   // The editor's code, for requests made from closures older than it.
   const codeRef = useRef(INITIAL_CODE);
   useEffect(() => {
     monitorBaudRef.current = sketchBaudRate(code);
-    sketchOpensSerialRef.current = sketchSerialBaud(code) !== null;
+    sketchOpensSerialRef.current = sketchOpensSerial(code);
+    sketchBaudKnownRef.current = sketchSerial(code)?.baud != null;
     codeRef.current = code;
   }, [code]);
   const [editorFontSize, setEditorFontSize] = useState<number>(14);
@@ -1331,7 +1321,8 @@ export default function App() {
     // The monitor that follows must listen at the rate THIS sketch uses, even
     // when it is newer than the editor state this closure captured.
     monitorBaudRef.current = sketchBaudRate(codeToFlash);
-    sketchOpensSerialRef.current = sketchSerialBaud(codeToFlash) !== null;
+    sketchOpensSerialRef.current = sketchOpensSerial(codeToFlash);
+    sketchBaudKnownRef.current = sketchSerial(codeToFlash)?.baud != null;
 
     // Decide flash strategy:
     // - Firefox/Safari: backend PlatformIO CLI (no Web Serial in those browsers)
@@ -1690,9 +1681,11 @@ export default function App() {
       const boardName = (detectedBoardRef.current || "").replace(/^Connected:\s*/, "").replace(/\s*\(VID.*$/, "")
         || (mcu === "esp32" ? "ESP32" : "Arduino");
       logToTerminal(
-        sketchOpensSerialRef.current
-          ? `[SERIAL MONITOR INITIALIZED @ ${baud} BAUD] ${boardName} — the rate your sketch sets with Serial.begin(${baud}).`
-          : `[SERIAL MONITOR INITIALIZED @ ${baud} BAUD] ${boardName} — your sketch never calls Serial.begin(), so nothing will appear until it does.`,
+        !sketchOpensSerialRef.current
+          ? `[SERIAL MONITOR INITIALIZED @ ${baud} BAUD] ${boardName} — your sketch never calls Serial.begin(), so nothing will appear until it does.`
+          : sketchBaudKnownRef.current
+            ? `[SERIAL MONITOR INITIALIZED @ ${baud} BAUD] ${boardName} — the rate your sketch opens Serial at.`
+            : `[SERIAL MONITOR INITIALIZED @ ${baud} BAUD] ${boardName} — your sketch's Serial.begin() rate could not be read, so ${baud} is assumed. If nothing appears, write the rate as a number, e.g. Serial.begin(9600).`,
         "serial"
       );
       monitorLoopRef.current = pumpSerialMonitor(reader);
