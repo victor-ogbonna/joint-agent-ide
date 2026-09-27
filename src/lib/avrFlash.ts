@@ -346,14 +346,37 @@ async function command(
  * never formed a valid reply means we ARE talking to something, but it is not
  * speaking this protocol.
  */
-function heardNothing(received: number, sample = ""): string {
-  return received === 0
+function heardNothing(received: number, sample = ""): Error {
+  const e: any = new Error(received === 0
     ? "Could not reach the bootloader — the port sent nothing at all (0 bytes). " +
       "That usually means this is not the board's port, the cable is charge-only, " +
       "or the board is not auto-resetting. Unplug and replug the board, then use " +
       "Detect Board and pick the Arduino in the chooser."
     : `Could not reach the bootloader — the port sent ${received} bytes but none formed a valid ` +
-      `reply.${sample} Close any serial monitor holding the port and try again.`;
+      `reply.${sample} Close any serial monitor holding the port and try again.`);
+  // Failed before a single byte was written, as opposed to partway through a
+  // write — so flashAvr may still ask the board in the other protocol.
+  e.noSync = true;
+  return e;
+}
+
+/**
+ * The build's protocol got no answer, but the other one did: the board on the
+ * wire is not the board this project is built for. Behind a USB-serial adapter
+ * (CH340, FTDI — the only way to reach a genuine Mega or Uno from a phone) the
+ * app cannot tell a Mega from an Uno by USB id, so this is where it finds out.
+ */
+function wrongBoard(answeredAs: "stk500v1" | "stk500v2"): Error {
+  const e: any = new Error(answeredAs === "stk500v2"
+    ? "The board did not answer as the Uno-class board this project is built for, but it did answer as a Mega " +
+      "(STK500v2 bootloader) — the board plugged in is a Mega-class board such as the Arduino Mega 2560. Nothing was " +
+      "written. Switch this project's board to Arduino Mega 2560, or open your Mega project, and flash again."
+    : "The board did not answer as the Mega-class board this project is built for, but it did answer as an Uno-class board " +
+      "(STK500v1 bootloader: Uno, Nano, Pro Mini). Nothing was written. Switch this project's board to the one " +
+      "plugged in, or open that board's project, and flash again.");
+  e.code = "WRONG_BOARD";
+  e.answeredAs = answeredAs;
+  return e;
 }
 
 /**
@@ -477,7 +500,7 @@ async function flashStk500v2(
     }
   }
   if (!signedOn) {
-    throw new Error(heardNothing(rx.received, rx.describeSample()));
+    throw heardNothing(rx.received, rx.describeSample());
   }
 
   // Values mirror what avrdude sends for wiring boards.
@@ -584,21 +607,71 @@ export async function flashAvr({
   let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
   let rx: SerialBuffer | null = null;
 
-  try {
+  const attach = () => {
     reader = port.readable.getReader();
     writer = port.writable.getWriter();
     rx = new SerialBuffer(reader!);
     if (typeof (port as any).describeFraming === "function") {
       rx.framing = () => (port as any).describeFraming();
     }
+  };
+
+  // Tear the old transport down COMPLETELY before reopening. Closing the port
+  // alone leaves the previous pump's read in flight; it then consumes a packet
+  // and enqueues it into a stream nobody is reading, so a reply vanishes. That
+  // showed up as the suite failing about one run in three, which is the same
+  // race real hardware would hit on every baud change.
+  const reopen = async (baud: number) => {
+    try { await reader?.cancel(); } catch { /* already gone */ }
+    try { await rx?.pumping; } catch { /* pump already stopped */ }
+    try { reader?.releaseLock(); } catch { /* already released */ }
+    try { writer?.releaseLock(); } catch { /* already released */ }
+    try { await port.close(); } catch { /* already closed */ }
+    await port.open({ baudRate: baud });
+    attach();
+  };
+
+  /**
+   * The build's protocol got no answer at all. Before blaming the wiring, ask
+   * once in the other protocol: a Mega and an Uno behind the same USB-serial
+   * adapter look identical over USB, and moving the adapter from one to the
+   * other without switching the project is an easy mistake. Both bootloaders
+   * listen at 115200. Throws the mismatch if the other one answers, and the
+   * original failure otherwise — this only ever sharpens an error.
+   */
+  const askOtherProtocol = async (original: Error): Promise<never> => {
+    const other = transport === "stk500v2" ? "stk500v1" : "stk500v2";
+    let answered = false;
+    try {
+      await reopen(115200);
+      for (let attempt = 1; attempt <= 2 && !answered; attempt++) {
+        await resetBoard(port, other === "stk500v2" ? 300 : 250);
+        rx!.discard();
+        try {
+          if (other === "stk500v2") await v2Command(writer!, rx!, 1, [V2.CMD_SIGN_ON], 900);
+          else await command(writer!, rx!, [Cmd.GET_SYNC], 0, 500);
+          answered = true;
+        } catch { /* not that one either */ }
+      }
+    } catch { /* the probe is advisory; the original failure stands */ }
+    throw answered ? wrongBoard(other) : original;
+  };
+
+  try {
+    attach();
 
     log("Resetting board into bootloader…");
     await resetBoard(port, resetDelayMs);
     // Whatever the previous sketch printed on its way out is not our reply.
-    rx.discard();
+    rx!.discard();
 
     if (transport === "stk500v2") {
-      await flashStk500v2(writer!, rx!, port, data, startAddress, pageSize, resetDelayMs, log);
+      try {
+        await flashStk500v2(writer!, rx!, port, data, startAddress, pageSize, resetDelayMs, log);
+      } catch (e: any) {
+        if (!e?.noSync) throw e;
+        await askOtherProtocol(e);
+      }
       return;
     }
 
@@ -617,25 +690,7 @@ export async function flashAvr({
     for (const baud of bauds) {
       if (baud !== baudRate) {
         log(`No reply at ${baudRate} baud. Trying ${baud}…`);
-        // Tear the old transport down COMPLETELY before reopening. Closing
-        // the port alone leaves the previous pump's read in flight; it then
-        // consumes a packet and enqueues it into a stream nobody is reading,
-        // so a reply vanishes. That showed up as the suite failing about one
-        // run in three, which is the same race real hardware would hit on
-        // every baud change.
-        try { await reader?.cancel(); } catch { /* already gone */ }
-        try { await rx?.pumping; } catch { /* pump already stopped */ }
-        try { reader?.releaseLock(); } catch { /* already released */ }
-        try { writer?.releaseLock(); } catch { /* already released */ }
-        try { await port.close(); } catch { /* already closed */ }
-
-        await port.open({ baudRate: baud });
-        reader = port.readable.getReader();
-        writer = port.writable.getWriter();
-        rx = new SerialBuffer(reader!);
-        if (typeof (port as any).describeFraming === "function") {
-          rx.framing = () => (port as any).describeFraming();
-        }
+        await reopen(baud);
       }
 
       for (let attempt = 1; attempt <= 3 && !synced; attempt++) {
@@ -661,7 +716,7 @@ export async function flashAvr({
       const framing = typeof (port as any).describeFraming === "function"
         ? ` ${(port as any).describeFraming()}`
         : "";
-      throw new Error(heardNothing(rx!.received, rx!.describeSample() + framing));
+      await askOtherProtocol(heardNothing(rx!.received, rx!.describeSample() + framing));
     }
     // Drain BEFORE asking anything else. Sync may have succeeded by skipping
     // past junk, and the rest of that junk is still queued — a probe issued now

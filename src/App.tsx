@@ -84,7 +84,10 @@ const phoneHeldBoardGuidance = (vendorId?: number, productId?: number): string[]
     `  • Adapter DTR → 0.1 µF capacitor → ${short} RESET`,
     `  • Adapter 5V  → ${short} 5V (or power the ${short} separately)`,
     `[USB] Leave the ${short}'s own USB port unplugged, plug the adapter into the phone and tap Detect Board. ` +
-      `It shows up as a CH340 or FTDI device, and flashing and the serial monitor then work as normal.`,
+      `It shows up as a CH340 or FTDI device, and flashing and the serial monitor then work as normal.` +
+      // The adapter reports itself, not the board, so the project decides
+      // what is built — the one thing that differs between a Mega and an Uno.
+      (short === "board" ? "" : ` Flash it from a ${short} project: behind an adapter a Mega and an Uno look the same, so the project's board decides what is built.`),
   ];
 };
 
@@ -996,7 +999,10 @@ export default function App() {
           );
         } else if (!board?.type) {
           logToTerminal(
-            `[USB] This adapter can't identify the chip behind it, so builds will target this project's board (${mcu.toUpperCase()}).`,
+            // Named exactly: a Mega and an Uno look the same behind an adapter,
+            // and this line is where the user can see which one a build is for.
+            `[USB] This adapter can't identify the chip behind it, so builds will target this project's board (${boardNames.get(boardId) || mcu.toUpperCase()}). ` +
+              `If a different board is wired to it, switch the project's board first.`,
             "info"
           );
         }
