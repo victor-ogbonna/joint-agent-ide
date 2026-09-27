@@ -483,6 +483,43 @@ for (const kind of ["cdc", "ch34x", "cp210x", "ftdi"]) {
   }
 }
 
+// --- the wrong board behind an adapter ----------------------------------------
+// A phone reaches a genuine Mega or Uno only through a CH340/FTDI adapter on its
+// serial pins, and over USB the adapter looks the same whichever board it is
+// wired to. Moving it from the Uno to the Mega and flashing the Uno's project
+// must say so, not report a wiring fault; and when neither protocol answers,
+// the original failure must come through unchanged.
+{
+  const OptibootSim = (await import("./optiboot.mjs")).default;
+  const blank = (flash) => flash.subarray(0, 4096).every((b) => b === 0xff);
+  const cases = [
+    { label: "Uno build, Mega behind the FTDI adapter -> names the Mega",
+      boot: () => new MegaBootloader({ chunkBytes: 64 }),
+      opts: { uploadProtocol: "arduino", chip: "ATMEGA328P" },
+      want: (e) => e.code === "WRONG_BOARD" && e.answeredAs === "stk500v2" && /Mega 2560/.test(e.message) },
+    { label: "Mega build, Uno behind the FTDI adapter -> names the Uno",
+      boot: () => new OptibootSim(64),
+      opts: { uploadProtocol: "wiring", chip: "ATMEGA2560" },
+      want: (e) => e.code === "WRONG_BOARD" && e.answeredAs === "stk500v1" && /Uno/.test(e.message) },
+    { label: "nothing answering either protocol keeps the original error",
+      boot: () => { const b = new MegaBootloader({ chunkBytes: 64 }); b.reset = () => {}; return b; },
+      opts: { uploadProtocol: "wiring", chip: "ATMEGA2560" },
+      want: (e) => !e.code && /Could not reach the bootloader/.test(e.message) },
+  ];
+  for (const c of cases) {
+    const boot = c.boot();
+    const device = mockUsbDevice(boot, "ftdi");
+    const port = new WebUsbSerialPort(device, "ftdi");
+    let err = null;
+    try {
+      await flashAvr({ hex, uploadSpeed: 115200, port, onProgress: () => {}, ...c.opts });
+    } catch (e) { err = e; }
+    const ok = err !== null && c.want(err) && blank(boot.flash);
+    if (!ok) failures++;
+    console.log(`  ${ok ? "ok  " : "FAIL"}  ${c.label}${ok ? "" : `  (${err ? `${err.code || ""} ${err.message.slice(0, 90)}` : "no error"})`}`);
+  }
+}
+
 // --- naming the USB chip behind a board -------------------------------------
 {
   const { usbChipName } = await bundle("src/lib/usbChips.ts", "usbChips.mjs");
