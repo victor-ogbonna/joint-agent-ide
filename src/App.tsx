@@ -785,6 +785,25 @@ export default function App() {
    * real transport is WebUSB. Falling through means "the chooser was empty"
    * no longer dead-ends on whichever API happened to be present.
    */
+  /**
+   * A Web Serial port this site was already allowed, for the same physical
+   * device. Costs one gesture-free getPorts() call and returns nothing when
+   * Android's Web Serial cannot see the board — which is the case on at least
+   * one phone this was tested against, so it is a recovery, not a promise.
+   */
+  const grantedWebSerialPortFor = async (vendorId?: number, productId?: number): Promise<any> => {
+    if (!hasWebSerial || !vendorId) return null;
+    try {
+      const ports: any[] = await (navigator as any).serial.getPorts();
+      return ports.find((p) => {
+        try {
+          const i = p.getInfo();
+          return i.usbVendorId === vendorId && (productId === undefined || i.usbProductId === productId);
+        } catch { return false; }
+      }) ?? null;
+    } catch { return null; }
+  };
+
   const requestBoardPort = async (): Promise<any> => {
     // Android exposes navigator.serial but never lists a port on it, so
     // trying Web Serial first there guarantees an empty chooser the user has
@@ -879,7 +898,7 @@ export default function App() {
           logToTerminal(`[USB] Already authorised: ${await describeVisibleUsbDevices()}`, "info");
           logToTerminal("[USB] If the list is empty, the phone is not seeing the board — check the OTG adapter and that the cable carries data.", "info");
         }
-        const port = await requestBoardPort();
+        let port = await requestBoardPort();
         webSerialPortRef.current = port;
         // Anything still holding the port — a running monitor above all —
         // has to let go first, or open() fails with "The port is already open".
@@ -908,6 +927,28 @@ export default function App() {
         } catch (e: any) {
           claimable = false;
           claimError = e;
+        }
+
+        // A standard USB-serial board the phone holds cannot be claimed
+        // through WebUSB, but Web Serial reaches the same board through
+        // Android's own USB handling — the route the desktop uses. If this
+        // site was already allowed that port, switch to it silently: same tap,
+        // no second chooser, and nothing changes for a phone whose Web Serial
+        // has nothing to offer. Only the chooser needs a user gesture, and by
+        // here the tap that opened WebUSB's has been spent.
+        if (!claimable && hasWebSerial) {
+          const viaSerial = await grantedWebSerialPortFor(info.usbVendorId, info.usbProductId);
+          if (viaSerial) {
+            try {
+              await viaSerial.open({ baudRate: 115200 });
+              await viaSerial.close();
+              logToTerminal("[USB] The phone holds this board, but it is already allowed on the phone's own serial driver — using that instead.", "success");
+              port = viaSerial;
+              webSerialPortRef.current = viaSerial;
+              claimable = true;
+              claimError = null;
+            } catch { /* that route is no better; the guidance below stands */ }
+          }
         }
 
         if (info.usbVendorId === 0x8086) {
