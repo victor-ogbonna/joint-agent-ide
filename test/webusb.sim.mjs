@@ -501,20 +501,40 @@ for (const kind of ["cdc", "ch34x", "cp210x", "ftdi"]) {
       boot: () => new OptibootSim(64),
       opts: { uploadProtocol: "wiring", chip: "ATMEGA2560" },
       want: (e) => e.code === "WRONG_BOARD" && e.answeredAs === "stk500v1" && /Uno/.test(e.message) },
-    { label: "nothing answering either protocol keeps the original error",
+    // The reported failure: an Uno build through the FTDI adapter, and not one
+    // byte back from the board. The chip took every reset, so the advice has to
+    // be the adapter-to-board wiring, never "the cable is charge-only".
+    { label: "silent board behind the FTDI adapter (Uno build) -> adapter wiring, not the cable",
+      boot: () => { const b = new OptibootSim(64); b.reset = () => {}; return b; },
+      opts: { uploadProtocol: "arduino", chip: "ATMEGA328P" },
+      want: (e, logs) => !e.code && /board sent nothing back \(0 bytes\)/.test(e.message)
+        && /adapter TX → board RX \(pin 0\)/.test(e.message) && /bridge=ftdi/.test(e.message)
+        && !/charge-only/.test(e.message)
+        && logs.includes("No reply at 115200 baud. Trying 57600…")
+        && logs.includes("No reply at 57600 baud. Trying 19200…") },
+    { label: "silent board behind the FTDI adapter (Mega build) -> same, original error kept",
       boot: () => { const b = new MegaBootloader({ chunkBytes: 64 }); b.reset = () => {}; return b; },
       opts: { uploadProtocol: "wiring", chip: "ATMEGA2560" },
-      want: (e) => !e.code && /Could not reach the bootloader/.test(e.message) },
+      want: (e) => !e.code && /Could not reach the bootloader — the board sent nothing back/.test(e.message) },
+    // A read stream that dies is a link fault, and must not be reported as a
+    // board that stayed quiet.
+    { label: "a USB link that stops delivering data says so",
+      boot: () => new MegaBootloader({ chunkBytes: 64 }),
+      opts: { uploadProtocol: "wiring", chip: "ATMEGA2560" },
+      device: (d) => { d.transferIn = async () => { throw new Error("A transfer error has occurred."); }; },
+      want: (e) => /USB link stopped delivering data/.test(e.message) },
   ];
   for (const c of cases) {
     const boot = c.boot();
     const device = mockUsbDevice(boot, "ftdi");
+    c.device?.(device);
     const port = new WebUsbSerialPort(device, "ftdi");
     let err = null;
+    const logs = [];
     try {
-      await flashAvr({ hex, uploadSpeed: 115200, port, onProgress: () => {}, ...c.opts });
+      await flashAvr({ hex, uploadSpeed: 115200, port, onProgress: (m) => logs.push(m), ...c.opts });
     } catch (e) { err = e; }
-    const ok = err !== null && c.want(err) && blank(boot.flash);
+    const ok = err !== null && c.want(err, logs) && blank(boot.flash);
     if (!ok) failures++;
     console.log(`  ${ok ? "ok  " : "FAIL"}  ${c.label}${ok ? "" : `  (${err ? `${err.code || ""} ${err.message.slice(0, 90)}` : "no error"})`}`);
   }
