@@ -888,10 +888,27 @@ export default function App() {
           try { await activePortRef.current.close(); } catch { /* already closed */ }
           activePortRef.current = null;
         }
-        try { await port.close(); } catch { /* not open, the normal case */ }
-        await port.open({ baudRate: 115200 });
+        // Identity first. getInfo() reads the USB descriptor and needs no open
+        // port, so a board we cannot claim is still a board we can name.
         const info = await port.getInfo();
-        await port.close();
+
+        // Then find out whether this platform will actually hand us the
+        // device. A genuine Arduino on Android is held by the phone's own
+        // cdc_acm driver and can never be claimed — but that stops a FLASH,
+        // not a detection: the board is plainly attached and identified.
+        // Opening purely to read identity, and letting that failure abort the
+        // whole scan, is why a Mega 2560 the chooser had just listed by name
+        // ended up showing as not connected at all.
+        let claimable = true;
+        let claimError: any = null;
+        try {
+          try { await port.close(); } catch { /* not open, the normal case */ }
+          await port.open({ baudRate: 115200 });
+          await port.close();
+        } catch (e: any) {
+          claimable = false;
+          claimError = e;
+        }
 
         if (info.usbVendorId === 0x8086) {
           logToTerminal(`[USB] Error: Selected port is an internal Intel hub.`, "error");
@@ -911,6 +928,21 @@ export default function App() {
         setDetectedMcu(board?.type ?? null);
         setMcuPluggedIn(true);
         logToTerminal(`[USB] Connected: ${boardName}.`, "success");
+
+        if (!claimable) {
+          // Say plainly what does and does not work, at the moment they
+          // connect, rather than letting them find out at the end of a build.
+          logToTerminal(
+            "[USB] Detected, but this phone will not release the board to the browser — reading and flashing it from here will not work.",
+            "error"
+          );
+          if (claimError?.code === "HELD_BY_PHONE_DRIVER") {
+            phoneHeldBoardGuidance(claimError.usbVendorId, claimError.usbProductId)
+              .forEach((line) => logToTerminal(line, "info"));
+          } else if (claimError?.message) {
+            logToTerminal(`[USB] ${claimError.message}`, "info");
+          }
+        }
 
         // The project's board is the user's explicit choice and drives the
         // build. Detection only ever narrows it, never silently replaces it —
@@ -933,7 +965,7 @@ export default function App() {
         // permission for it once it is unplugged and never reports it coming
         // back — the automatic resume in handleConnect cannot fire for it.
         // Reconnecting such a board means clicking Detect Board, so resume here.
-        if (wantSerialMonitorRef.current) {
+        if (wantSerialMonitorRef.current && claimable) {
           logToTerminal("[SERIAL] Board back — resuming the monitor.", "info");
           void startWebSerialMonitor(port);
         }
