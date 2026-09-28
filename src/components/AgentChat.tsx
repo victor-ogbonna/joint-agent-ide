@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { motion } from "motion/react";
-import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Square, Code, X, Sparkles} from "lucide-react";
+import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Square, Code, X, Clock} from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -30,9 +30,15 @@ interface AgentChatProps {
   contextUsage?: { used: number; limit: number } | null;
   /** Open a reply's code in the editor (on a phone, switching to it). */
   onOpenCode?: (code: string) => void;
-  /** Show the one-time note that the user is now on the lite tier. */
-  liteNotice?: boolean;
-  onDismissLiteNotice?: () => void;
+  /** Plan Mode is a PRO feature: without it the checkbox is not shown. */
+  planModeAvailable?: boolean;
+  /** Set while the account's AI tokens are used up: the banner counts down to the refill. */
+  pause?: {
+    free: boolean;
+    reason: "window" | "day" | "cycle" | null;
+    /** "2 h 13 min", or null when only the billing date lifts it. */
+    wait: string | null;
+  } | null;
   onUpgrade?: () => void;
 }
 
@@ -320,8 +326,8 @@ export default function AgentChat({
   onQuotaBlocked,
   contextUsage,
   onOpenCode,
-  liteNotice,
-  onDismissLiteNotice,
+  planModeAvailable = true,
+  pause,
   onUpgrade
 }: AgentChatProps) {
   const [input, setInput] = useState("");
@@ -813,17 +819,19 @@ export default function AgentChat({
       </div>
 
       {/* Input Form Box */}
-      {liteNotice && (
-        <div className="mx-2 sm:mx-3 mb-1 flex items-start gap-2 rounded-lg border border-orange-500/40 bg-[var(--bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--text-main)] shrink-0">
-          <Sparkles size={13} className="text-orange-500 shrink-0 mt-0.5" />
+      {pause && (
+        <div role="status" className="mx-2 sm:mx-3 mb-1 flex items-center gap-2 rounded-lg border border-orange-500/40 bg-[var(--bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--text-main)] shrink-0">
+          <Clock size={13} className="text-orange-500 shrink-0" />
           <span className="flex-1">
-            Your free Pro tokens are used up, so you're now on the <b>Lite</b> tier: a less capable model, no auto-debug, and 5 compiles a day.{" "}
-            <button type="button" onClick={onUpgrade} className="font-semibold text-orange-500 hover:underline">Subscribe to Pro</button>{" "}
-            for the full agent.
+            {pause.reason === "cycle"
+              ? <>This cycle's AI tokens are used. They refresh {pause.wait ? <>in <b>{pause.wait}</b></> : "on your next billing date"}.</>
+              : <>{pause.reason === "day" ? "Today's" : pause.free ? "Your free" : "This session's"} AI tokens are used. They refill in <b>{pause.wait ?? "a few hours"}</b>.</>}
           </span>
-          <button type="button" onClick={onDismissLiteNotice} className="text-[var(--text-muted)] hover:text-[var(--text-main)] shrink-0" title="Dismiss">
-            <X size={12} />
-          </button>
+          {pause.free && onUpgrade && (
+            <button type="button" onClick={onUpgrade} className="shrink-0 rounded-md px-2 py-1 font-bold text-white" style={{ background: "var(--gradient-hero)" }}>
+              Get PRO
+            </button>
+          )}
         </div>
       )}
       <form
@@ -894,6 +902,7 @@ export default function AgentChat({
             </p>
           )}
         </div>
+        {planModeAvailable && (
         <label className="flex items-center gap-1.5 cursor-pointer text-xs text-[var(--text-muted)] hover:text-[var(--text-main)] transition-colors shrink-0">
           <input 
             type="checkbox" 
@@ -905,6 +914,7 @@ export default function AgentChat({
               back to the textarea, which is the cramped element here. */}
           <span className="whitespace-nowrap">Plan<span className="hidden sm:inline"> Mode</span></span>
         </label>
+        )}
         <button
           className={`p-2 rounded-md transition shrink-0 flex items-center justify-center ${isRecording ? 'text-red-500 bg-red-500/10' : 'text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]'}`}
           title="Voice Command"

@@ -13,7 +13,6 @@
 // ---------------------------------------------------------------------------
 
 import { MarkupGuard, parseTextToolCall } from "./toolMarkup.js";
-import { loadAdminConfig } from "./adminConfig.js";
 
 const BASE_URL = "https://api.deepseek.com";
 // The canonical rolling name. "deepseek-v4-flash" was an undocumented alias
@@ -48,17 +47,13 @@ export function isDeepSeekConfigured(): boolean {
 }
 
 /**
- * Which model answers, and how much it may write. Both are OpenAI-compatible
- * chat endpoints, so one client serves them.
- *
- * PRO_MODEL is DeepSeek V4.1 Flash: subscribers, and free users while their
- * free tokens last. LITE_MODEL answers free users once those tokens are gone:
- * a deliberately less capable and cheaper model, with a much smaller output
- * budget, reached through Gemini's OpenAI-compatible endpoint. LITE_MODEL
- * (env) changes which one without a code change.
+ * Which model answers, and how much it may write. Every plan runs on the
+ * same DeepSeek model: PRO replies may run to 40,000 tokens, Free replies to
+ * FREE_MAX_OUTPUT_TOKENS. What else separates the plans (the 5-hour
+ * allowance, Plan Mode, auto-debug, compiles) is enforced elsewhere.
  */
 export interface ModelProfile {
-  id: "pro" | "lite";
+  id: "pro" | "free";
   label: string;
   baseUrl: string;
   apiKey: () => string | undefined;
@@ -83,48 +78,13 @@ export const PRO_MODEL: ModelProfile = {
   streamUsage: true,
 };
 
-export const LITE_MAX_OUTPUT_TOKENS = 5000;
-/**
- * The lite model. By default Gemini 2.5 Flash-Lite through Gemini's
- * OpenAI-compatible endpoint, on the app's Gemini key. Any other
- * OpenAI-compatible provider works with no code change: set LITE_API_KEY and
- * LITE_BASE_URL (OpenRouter by default when a key is set) and LITE_MODEL to
- * the provider's model id.
- */
-const LITE_OWN_PROVIDER = !!process.env.LITE_API_KEY;
-export const LITE_MODEL: ModelProfile = {
-  id: "lite",
-  label: LITE_OWN_PROVIDER ? "Lite model" : "Gemini",
-  baseUrl: LITE_OWN_PROVIDER
-    ? (process.env.LITE_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/+$/, "")
-    : "https://generativelanguage.googleapis.com/v1beta/openai",
-  // Without its own provider: the same key the rest of the app's Gemini use
-  // reads. One saved from the /admin page wins over .env, so swapping the key
-  // there swaps it here too.
-  apiKey: () => {
-    if (LITE_OWN_PROVIDER) return process.env.LITE_API_KEY;
-    const saved = loadAdminConfig().geminiApiKey;
-    return (typeof saved === "string" && saved) ? saved : process.env.GEMINI_API_KEY;
-  },
-  model: process.env.LITE_MODEL || "gemini-2.5-flash-lite",
-  maxOutputTokens: LITE_MAX_OUTPUT_TOKENS,
-  // Not relied on: an unsupported option must not break every lite request.
-  streamUsage: false,
-};
+/** A Free reply's cap: room for a complete sketch with its wiring, not a whole game. */
+export const FREE_MAX_OUTPUT_TOKENS = 5000;
+export const FREE_MODEL: ModelProfile = { ...PRO_MODEL, id: "free", maxOutputTokens: FREE_MAX_OUTPUT_TOKENS };
 
-export function isModelConfigured(profile: ModelProfile): boolean {
-  return !!profile.apiKey();
-}
-
-/**
- * The model for a request. A lite account gets LITE_MODEL; if that model has
- * no key configured, it gets the pro model under the lite output cap rather
- * than an error, so the tier's limits still hold.
- */
-export function modelFor(lite: boolean): ModelProfile {
-  if (!lite) return PRO_MODEL;
-  if (isModelConfigured(LITE_MODEL)) return LITE_MODEL;
-  return { ...PRO_MODEL, id: "lite", maxOutputTokens: LITE_MAX_OUTPUT_TOKENS };
+/** The model for a request. */
+export function modelFor(free: boolean): ModelProfile {
+  return free ? FREE_MODEL : PRO_MODEL;
 }
 
 // Same shape of transient failure Gemini had, so the same narrow policy:

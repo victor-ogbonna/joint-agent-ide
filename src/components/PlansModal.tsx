@@ -1,21 +1,25 @@
 import React from "react";
 import { X, Check, Minus, Rocket, Loader2 } from "lucide-react";
+import {
+  WINDOW_HOURS, FREE_WINDOW_TOKENS, FREE_DAILY_TOKENS, PRO_WINDOW_TOKENS, PAID_TOKEN_CAP,
+  FREE_MAX_REPLY_TOKENS, PRO_MAX_REPLY_TOKENS, FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES, PRO_PRICE,
+} from "../lib/plans";
 
 /**
  * Free vs PRO, side by side. Every row is something the server actually
- * enforces (server/quota.ts, server/deepseek.ts): a feature a free account
- * has only until its free tokens run out is written with "always", so the
- * dash under Free is true rather than a marketing shortcut. The context
- * window is the same on both plans, so "more memory" is deliberately not
- * claimed.
+ * enforces (server/quota.ts, server/deepseek.ts), with the figures taken from
+ * src/lib/plans.ts, which a test keeps equal to the server's. Both plans run
+ * on the same model with the same context window, so neither "a better
+ * model" nor "more memory" is claimed.
  */
+const k = (n: number) => `${n / 1000}K`;
 const ROWS: Array<{ feature: string; free: boolean | string; pro: boolean | string }> = [
   { feature: "Access to Joint-Agent", free: true, pro: true },
-  { feature: "AI tokens", free: "50K once", pro: "400K/mo" },
-  { feature: "Full-strength agent model, always", free: false, pro: true },
-  { feature: "Replies up to 40K tokens, always", free: false, pro: true },
-  { feature: "Smart Flash auto-debug, always", free: false, pro: true },
-  { feature: "Unlimited compiles", free: false, pro: true },
+  { feature: `AI tokens every ${WINDOW_HOURS} hours`, free: k(FREE_WINDOW_TOKENS), pro: k(PRO_WINDOW_TOKENS) },
+  { feature: "Longest reply", free: k(FREE_MAX_REPLY_TOKENS), pro: k(PRO_MAX_REPLY_TOKENS) },
+  { feature: `Compiles every ${WINDOW_HOURS} hours`, free: String(FREE_WINDOW_COMPILES), pro: "Unlimited" },
+  { feature: "Smart Flash auto-debug", free: false, pro: true },
+  { feature: "Plan Mode", free: false, pro: true },
 ];
 
 function Cell({ value, pro }: { value: boolean | string; pro: boolean }) {
@@ -58,7 +62,7 @@ export default function PlansModal({ onClose, onUpgrade, upgrading }: {
                 Build more with the full agent
               </h2>
               <p className="text-xs text-[var(--text-muted)] mt-1">
-                More tokens every month, the full-strength model and auto-debug that never switch off.
+                10× more AI every {WINDOW_HOURS} hours, full-size replies, auto-debug, Plan Mode and unlimited compiles.
               </p>
             </div>
             <button
@@ -86,8 +90,9 @@ export default function PlansModal({ onClose, onUpgrade, upgrading }: {
           </div>
 
           <p className="mt-3 text-[11px] text-[var(--text-subtle)] leading-relaxed">
-            Free includes 50,000 AI tokens once. When they're used up, a lighter model answers, with shorter
-            replies, no auto-debug and 5 compiles a day.
+            Both plans use the same AI model. Free refills every {WINDOW_HOURS} hours, up to{" "}
+            {FREE_DAILY_TOKENS.toLocaleString()} tokens and {FREE_DAILY_COMPILES} successful compiles a day. PRO includes up to{" "}
+            {PAID_TOKEN_CAP.toLocaleString()} tokens a month.
           </p>
 
           <button
@@ -97,7 +102,7 @@ export default function PlansModal({ onClose, onUpgrade, upgrading }: {
             style={{ background: "var(--gradient-hero)", boxShadow: "var(--shadow-glow)" }}
           >
             {upgrading ? <Loader2 size={17} className="animate-spin" /> : <Rocket size={17} />}
-            {upgrading ? "Opening checkout…" : "Upgrade to PRO — $7/month"}
+            {upgrading ? "Opening checkout…" : `Upgrade to PRO — ${PRO_PRICE}`}
           </button>
           <p className="mt-3 text-center text-[11px] text-[var(--text-muted)]">Renews monthly. Cancel anytime.</p>
         </div>
