@@ -24,6 +24,7 @@ import { registerFeedbackRoutes } from './server/feedback';
 import { registerGithubRoutes } from './server/github';
 import { registerFirebaseAuthProxy } from './server/firebaseAuthProxy';
 import { detectLibDeps } from './server/libraryDeps';
+import { registerLibraryRoutes, prepareLibraries, mergeLibDeps, missingLibraryHint, libraryNoteFor, NO_LIBRARIES } from './server/libraries';
 import { loadBoardCatalog, getBoardCatalog, getBoardById, boardFamily, resolveBoard, describeBoardForPrompt, describeFamilyForPrompt, BoardInfo } from './server/boards';
 import { getCachedContentName } from './server/geminiCache';
 import { streamChat, completeChat, isDeepSeekConfigured, DEEPSEEK_MODEL, ChatMessage, ToolSpec, modelFor } from './server/deepseek';
@@ -356,6 +357,7 @@ registerPaystackRoutes(app, requireAdmin);
 registerWaitlistRoutes(app, requireAdmin);
 registerFeedbackRoutes(app, requireFirebaseAuth, requireAdmin);
 registerGithubRoutes(app, requireFirebaseAuth);
+registerLibraryRoutes(app, requireFirebaseAuth);
 
 // Lets the frontend check where a signed-in user stands in their 5-hour
 // allowance — used both to seed the UI on load and by a paused user's
@@ -403,6 +405,7 @@ app.get("/api/boards", (req, res) => {
 
 import { WORKSPACE_COMMANDS, isWorkspaceCommand, toWorkspaceCommand, ALLOWED_COMMAND_PREFIXES, isCommandAllowed } from "./server/commands.js";
 import { scrubToolchainNames } from "./server/scrub.js";
+import { buildEnv } from "./server/buildEnv.js";
 // Re-exported so the branding test can reach it from the server entrypoint too.
 export { scrubToolchainNames };
 
@@ -434,7 +437,7 @@ app.post("/api/terminal/execute", requireFirebaseAuth, async (req, res) => {
   }
 
   try {
-    const { stdout, stderr } = await execPromise(command, { cwd: process.cwd(), timeout: 60000 });
+    const { stdout, stderr } = await execPromise(command, { cwd: process.cwd(), timeout: 60000, env: buildEnv() });
     res.json({ stdout: scrubToolchainNames(stdout), stderr: scrubToolchainNames(stderr) });
   } catch (error: any) {
     res.json({
@@ -701,7 +704,9 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
         "change this code and keep everything else in it — pins, wiring, timing, behaviour — exactly as it is, unless the " +
         "user asks otherwise.\n```cpp\n" + currentCode + "\n```"
       : "";
-    const plan = planCompaction(systemText + codeNote, conversation);
+    // Libraries: the rule for ones that aren't well known, and the user's own.
+    const libraryNote = libraryNoteFor(req.uid);
+    const plan = planCompaction(systemText + codeNote + libraryNote, conversation);
     if (plan.compact) {
       send({ type: "tool_progress", text: "Conversation is nearly full — summarizing the earlier part…" });
       try {
@@ -744,6 +749,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     // Just before the newest message: everything ahead of it stays a stable
     // prefix, which DeepSeek caches and bills at a fraction of the price.
     if (codeNote) dsMessages.splice(dsMessages.length - 1, 0, { role: "system", content: codeNote });
+    dsMessages.splice(dsMessages.length - 1, 0, { role: "system", content: libraryNote });
 
     const runChat = (msgs: ChatMessage[]) => streamChat(
       msgs,
@@ -991,7 +997,10 @@ Review the provided C++ code and the compilation/behavior error.
 Fix the code. CRITICAL: You MUST ensure the corrected C++ code includes '#include <Arduino.h>' at the very top.
 Return your response as a JSON object containing:
 - "code": The corrected C++ code.
-- "explanation": Short, scannable bullet points explaining the bug, why it occurred, and how it was resolved.`;
+- "explanation": Short, scannable bullet points explaining the bug, why it occurred, and how it was resolved.
+
+${libraryNoteFor(req.uid)}
+If the error is a missing header ("No such file or directory") for a library that isn't well known, fix the include only if it is misspelled. Otherwise keep the #include and the code that uses it, return the code unchanged, and say in the explanation that the library needs adding under Libraries.`;
 
   if (!isDeepSeekConfigured()) {
     console.log("Using mock debugging response.");
@@ -1401,7 +1410,16 @@ framework = arduino
 lib_deps =
 `;
 
-  const detectedLibDeps = detectLibDeps(finalCode);
+  // Libraries the user added (server/libraries.ts) that this code uses:
+  // imported ones are copied into lib/, catalogue ones are pinned here.
+  let userLibraries = NO_LIBRARIES;
+  try {
+    userLibraries = prepareLibraries(req.uid, finalCode, tempDir);
+  } catch (err: any) {
+    console.error("[Compile] user libraries skipped:", err?.message || err);
+    fs.rmSync(path.join(tempDir, "lib"), { recursive: true, force: true });
+  }
+  const detectedLibDeps = mergeLibDeps(userLibraries.libDeps, detectLibDeps(finalCode + userLibraries.extraIncludes, userLibraries.skipHeaders));
   if (detectedLibDeps.length > 0) {
     platformioIni += detectedLibDeps.map(lib => `  ${lib}`).join("\n") + "\n";
   }
@@ -1416,7 +1434,7 @@ lib_deps =
     }
     const { stdout, stderr } = await execFilePromise(pioPath, ['run'], {
       cwd: tempDir,
-      env: { ...process.env, PLATFORMIO_CORE_DIR: path.join(process.cwd(), ".platformio") },
+      env: buildEnv(path.join(process.cwd(), ".platformio")),
       maxBuffer: 1024 * 1024 * 50
     });
 
@@ -1507,6 +1525,8 @@ lib_deps =
       stdout: scrubToolchainNames(err.stdout || ""),
       stderr: scrubToolchainNames(err.stderr || ""),
       message: scrubToolchainNames(err.message || ""),
+      // Said plainly when the build stopped for want of a library.
+      hint: missingLibraryHint(`${err.stdout || ""}\n${err.stderr || ""}`) || undefined,
     });
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -1545,8 +1565,15 @@ ${userPort ? `upload_port = ${userPort}` : ''}
 lib_deps =
 `;
 
-  // Shared with /api/compile — see server/libraryDeps.ts
-  const detectedLibDeps = detectLibDeps(finalCode);
+  // Shared with /api/compile — see server/libraryDeps.ts and server/libraries.ts
+  let userLibraries = NO_LIBRARIES;
+  try {
+    userLibraries = prepareLibraries(req.uid, finalCode, tempDir);
+  } catch (err: any) {
+    console.error("[Flash] user libraries skipped:", err?.message || err);
+    fs.rmSync(path.join(tempDir, "lib"), { recursive: true, force: true });
+  }
+  const detectedLibDeps = mergeLibDeps(userLibraries.libDeps, detectLibDeps(finalCode + userLibraries.extraIncludes, userLibraries.skipHeaders));
   if (detectedLibDeps.length > 0) {
     platformioIni += detectedLibDeps.map(lib => `  ${lib}`).join("\n") + "\n";
   }
@@ -1569,7 +1596,7 @@ lib_deps =
     console.log(`[Flash] Compiling and uploading to ${mcu}...`);
     const { stdout, stderr } = await execFilePromise(pioPath, ['run', '-t', 'upload'], {
       cwd: tempDir,
-      env: { ...process.env, PLATFORMIO_CORE_DIR: path.join(process.cwd(), ".platformio") },
+      env: buildEnv(path.join(process.cwd(), ".platformio")),
       maxBuffer: 1024 * 1024 * 50,
       timeout: 120000
     });
@@ -1769,7 +1796,7 @@ async function setupPlatformIO() {
       // Pre-install platforms in background so compile endpoint doesn't timeout
       const { spawn } = await import("child_process");
       console.log("[Setup] Pre-installing ESP32 and AVR platforms in background...");
-      const env = { ...process.env, PLATFORMIO_CORE_DIR: pioDir };
+      const env = buildEnv(pioDir);
       const child = spawn(pioPath, ['platform', 'install', 'espressif32', 'atmelavr'], { env, stdio: 'ignore', detached: true });
       child.unref();
     } catch (err) {

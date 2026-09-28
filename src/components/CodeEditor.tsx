@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { Cpu, Play, Zap, Bug, Copy, Check, Download, Sparkles, Wrench, BookOpen, MessageSquareText, Send, X } from "lucide-react";
+import { Cpu, Play, Zap, Bug, Copy, Check, Download, Sparkles, Wrench, BookOpen, MessageSquareText, Send, X, Library } from "lucide-react";
 import Editor from "react-simple-code-editor";
 import Prism from "prismjs";
 import "prismjs/components/prism-clike";
@@ -25,6 +25,8 @@ interface CodeEditorProps {
   onAskAi?: (request: AskAiRequest) => void;
   /** The agent is answering; Ask AI waits for it. */
   askAiBusy?: boolean;
+  /** Opens the Libraries panel (both modes). */
+  onOpenLibraries?: () => void;
 }
 
 export interface AskAiRequest {
@@ -50,7 +52,8 @@ export default function CodeEditor({
   fontSize = 14,
   wordWrap = true,
   onAskAi,
-  askAiBusy = false
+  askAiBusy = false,
+  onOpenLibraries
 }: CodeEditorProps) {
   const [copied, setCopied] = useState(false);
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -164,6 +167,17 @@ export default function CodeEditor({
         </div>
 
         <div className="flex items-center gap-2">
+          {onOpenLibraries && (
+            <button
+              id="btn-libraries"
+              onClick={onOpenLibraries}
+              className="flex items-center gap-1.5 px-2 py-1.5 hover:bg-[var(--bg-surface)] text-[var(--text-muted)] hover:text-[var(--text-main)] rounded-md transition text-xs font-semibold"
+              title="Libraries: search, add or import"
+            >
+              <Library size={14} />
+              <span>Libraries</span>
+            </button>
+          )}
            <button
             id="btn-copy-code"
             onClick={handleCopy}

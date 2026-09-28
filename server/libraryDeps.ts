@@ -79,13 +79,16 @@ const KNOWN_STDLIB_HEADERS = ['Arduino', 'Wire', 'SPI', 'EEPROM', 'math', 'strin
 
 // Parses #include directives (both <lib.h> and <lib/sub.h> forms) and
 // returns the PlatformIO lib_deps entries to write into platformio.ini.
-export function detectLibDeps(code: string): string[] {
+// Headers in `skipHeaders` come from a library the user added themselves
+// (server/libraries.ts), which is used in their place.
+export function detectLibDeps(code: string, skipHeaders?: ReadonlySet<string>): string[] {
   const includeMatches = [...code.matchAll(/#include\s*[<"]([^>"]+)[>"]/g)];
   const detected = new Set<string>();
 
   for (const match of includeMatches) {
     const headerPath = match[1];
     const headerName = headerPath.replace(/\.h$/, '').split('/').pop() || '';
+    if (skipHeaders?.has(headerName)) continue;
 
     if (LIBRARY_MAP.hasOwnProperty(headerName)) {
       const libDep = LIBRARY_MAP[headerName];
@@ -101,4 +104,15 @@ export function detectLibDeps(code: string): string[] {
   }
 
   return Array.from(detected);
+}
+
+/** A header the framework itself provides, such as Wire or WiFi. */
+export function isBuiltinHeader(headerName: string): boolean {
+  return KNOWN_STDLIB_HEADERS.includes(headerName) ||
+    (LIBRARY_MAP.hasOwnProperty(headerName) && LIBRARY_MAP[headerName] === '');
+}
+
+/** A header detectLibDeps maps to a known catalogue library. */
+export function knownLibraryHeader(headerName: string): boolean {
+  return LIBRARY_MAP.hasOwnProperty(headerName) && LIBRARY_MAP[headerName] !== '';
 }

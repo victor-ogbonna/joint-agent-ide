@@ -9,6 +9,9 @@ build
 .env
 .env.local
 .admin-config.json
+# Runtime data (admin settings, users' libraries): mounted at run time,
+# never part of the image or its build context.
+data
 
 # Local-only PlatformIO cache — the image bakes its own at build time (see
 # Dockerfile), a stale local one would just bloat the build context.

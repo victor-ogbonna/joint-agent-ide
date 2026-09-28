@@ -8,6 +8,8 @@ coverage/
 !.env.example
 .platformio
 .admin-config.json
+# Runtime data: admin settings and users' libraries (ADMIN_CONFIG_DIR, or ./data in dev)
+/data/
 
 # one-off dev/patch scripts and scratch files, not part of the app
 .piocore-installer-*

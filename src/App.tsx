@@ -25,6 +25,7 @@ import FeedbackWidget from "./components/FeedbackWidget";
 import GithubPanel from "./components/GithubPanel";
 import WebPreviewPanel from "./components/WebPreviewPanel";
 import PlansModal from "./components/PlansModal";
+import LibrariesModal from "./components/LibrariesModal";
 import OnboardingTour, { TourStep } from "./components/OnboardingTour";
 import { canInstallApp, installApp, isInstalledFullscreenApp, onInstallAvailabilityChange } from "./lib/installApp";
 import { WINDOW_HOURS, FREE_WINDOW_TOKENS, PRO_WINDOW_TOKENS, formatWait, formatWhen, percentUsed } from "./lib/plans";
@@ -416,6 +417,7 @@ export default function App() {
   // screen: the terminal drops to a strip, until a dock is opened again.
   const [compactDock, setCompactDock] = useState(false);
   const [isPlansOpen, setIsPlansOpen] = useState(false);
+  const [isLibrariesOpen, setIsLibrariesOpen] = useState(false);
   const [isPluginsOpen, setIsPluginsOpen] = useState(false);
   const [isBoardMenuOpen, setIsBoardMenuOpen] = useState(false);
   // The profile menu opens from the sidebar now, which a resizable panel
@@ -1378,7 +1380,7 @@ export default function App() {
   };
 
   // Compile microcontroller code simulation
-  const handleCompile = async (overrideCode?: string): Promise<{ success: boolean, data?: any, errorText?: string, compileSucceeded?: boolean, limited?: { reason: "window" | "day"; resetAt: number | null } }> => {
+  const handleCompile = async (overrideCode?: string): Promise<{ success: boolean, data?: any, errorText?: string, compileSucceeded?: boolean, limited?: { reason: "window" | "day"; resetAt: number | null }, missingLibrary?: string }> => {
     setIsCompiling(true);
     const codeToCompile = overrideCode || code;
     logToTerminal(`[COMPILER] Sending code to cloud build server for ${mcu.toUpperCase()}...`, "info");
@@ -1409,6 +1411,9 @@ export default function App() {
         // build looked like a code bug.
         if (data.detail) logToTerminal(data.detail, "error");
         else if (data.stderr) logToTerminal(data.stderr, "error");
+        // The build stopped for want of a library: say where to add it.
+        const missingLibrary = typeof data.hint === "string" && data.hint ? data.hint : undefined;
+        if (missingLibrary) logToTerminal(`[COMPILER] ${missingLibrary}`, "warning");
         setIsCompiling(false);
         // Refused by the Free plan's compile limit: the code was never built.
         const limited = data.code === "FREE_COMPILE_LIMIT"
@@ -1416,7 +1421,7 @@ export default function App() {
           : undefined;
         // Only a real error in the code is worth handing to Ask AI.
         if (!limited && data.compileSucceeded !== true) lastCompileErrorRef.current = errorText;
-        return { success: false, errorText, compileSucceeded: data.compileSucceeded === true, limited };
+        return { success: false, errorText, compileSucceeded: data.compileSucceeded === true, limited, missingLibrary };
       }
     } catch (err: any) {
       logToTerminal(`[COMPILER] Build failed: ${err.message}`, "error");
@@ -2354,7 +2359,15 @@ export default function App() {
         return;
       }
       currentCode = debugResult.code;
+      const missingBefore = compileResult.missingLibrary;
       compileResult = await handleCompile(currentCode);
+      // Still missing the same library: it has to be added, and more AI
+      // rounds would only spend the user's allowance rewriting nothing.
+      if (!compileResult.success && compileResult.missingLibrary && compileResult.missingLibrary === missingBefore) {
+        logToTerminal("[SMART FLASH] Stopped: this project needs a library that isn't added yet. Open Libraries above main.cpp to add it, then Smart Flash again.", "error");
+        setIsSmartFlashing(false);
+        return;
+      }
     }
 
     if (!compileResult.success) {
@@ -3422,6 +3435,7 @@ export default function App() {
                         appMode={appMode}
                         onAskAi={handleAskAi}
                         askAiBusy={isLoading}
+                        onOpenLibraries={() => setIsLibrariesOpen(true)}
                       />
                     </div>
                     <div className={`absolute inset-0 ${activeTab === "schematic" ? "z-10" : "z-0 opacity-0 pointer-events-none"}`}>
@@ -3718,6 +3732,8 @@ export default function App() {
           } : undefined}
         />
       )}
+
+      {isLibrariesOpen && <LibrariesModal onClose={() => setIsLibrariesOpen(false)} />}
 
       {isPlansOpen && !isPro && (
         <PlansModal
