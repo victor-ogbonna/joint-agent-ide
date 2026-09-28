@@ -28,6 +28,8 @@ interface AgentChatProps {
   onQuotaBlocked?: (info: QuotaBlockedInfo) => void;
   /** How full the conversation's context budget is, as the model counted it. */
   contextUsage?: { used: number; limit: number } | null;
+  /** Open a reply's code in the editor (on a phone, switching to it). */
+  onOpenCode?: (code: string) => void;
   /** Show the one-time note that the user is now on the lite tier. */
   liteNotice?: boolean;
   onDismissLiteNotice?: () => void;
@@ -317,6 +319,7 @@ export default function AgentChat({
   onSmartFlash,
   onQuotaBlocked,
   contextUsage,
+  onOpenCode,
   liteNotice,
   onDismissLiteNotice,
   onUpgrade
@@ -752,7 +755,9 @@ export default function AgentChat({
                           <div className="flex items-center justify-end border-t border-[var(--border-main)] pt-2 mt-1">
                             {msg.suggestedProjectUpdate.code && (
                               <button
-                                onClick={() => onApplyUpdate({ code: msg.suggestedProjectUpdate!.code })}
+                                onClick={() => onOpenCode
+                                  ? onOpenCode(msg.suggestedProjectUpdate!.code!)
+                                  : onApplyUpdate({ code: msg.suggestedProjectUpdate!.code })}
                                 className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-semibold transition flex items-center gap-1.5"
                               >
                                 <Code size={14} /> Open Code

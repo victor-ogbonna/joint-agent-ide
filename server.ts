@@ -808,7 +808,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
       // own output. Restore the conditional wording when the viewer lands.
       send({
         type: "project_update",
-        text: "Code is in the workspace.",
+        text: "Code is ready.",
         projectUpdate: call.args,
       });
     } else if (call?.name === "execute_terminal_command") {

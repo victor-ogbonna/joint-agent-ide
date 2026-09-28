@@ -3,7 +3,7 @@ import { motion } from "motion/react";
 import {
   Cpu, Wallet, TerminalSquare, X, Loader2, Zap,
   Mail, Lock, User as UserIcon, ArrowRight, Sparkles,
-  MessageSquare, FileCode2, FlaskConical, Activity, Chrome, Bell, Check, Smartphone
+  MessageSquare, FileCode2, FlaskConical, Activity, Chrome, Bell, Check, Smartphone, Play, Pause
 } from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { useDocumentScroll } from "./useDocumentScroll";
@@ -282,29 +282,35 @@ function CircuitBackdrop() {
 }
 
 // ---------------------------------------------------------------------------
-// Hero story — the thesis of the page, played on a real board. The photo is
-// an Arduino Uno with its LED dark; a plain-English request goes in; the agent
-// runs, streams the firmware, applies it to the codespace and flashes it; the
-// same photo, same framing, comes back with the LED lit. Both photos load up
-// front, so the switch is a crossfade and never a late pop-in.
+// Hero story — the thesis of the page, played on a real board. On top, the
+// Arduino with its LED dark; below, a plain-English request to blink it; the
+// agent runs, streams the firmware, applies it to the codespace and flashes
+// it; then the photo blinks between the same board's LED-off and LED-on
+// shots at the sketch's own 500 ms, and the story starts again. Both photos
+// load up front, so every switch is a crossfade, never a late pop-in.
+//
+// It plays with reduced motion switched on too — many phones ship with it on,
+// and a still frame told no story at all. Under reduced motion nothing slides
+// or breathes; text types and photos crossfade, and a pause button stops it.
 //
 // Every state occupies the same space. Status rows are always rendered and
-// only fade, and the code pane reserves the finished sketch's height with an
-// invisible copy, so nothing below the hero moves while the loop plays — on a
-// phone that used to make the page crawl under the reader's thumb.
+// only fade, and the prompt and code reserve their final size with invisible
+// copies, so nothing below the hero moves while it plays.
 // ---------------------------------------------------------------------------
-const STORY_PROMPT = "Turn on the LED connected to pin 4 of my Arduino";
+const STORY_PROMPT = "Blink the LED connected to pin 4 of my Arduino";
 const STORY_CODE = `#include <Arduino.h>
 
 const int LED_PIN = 4;  // LED on pin 4
 
 void setup() {
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, HIGH);  // on
 }
 
 void loop() {
-  // stays on: nothing to repeat
+  digitalWrite(LED_PIN, HIGH);  // on
+  delay(500);
+  digitalWrite(LED_PIN, LOW);   // off
+  delay(500);
 }`;
 
 // The lines a flash really prints, in the order the IDE's terminal shows them.
@@ -315,12 +321,12 @@ const STORY_FLASH_LOG = [
   "[FLASH] Upload complete — the board is running your code.",
 ];
 
-// Minimal C++ colouring for the streamed sketch: comment, #include, header,
-// keyword, Arduino call, constant, number — in that order of precedence.
-const CODE_TOKEN = /(\/\/[^\n]*)|(#include)|(<[\w.]+>)|\b(const|int|void)\b|\b(pinMode|digitalWrite|setup|loop)\b|\b(HIGH|OUTPUT)\b|\b(\d+)\b/g;
+// Minimal C++ colouring: comment, #include, header, keyword, Arduino call,
+// constant, number — in that order of precedence.
+const CODE_TOKEN = /(\/\/[^\n]*)|(#include)|(<[\w.]+>)|\b(const|int|void)\b|\b(pinMode|digitalWrite|delay|setup|loop|Serial|println|begin)\b|\b(HIGH|LOW|OUTPUT)\b|\b(\d+)\b|("[^"\n]*")/g;
 const CODE_COLOURS = [
   "var(--text-subtle)", "var(--accent-secondary)", "var(--term-success)", "var(--accent-secondary)",
-  "var(--accent-primary)", "var(--term-serial)", "var(--term-serial)",
+  "var(--accent-primary)", "var(--term-serial)", "var(--term-serial)", "var(--term-success)",
 ];
 type CodeToken = { text: string; colour?: string };
 function tokenizeSketch(code: string): CodeToken[] {
@@ -337,12 +343,12 @@ function tokenizeSketch(code: string): CodeToken[] {
 }
 const STORY_TOKENS = tokenizeSketch(STORY_CODE);
 
-/** The first `count` characters of the sketch, coloured. */
-function renderSketch(count: number) {
+/** The first `count` characters of a tokenized sketch, coloured. */
+function renderSketch(count: number, tokens: CodeToken[] = STORY_TOKENS) {
   const out: React.ReactNode[] = [];
   let shown = 0;
-  for (let i = 0; i < STORY_TOKENS.length && shown < count; i++) {
-    const { text, colour } = STORY_TOKENS[i];
+  for (let i = 0; i < tokens.length && shown < count; i++) {
+    const { text, colour } = tokens[i];
     const part = text.slice(0, count - shown);
     out.push(<span key={i} style={colour ? { color: colour } : undefined}>{part}</span>);
     shown += part.length;
@@ -350,22 +356,23 @@ function renderSketch(count: number) {
   return out;
 }
 
-type StoryStep = "prompt" | "running" | "coding" | "applied" | "flashing" | "on";
-const STEP_ORDER: StoryStep[] = ["prompt", "running", "coding", "applied", "flashing", "on"];
+type StoryStep = "prompt" | "running" | "coding" | "applied" | "flashing" | "blinking";
+const STEP_ORDER: StoryStep[] = ["prompt", "running", "coding", "applied", "flashing", "blinking"];
 const reached = (step: StoryStep, at: StoryStep) => STEP_ORDER.indexOf(step) >= STEP_ORDER.indexOf(at);
+const BLINK_TOGGLES = 10;  // five full blinks at 500 ms before the story starts over
 
-function StatusRow({ show, busy, children }: { show: boolean; busy: boolean; children: React.ReactNode }) {
+function StatusRow({ show, busy, still, children }: { show: boolean; busy: boolean; still: boolean; children: React.ReactNode }) {
   return (
     <div
       className="flex items-center gap-2 text-xs transition-all duration-300"
-      style={{ opacity: show ? 1 : 0, transform: show ? "none" : "translateY(3px)" }}
+      style={{ opacity: show ? 1 : 0, transform: show || still ? "none" : "translateY(3px)" }}
     >
       <span
         className="w-4 h-4 rounded-full flex items-center justify-center shrink-0"
         style={{ background: busy ? "var(--accent-primary-soft)" : "color-mix(in srgb, var(--term-success) 16%, transparent)" }}
       >
         {busy
-          ? <Loader2 size={10} className="animate-spin text-[var(--accent-primary)]" />
+          ? <Loader2 size={10} className={`text-[var(--accent-primary)] ${still ? "" : "animate-spin"}`} />
           : <Check size={10} strokeWidth={3} className="text-[var(--term-success)]" />}
       </span>
       <span className={`min-w-0 truncate ${busy ? "text-[var(--text-main)]" : "text-[var(--text-muted)]"}`}>{children}</span>
@@ -375,31 +382,40 @@ function StatusRow({ show, busy, children }: { show: boolean; busy: boolean; chi
 
 function AgentStory() {
   const [reduceMotion] = useState(
-    () => typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+    () => typeof window !== "undefined" && Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches)
   );
-  const [step, setStep] = useState<StoryStep>(reduceMotion ? "on" : "prompt");
-  const [typed, setTyped] = useState(reduceMotion ? STORY_PROMPT : "");
-  const [codeShown, setCodeShown] = useState(reduceMotion ? STORY_CODE.length : 0);
-  const [logShown, setLogShown] = useState(reduceMotion ? STORY_FLASH_LOG.length : 0);
+  const [step, setStep] = useState<StoryStep>("prompt");
+  const [typed, setTyped] = useState("");
+  const [codeShown, setCodeShown] = useState(0);
+  const [logShown, setLogShown] = useState(0);
+  const [ledOn, setLedOn] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const pausedRef = useRef(false);
+  pausedRef.current = paused;
   const [photosFailed, setPhotosFailed] = useState(false);
 
   useEffect(() => {
-    // Reduced motion gets the finished story, still: prompt, code, and the lit board.
-    if (reduceMotion) return;
     let cancelled = false;
     const timers: ReturnType<typeof setTimeout>[] = [];
-    const wait = (ms: number) => new Promise<void>((resolve) => timers.push(setTimeout(resolve, ms)));
+    const sleep = (ms: number) => new Promise<void>((resolve) => timers.push(setTimeout(resolve, ms)));
+    // Time only runs while the story is visible and not paused.
+    const wait = async (ms: number) => {
+      let left = ms;
+      while (left > 0 && !cancelled) {
+        const step = Math.min(left, 40);
+        await sleep(step);
+        if (!pausedRef.current && !document.hidden) left -= step;
+      }
+    };
 
     async function play() {
       while (!cancelled) {
-        // A background tab gets no animation; pick up again when it is seen.
-        while (document.hidden && !cancelled) await wait(500);
-        setStep("prompt"); setTyped(""); setCodeShown(0); setLogShown(0);
-        await wait(900);
+        setStep("prompt"); setTyped(""); setCodeShown(0); setLogShown(0); setLedOn(false);
+        await wait(1000);
         for (let i = 1; i <= STORY_PROMPT.length; i++) {
           if (cancelled) return;
           setTyped(STORY_PROMPT.slice(0, i));
-          await wait(28);
+          await wait(30);
         }
         await wait(450);
         if (cancelled) return;
@@ -425,187 +441,214 @@ function AgentStory() {
           await wait(i === 3 ? 600 : 380);
         }
         if (cancelled) return;
-        setStep("on");
-        await wait(4200);
+        // The sketch is running: the LED blinks at its 500 ms.
+        setStep("blinking");
+        for (let t = 0; t < BLINK_TOGGLES; t++) {
+          if (cancelled) return;
+          setLedOn(t % 2 === 0);
+          await wait(500);
+        }
+        setLedOn(false);
+        await wait(700);
       }
     }
     play();
     return () => { cancelled = true; timers.forEach(clearTimeout); };
-  }, [reduceMotion]);
+  }, []);
 
-  const on = step === "on";
   const running = step === "running" || step === "coding";
+  const done = step === "blinking";
   const stepLabel =
     step === "prompt" ? "Waiting for a prompt"
     : running ? "Agent is running"
     : step === "applied" ? "Firmware applied"
     : step === "flashing" ? "Flashing the board"
-    : "Running on the board";
+    : "Blinking on the board";
+  // Photos crossfade quickly while blinking so the LED reads as blinking.
+  const fadeMs = done ? 180 : 700;
+
+  // The streamed sketch. On a phone it sits in the conversation, between the
+  // agent running and the firmware being applied; on a wide screen it has
+  // the right-hand column.
+  const codeBlock = (
+    <div
+      className="rounded-lg border bg-[var(--bg-root)] overflow-hidden transition-[border-color,opacity] duration-500"
+      style={{
+        opacity: reached(step, "coding") ? 1 : 0.35,
+        borderColor: step === "applied" ? "var(--term-success)" : "var(--border-main)",
+      }}
+    >
+      <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-[var(--border-main)] text-[10px] font-mono text-[var(--text-subtle)]">
+        <FileCode2 size={11} /> src/main.cpp
+      </div>
+      <div className="relative">
+        <pre className="invisible overflow-hidden text-[10.5px] sm:text-[11px] leading-[1.65] px-3 py-2.5 font-mono whitespace-pre">
+          <code>{STORY_CODE}</code>
+        </pre>
+        <pre className="absolute inset-0 text-[10.5px] sm:text-[11px] leading-[1.65] px-3 py-2.5 font-mono whitespace-pre overflow-hidden text-[var(--text-main)]">
+          <code>{renderSketch(codeShown)}</code>
+        </pre>
+        {/* The agent thinking, before the first line arrives. */}
+        {step === "running" && (
+          <div className="absolute inset-0 px-3 py-3.5 flex flex-col gap-3">
+            {[52, 0, 78, 0, 44, 70, 18, 0, 40, 72, 30, 60, 20].map((w, i) => (
+              <div key={i} className={w ? `${reduceMotion ? "bg-[var(--bg-hover)]" : "shimmer"} h-2 rounded` : "h-2"} style={{ width: `${w}%` }} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 
   return (
     <div className="rounded-2xl border border-[var(--border-main)] bg-[var(--bg-panel)] shadow-2xl overflow-hidden">
       <p className="sr-only">
-        A demo of the agent. You ask it to turn on the LED connected to pin 4 of an Arduino. The agent runs,
+        A demo of the agent. You ask it to blink the LED connected to pin 4 of an Arduino. The agent runs,
         writes the firmware, applies it to the codespace, compiles it and flashes the board — and the LED,
-        dark in the first photo, lights up.
+        dark in the first photo, starts blinking.
       </p>
 
       {/* Window chrome */}
-      <div aria-hidden="true" className="flex items-center gap-1.5 px-4 py-2.5 border-b border-[var(--border-main)] bg-[var(--bg-root)]">
-        <span className="w-2.5 h-2.5 rounded-full bg-red-400/70" />
-        <span className="w-2.5 h-2.5 rounded-full bg-yellow-400/70" />
-        <span className="w-2.5 h-2.5 rounded-full bg-green-400/70" />
-        <span className="ml-2 text-[10px] font-mono text-[var(--text-subtle)] truncate">joint-agent<span className="hidden sm:inline"> — led-demo</span></span>
-        <span className="ml-auto flex items-center gap-1.5 text-[10px] font-mono text-[var(--text-subtle)] shrink-0">
+      <div className="flex items-center gap-1.5 px-4 py-2 border-b border-[var(--border-main)] bg-[var(--bg-root)]">
+        <span aria-hidden="true" className="w-2.5 h-2.5 rounded-full bg-red-400/70" />
+        <span aria-hidden="true" className="w-2.5 h-2.5 rounded-full bg-yellow-400/70" />
+        <span aria-hidden="true" className="w-2.5 h-2.5 rounded-full bg-green-400/70" />
+        <span aria-hidden="true" className="ml-2 text-[10px] font-mono text-[var(--text-subtle)] truncate">joint-agent<span className="hidden sm:inline"> — led-demo</span></span>
+        <span aria-hidden="true" className="ml-auto flex items-center gap-1.5 text-[10px] font-mono text-[var(--text-subtle)] shrink-0">
           <Cpu size={11} /> Arduino Uno · USB
         </span>
+        <button
+          onClick={() => setPaused((p) => !p)}
+          className="ml-2 w-7 h-7 -mr-1.5 flex items-center justify-center rounded-md text-[var(--text-subtle)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition shrink-0"
+          aria-label={paused ? "Play the demo" : "Pause the demo"}
+          title={paused ? "Play" : "Pause"}
+        >
+          {paused ? <Play size={12} /> : <Pause size={12} />}
+        </button>
       </div>
 
-      <div aria-hidden="true" className="grid lg:grid-cols-[1fr_1.12fr]">
-        {/* The bench — first on a phone, so the dark LED is the opening shot. */}
-        <div className="order-1 lg:order-2 lg:border-l border-[var(--border-main)] bg-[var(--bg-root)] flex flex-col">
-          <div className="relative aspect-[3/2] overflow-hidden bg-[#1a120c]">
-            {photosFailed ? (
-              // No photos: a drawn LED still carries the off-to-on beat.
-              <div className="absolute inset-0 flex items-center justify-center">
-                <div
-                  className="w-10 h-10 rounded-full transition-all duration-700"
-                  style={{
-                    background: on ? "radial-gradient(circle, #ffd2c2 0%, #ff4d2e 45%, #b91c1c 100%)" : "#3a2a24",
-                    boxShadow: on ? "0 0 40px 14px rgba(255, 77, 46, 0.55)" : "none",
-                  }}
-                />
-              </div>
-            ) : (<>
-              <img
-                src="/hero-circuit-off.jpg" width={1024} height={683} alt="" decoding="async"
-                onError={() => setPhotosFailed(true)}
-                className="absolute inset-0 w-full h-full object-cover"
-              />
-              <img
-                src="/hero-circuit.jpg" width={1800} height={1200} alt="" decoding="async"
-                onError={() => setPhotosFailed(true)}
-                className="absolute inset-0 w-full h-full object-cover transition-opacity duration-700 ease-out"
-                style={{ opacity: on ? 1 : 0 }}
-              />
-              {/* A bloom over the LED itself (88%, 50% in both photos) as it lights. */}
+      <div aria-hidden="true">
+        {/* The bench, on top at every size: the story opens on the dark LED. */}
+        <div className="relative aspect-[3/2] sm:aspect-[2/1] overflow-hidden bg-[#1a120c] border-b border-[var(--border-main)]">
+          {photosFailed ? (
+            // No photos: a drawn LED still carries the off-and-on beat.
+            <div className="absolute inset-0 flex items-center justify-center">
               <div
-                className="pointer-events-none absolute transition-opacity duration-700"
-                style={{ left: "88%", top: "50%", width: "36%", aspectRatio: "1", transform: "translate(-50%, -50%)", opacity: on ? 1 : 0 }}
-              >
-                <div
-                  className="w-full h-full rounded-full"
-                  style={{
-                    background: "radial-gradient(circle, rgba(255, 90, 50, 0.5) 0%, rgba(255, 70, 40, 0.16) 38%, transparent 66%)",
-                    mixBlendMode: "screen",
-                    animation: reduceMotion ? undefined : "breathe 2.6s ease-in-out infinite",
-                  }}
-                />
-              </div>
-            </>)}
-
-            {/* What the agent is doing, on the photo itself, so the story reads
-                even when the chat has scrolled out of view on a phone. */}
-            <div className="absolute left-3 top-3 flex items-center gap-1.5 rounded-full bg-black/55 backdrop-blur-sm px-2.5 py-1 text-[10px] font-medium text-white">
-              <span
-                className={`w-1.5 h-1.5 rounded-full ${running || step === "flashing" ? "animate-pulse" : ""}`}
-                style={{ background: on ? "#34d399" : step === "prompt" ? "rgba(255,255,255,0.45)" : "#f97316" }}
-              />
-              {stepLabel}
-            </div>
-            <div className="absolute right-3 bottom-3 flex items-center gap-2 rounded-full bg-black/55 backdrop-blur-sm px-2.5 py-1 text-[10px] font-mono text-white/85">
-              LED · pin 4
-              <span
-                className="rounded-full px-1.5 py-px text-[9px] font-bold tracking-wider transition-colors duration-500"
-                style={{ background: on ? "#ef4444" : "rgba(255,255,255,0.14)", color: on ? "#fff" : "rgba(255,255,255,0.7)" }}
-              >
-                {on ? "ON" : "OFF"}
-              </span>
-            </div>
-          </div>
-
-          {/* The flash, as the IDE's terminal prints it. */}
-          <div className="hidden sm:block flex-1 border-t border-[var(--border-main)] px-4 py-3 font-mono text-[10.5px] leading-[1.7]">
-            {STORY_FLASH_LOG.map((line, i) => (
-              <div
-                key={line}
-                className="truncate transition-opacity duration-300"
+                className="w-10 h-10 rounded-full"
                 style={{
-                  opacity: i < logShown ? 1 : 0,
-                  color: i === STORY_FLASH_LOG.length - 1 ? "var(--term-success)" : "var(--text-muted)",
+                  transition: `all ${fadeMs}ms ease-out`,
+                  background: ledOn ? "radial-gradient(circle, #ffd2c2 0%, #ff4d2e 45%, #b91c1c 100%)" : "#3a2a24",
+                  boxShadow: ledOn ? "0 0 40px 14px rgba(255, 77, 46, 0.55)" : "none",
                 }}
-              >
-                {line}
-              </div>
-            ))}
+              />
+            </div>
+          ) : (<>
+            <img
+              src="/hero-circuit-off.jpg" width={1024} height={683} alt="" decoding="async"
+              onError={() => setPhotosFailed(true)}
+              className="absolute inset-0 w-full h-full object-cover"
+            />
+            <img
+              src="/hero-circuit.jpg" width={1800} height={1200} alt="" decoding="async"
+              onError={() => setPhotosFailed(true)}
+              className="absolute inset-0 w-full h-full object-cover"
+              style={{ opacity: ledOn ? 1 : 0, transition: `opacity ${fadeMs}ms ease-out` }}
+            />
+            {/* A bloom over the LED itself — at (88%, 50%) in both photos, and
+                a centred crop keeps it there. */}
+            <div
+              className="pointer-events-none absolute"
+              style={{ left: "88%", top: "50%", width: "34%", aspectRatio: "1", transform: "translate(-50%, -50%)", opacity: ledOn ? 1 : 0, transition: `opacity ${fadeMs}ms ease-out` }}
+            >
+              <div
+                className="w-full h-full rounded-full"
+                style={{
+                  background: "radial-gradient(circle, rgba(255, 90, 50, 0.5) 0%, rgba(255, 70, 40, 0.16) 38%, transparent 66%)",
+                  mixBlendMode: "screen",
+                }}
+              />
+            </div>
+          </>)}
+
+          {/* What the agent is doing, on the photo itself, so the story reads
+              even when the chat below is out of view on a phone. */}
+          <div className="absolute left-3 top-3 flex items-center gap-1.5 rounded-full bg-black/55 backdrop-blur-sm px-2.5 py-1 text-[10px] font-medium text-white">
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${(running || step === "flashing") && !reduceMotion ? "animate-pulse" : ""}`}
+              style={{ background: done ? "#34d399" : step === "prompt" ? "rgba(255,255,255,0.45)" : "#f97316" }}
+            />
+            {stepLabel}
+          </div>
+          <div className="absolute right-3 bottom-3 flex items-center gap-2 rounded-full bg-black/55 backdrop-blur-sm px-2.5 py-1 text-[10px] font-mono text-white/85">
+            LED · pin 4
+            <span
+              className="rounded-full px-1.5 py-px text-[9px] font-bold tracking-wider"
+              style={{ transition: `background-color ${fadeMs}ms`, background: ledOn ? "#ef4444" : "rgba(255,255,255,0.14)", color: ledOn ? "#fff" : "rgba(255,255,255,0.7)" }}
+            >
+              {ledOn ? "ON" : "OFF"}
+            </span>
           </div>
         </div>
 
-        {/* The agent */}
-        <div className="order-2 lg:order-1 min-w-0 p-4 sm:p-5 flex flex-col gap-3 border-t lg:border-t-0 border-[var(--border-main)]">
-          <div className="flex items-start gap-2.5">
-            <span className="w-6 h-6 rounded-md bg-[var(--bg-surface)] border border-[var(--border-light)] flex items-center justify-center shrink-0 text-[var(--text-muted)]">
-              <UserIcon size={12} />
-            </span>
-            {/* An invisible copy of the whole prompt holds its final height, so
-                the text wrapping mid-typing on a phone moves nothing. The caret
-                hides by visibility: animate-pulse owns its opacity. */}
-            <p className="relative flex-1 min-w-0 text-[13px] text-[var(--text-main)] leading-relaxed pt-0.5">
-              <span className="invisible">{STORY_PROMPT}<span className="inline-block w-1.5 ml-0.5" /></span>
-              <span className="absolute inset-0 pt-0.5">
-                {typed}
-                <span
-                  className="inline-block w-1.5 h-3.5 bg-[var(--accent-primary)] align-middle ml-0.5 animate-pulse"
-                  style={{ visibility: step === "prompt" ? "visible" : "hidden" }}
-                />
+        {/* The conversation and the code, under the photo. */}
+        <div className="grid lg:grid-cols-[1fr_1.1fr]">
+          <div className="min-w-0 p-4 sm:p-5 flex flex-col gap-3 lg:border-r border-[var(--border-main)]">
+            <div className="flex items-start gap-2.5">
+              <span className="w-6 h-6 rounded-md bg-[var(--bg-surface)] border border-[var(--border-light)] flex items-center justify-center shrink-0 text-[var(--text-muted)]">
+                <UserIcon size={12} />
               </span>
-            </p>
+              {/* An invisible copy of the whole prompt holds its final height,
+                  so wrapping mid-typing on a phone moves nothing. The caret
+                  hides by visibility: animate-pulse owns its opacity. */}
+              <p className="relative flex-1 min-w-0 text-[13px] text-[var(--text-main)] leading-relaxed pt-0.5">
+                <span className="invisible">{STORY_PROMPT}<span className="inline-block w-1.5 ml-0.5" /></span>
+                <span className="absolute inset-0 pt-0.5">
+                  {typed}
+                  <span
+                    className={`inline-block w-1.5 h-3.5 bg-[var(--accent-primary)] align-middle ml-0.5 ${reduceMotion ? "" : "animate-pulse"}`}
+                    style={{ visibility: step === "prompt" ? "visible" : "hidden" }}
+                  />
+                </span>
+              </p>
+            </div>
+
+            <div className="flex items-start gap-2.5">
+              <span className="w-6 h-6 rounded-md flex items-center justify-center shrink-0 text-white" style={{ background: "var(--gradient-hero)" }}>
+                <Sparkles size={12} />
+              </span>
+              <div className="flex-1 min-w-0 flex flex-col gap-2.5 pt-1">
+                <StatusRow show={reached(step, "running")} busy={running} still={reduceMotion}>
+                  {running ? "Agent is running…" : "Agent wrote the firmware"}
+                </StatusRow>
+                <div className="lg:hidden">{codeBlock}</div>
+                <StatusRow show={reached(step, "applied")} busy={false} still={reduceMotion}>
+                  Firmware auto-applied to codespace
+                </StatusRow>
+                <StatusRow show={reached(step, "flashing")} busy={step === "flashing"} still={reduceMotion}>
+                  {done ? "Flashed to Arduino Uno" : "Flashing Arduino Uno…"}
+                </StatusRow>
+              </div>
+            </div>
+
+            {/* The flash, as the IDE's terminal prints it. */}
+            <div className="hidden sm:block mt-1 rounded-lg border border-[var(--border-main)] bg-[var(--bg-root)] px-3 py-2.5 font-mono text-[10.5px] leading-[1.7]">
+              {STORY_FLASH_LOG.map((line, i) => (
+                <div
+                  key={line}
+                  className="truncate transition-opacity duration-300"
+                  style={{
+                    opacity: i < logShown ? 1 : 0,
+                    color: i === STORY_FLASH_LOG.length - 1 ? "var(--term-success)" : "var(--text-muted)",
+                  }}
+                >
+                  {line}
+                </div>
+              ))}
+            </div>
           </div>
 
-          <div className="flex items-start gap-2.5">
-            <span className="w-6 h-6 rounded-md flex items-center justify-center shrink-0 text-white" style={{ background: "var(--gradient-hero)" }}>
-              <Sparkles size={12} />
-            </span>
-            <div className="flex-1 min-w-0 flex flex-col gap-2.5 pt-1">
-              <StatusRow show={reached(step, "running")} busy={running}>
-                {running ? "Agent is running…" : "Agent wrote the firmware"}
-              </StatusRow>
-
-              <div
-                className="rounded-lg border bg-[var(--bg-root)] overflow-hidden transition-[border-color,opacity] duration-500"
-                style={{
-                  opacity: reached(step, "coding") ? 1 : 0.35,
-                  borderColor: step === "applied" ? "var(--term-success)" : "var(--border-main)",
-                }}
-              >
-                <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-[var(--border-main)] text-[10px] font-mono text-[var(--text-subtle)]">
-                  <FileCode2 size={11} /> src/main.cpp
-                </div>
-                <div className="relative">
-                  <pre className="invisible overflow-hidden text-[10.5px] sm:text-[11px] leading-[1.65] px-3 py-2.5 font-mono whitespace-pre">
-                    <code>{STORY_CODE}</code>
-                  </pre>
-                  <pre className="absolute inset-0 text-[10.5px] sm:text-[11px] leading-[1.65] px-3 py-2.5 font-mono whitespace-pre overflow-hidden text-[var(--text-main)]">
-                    <code>{renderSketch(codeShown)}</code>
-                  </pre>
-                  {/* The agent thinking, before the first line arrives. */}
-                  {step === "running" && (
-                    <div className="absolute inset-0 px-3 py-3.5 flex flex-col gap-3">
-                      {[52, 0, 78, 0, 44, 70, 64, 18].map((w, i) => (
-                        <div key={i} className={w ? "shimmer h-2 rounded" : "h-2"} style={{ width: `${w}%` }} />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <StatusRow show={reached(step, "applied")} busy={false}>
-                Firmware auto-applied to codespace
-              </StatusRow>
-              <StatusRow show={reached(step, "flashing")} busy={step === "flashing"}>
-                {on ? "Flashed to Arduino Uno" : "Flashing Arduino Uno…"}
-              </StatusRow>
-            </div>
+          <div className="hidden lg:block min-w-0 p-5">
+            {codeBlock}
           </div>
         </div>
       </div>
@@ -614,56 +657,100 @@ function AgentStory() {
 }
 
 // ---------------------------------------------------------------------------
-// Works on a phone — lines from a real flash on an Android phone, replayed as
-// they scrolled past in the IDE's terminal.
+// Works on a phone — a phone showing the IDE's Code section as it looks on
+// Android: the sketch on top, the terminal under it printing the flash line
+// by line with its timestamps. The lines are the ones a real flash on an
+// Android phone printed; it plays once, when it scrolls into view.
 // ---------------------------------------------------------------------------
-const PHONE_LOG: Array<{ text: string; tone: "info" | "ok" | "serial" }> = [
-  { text: "[USB] Transport: WebUSB.", tone: "info" },
-  { text: "[USB] Connected: USB serial device (FTDI FT232R).", tone: "ok" },
-  { text: "[COMPILER] Build succeeded!", tone: "ok" },
-  { text: "[FLASH] Bootloader responded.", tone: "info" },
-  { text: "[FLASH] Writing… 100%", tone: "info" },
-  { text: "[FLASH] Upload complete — the board is running your code.", tone: "ok" },
-  { text: "LED ON", tone: "serial" },
-  { text: "LED OFF", tone: "serial" },
-  { text: "LED ON", tone: "serial" },
+const PHONE_SKETCH = `void setup() {
+  Serial.begin(9600);
+  pinMode(LED, OUTPUT);
+}
+
+void loop() {
+  digitalWrite(LED, HIGH);
+  Serial.println("LED ON");
+  delay(1000);
+  digitalWrite(LED, LOW);
+  Serial.println("LED OFF");
+  delay(1000);
+}`;
+const PHONE_SKETCH_TOKENS = tokenizeSketch(PHONE_SKETCH);
+
+const PHONE_LOG: Array<{ at: string; text: string; tone: "info" | "ok" | "serial" }> = [
+  { at: "10:41:02", text: "[USB] Transport: WebUSB.", tone: "info" },
+  { at: "10:41:03", text: "[USB] Connected: USB serial device (FTDI FT232R).", tone: "ok" },
+  { at: "10:41:05", text: "[COMPILER] Sending code to cloud build server…", tone: "info" },
+  { at: "10:41:09", text: "[COMPILER] Build succeeded!", tone: "ok" },
+  { at: "10:41:10", text: "[FLASH] Resetting board into bootloader…", tone: "info" },
+  { at: "10:41:10", text: "[FLASH] Bootloader responded.", tone: "info" },
+  { at: "10:41:11", text: "[FLASH] Writing… 100%", tone: "info" },
+  { at: "10:41:12", text: "[FLASH] Upload complete — the board is running your code.", tone: "ok" },
+  { at: "10:41:13", text: "LED ON", tone: "serial" },
+  { at: "10:41:14", text: "LED OFF", tone: "serial" },
 ];
 
 function PhoneFlashMock() {
   return (
-    <div aria-hidden="true" className="mx-auto w-[240px] sm:w-[260px] rounded-[2.2rem] border border-[var(--border-light)] bg-[var(--bg-root)] p-2.5 shadow-2xl">
-      <div className="rounded-[1.7rem] overflow-hidden border border-[var(--border-main)] bg-[#0b0c10]">
-        <div className="flex justify-center pt-2 pb-1.5">
-          <span className="w-16 h-1.5 rounded-full bg-white/10" />
-        </div>
-        <div className="flex items-center gap-1.5 px-3 pb-2 border-b border-white/5">
-          <img src="/logo.png" alt="" className="w-4 h-4 rounded" />
-          <span className="text-[10px] font-semibold text-white/80">Joint-Agent IDE</span>
-          <span className="ml-auto flex items-center gap-1 text-[9px] text-emerald-400">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> USB
-          </span>
-        </div>
-        <div className="px-3 py-3 min-h-[214px] font-mono text-[9.5px] leading-[1.65]">
-          {PHONE_LOG.map((line, i) => (
-            <motion.div
-              key={i}
-              initial={{ opacity: 0, y: 4 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, margin: "-60px" }}
-              transition={{ duration: 0.25, delay: 0.15 + i * 0.28 }}
-              className="break-words"
-              style={{ color: line.tone === "ok" ? "#34d399" : line.tone === "serial" ? "#fbbf24" : "rgba(255,255,255,0.6)" }}
-            >
-              {line.text}
-            </motion.div>
-          ))}
-        </div>
-        {/* The chat box, with the prompt that session actually sent. */}
-        <div className="mx-3 mb-3 flex items-center gap-2 rounded-full border border-white/10 bg-white/5 pl-3 pr-1 py-1">
-          <span className="flex-1 truncate text-[10px] text-white/55">Blink only green</span>
-          <span className="w-5 h-5 rounded-full flex items-center justify-center text-white" style={{ background: "var(--gradient-accent)" }}>
-            <ArrowRight size={10} />
-          </span>
+    <div aria-hidden="true" className="relative mx-auto w-[248px] sm:w-[264px]">
+      {/* Side buttons */}
+      <span className="absolute -left-[3px] top-24 w-[3px] h-10 rounded-l bg-[var(--border-light)]" />
+      <span className="absolute -right-[3px] top-20 w-[3px] h-14 rounded-r bg-[var(--border-light)]" />
+      <div className="rounded-[2.6rem] border border-[var(--border-light)] bg-[#050507] p-[9px] shadow-2xl">
+        <div className="relative rounded-[2.1rem] overflow-hidden bg-[#0b0c10] aspect-[9/19.5] flex flex-col">
+          {/* Status bar with the camera cut-out */}
+          <div className="relative flex items-center justify-between px-5 pt-2.5 pb-1.5 text-[9px] font-semibold text-white/80 shrink-0">
+            <span>10:41</span>
+            <span className="absolute left-1/2 top-2 -translate-x-1/2 w-16 h-[18px] rounded-full bg-black" />
+            <span className="flex items-center gap-1">
+              <span className="w-3 h-1.5 rounded-[2px] border border-white/70" />
+            </span>
+          </div>
+          {/* App header */}
+          <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-white/5 shrink-0">
+            <img src="/logo.png" alt="" className="w-4 h-4 rounded" />
+            <span className="text-[10px] font-semibold text-white/80">Joint-Agent IDE</span>
+            <span className="ml-auto flex items-center gap-1 text-[9px] text-emerald-400">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> USB
+            </span>
+          </div>
+          {/* The code, on top */}
+          <div className="border-b border-white/5 shrink-0">
+            <div className="px-3 py-1 text-[8.5px] font-mono text-white/40 border-b border-white/5">main.cpp</div>
+            <pre className="px-3 py-2 font-mono text-[8.5px] leading-[1.55] text-white/85 whitespace-pre overflow-hidden">
+              <code>{renderSketch(PHONE_SKETCH.length, PHONE_SKETCH_TOKENS)}</code>
+            </pre>
+          </div>
+          {/* The terminal, under it, filling line by line */}
+          <div className="flex-1 min-h-0 flex flex-col">
+            <div className="px-3 py-1 text-[8.5px] font-mono uppercase tracking-wider text-white/40 border-b border-white/5">Terminal</div>
+            <div className="flex-1 min-h-0 overflow-hidden px-2.5 py-1.5 font-mono text-[8px] leading-[1.55] space-y-0.5">
+              {PHONE_LOG.map((line, i) => (
+                <motion.div
+                  key={i}
+                  initial={{ opacity: 0 }}
+                  whileInView={{ opacity: 1 }}
+                  viewport={{ once: true, margin: "-40px" }}
+                  transition={{ duration: 0.2, delay: 0.3 + i * 0.45 }}
+                  className="flex gap-1.5"
+                >
+                  <span className="text-white/30 shrink-0">{line.at}</span>
+                  <span
+                    className="min-w-0 break-words"
+                    style={{ color: line.tone === "ok" ? "#34d399" : line.tone === "serial" ? "#fbbf24" : "rgba(255,255,255,0.62)" }}
+                  >
+                    {line.text}
+                  </span>
+                </motion.div>
+              ))}
+            </div>
+          </div>
+          {/* The app's bottom bar, Code selected */}
+          <div className="grid grid-cols-3 border-t border-white/5 text-[8px] text-white/45 shrink-0 pb-2">
+            <span className="text-center py-1.5">Workspace</span>
+            <span className="text-center py-1.5">Agent</span>
+            <span className="text-center py-1.5 text-orange-400 bg-orange-500/10">Code</span>
+          </div>
         </div>
       </div>
     </div>
@@ -929,10 +1016,10 @@ export default function HomePage({
 
         {/* min-w-0 keeps the code pane's unwrapped lines from widening the
             page past a phone's viewport. */}
-        <motion.div className="min-w-0 mt-12 max-w-5xl mx-auto" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, delay: 0.15 }}>
+        <motion.div className="min-w-0 mt-12 max-w-4xl mx-auto" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, delay: 0.15 }}>
           <AgentStory />
           <p className="mt-3 text-center text-[11px] text-[var(--text-subtle)]">
-            One prompt, start to finish: the agent writes the sketch, applies it, flashes the Uno — and pin 4 lights up.
+            One prompt, start to finish: the agent writes the sketch, applies it, flashes the Uno — and pin 4 starts blinking.
           </p>
         </motion.div>
       </div>
@@ -1008,12 +1095,13 @@ export default function HomePage({
                 ))}
               </ul>
               <p className="mt-5 text-[11px] text-[var(--text-subtle)] leading-relaxed max-w-md">
-                iPhone browsers can't reach USB devices — an Apple limit, not ours.
+                iPhone browsers can't reach USB devices — an Apple limit, not ours. On a Mac, it works in
+                Chrome or Edge.
               </p>
             </motion.div>
             <div>
               <PhoneFlashMock />
-              <p className="mt-3 text-center text-[10px] text-[var(--text-subtle)]">A real flash, from an Android phone.</p>
+              <p className="mt-3 text-center text-[10px] text-[var(--text-subtle)]">The lines a real flash printed on an Android phone.</p>
             </div>
           </div>
         </div>

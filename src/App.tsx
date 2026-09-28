@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Sparkles, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw} from "lucide-react";
+import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Sparkles, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip } from "recharts";
@@ -24,6 +24,7 @@ import WelcomeModal from "./components/WelcomeModal";
 import FeedbackWidget from "./components/FeedbackWidget";
 import GithubPanel from "./components/GithubPanel";
 import WebPreviewPanel from "./components/WebPreviewPanel";
+import PlansModal from "./components/PlansModal";
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
 import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts, describeVisibleUsbDevices } from "./lib/webusbSerial";
@@ -50,10 +51,10 @@ import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlo
 
 
 /**
- * A serial line as the monitor panel shows it: what the board sent, without
- * the "[SERIAL] " tag. The tag stays in the terminal, where board output sits
- * among the app's own messages and needs telling apart; in the monitor every
- * line is board output, so the tag was only noise.
+ * A serial line as the monitor panel shows it: exactly what the board sent.
+ * Board output is no longer tagged "[SERIAL] " anywhere — its own colour sets
+ * it apart from the app's messages in the terminal — but a line logged by an
+ * older build may still carry the tag, so it is stripped here too.
  */
 const monitorText = (text: string): string => text.replace(/^\[SERIAL\] /, "");
 
@@ -339,6 +340,13 @@ export default function App() {
    * chooser. Only taps on the workspace itself enter fullscreen.
    *
    * iPhone Safari has no element fullscreen, so there this does nothing.
+   *
+   * Typing leaves fullscreen. Android does not resize a fullscreen page for
+   * the keyboard, so the keyboard covered the chat box: it was there, under
+   * the keys, and reappeared the moment fullscreen was exited by hand. Now a
+   * text field taking focus exits fullscreen itself, the page resizes above
+   * the keyboard as it always did outside fullscreen, and the next tap on
+   * the workspace once typing is done goes back in.
    */
   useEffect(() => {
     // A touch-only device, in either orientation — not just a narrow window,
@@ -350,16 +358,33 @@ export default function App() {
     const request = root.requestFullscreen || root.webkitRequestFullscreen;
     if (!request) return;
     const INTERACTIVE = 'button, a, input, textarea, select, label, [role="button"], [contenteditable="true"]';
+    const TEXT_ENTRY = 'textarea, [contenteditable="true"], input:not([type="button"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="submit"]):not([type="range"]):not([type="color"])';
+    const isFullscreen = () => Boolean(doc.fullscreenElement || doc.webkitFullscreenElement);
     const onTap = (e: MouseEvent) => {
-      if (doc.fullscreenElement || doc.webkitFullscreenElement) return;
+      if (isFullscreen()) return;
       const target = e.target as Element | null;
       if (target?.closest?.(INTERACTIVE)) return;
+      // Still typing: going back in now would put the keyboard over the field.
+      if ((document.activeElement as Element | null)?.matches?.(TEXT_ENTRY)) return;
       try {
         Promise.resolve(request.call(root, { navigationUI: "hide" })).catch(() => { /* refused: stay as is */ });
       } catch { /* refused: stay as is */ }
     };
+    const onFocusIn = (e: FocusEvent) => {
+      if (!isFullscreen()) return;
+      if (!(e.target as Element | null)?.matches?.(TEXT_ENTRY)) return;
+      const exit = doc.exitFullscreen || doc.webkitExitFullscreen;
+      if (!exit) return;
+      try {
+        Promise.resolve(exit.call(doc)).catch(() => { /* already out */ });
+      } catch { /* already out */ }
+    };
     document.addEventListener("click", onTap);
-    return () => document.removeEventListener("click", onTap);
+    document.addEventListener("focusin", onFocusIn);
+    return () => {
+      document.removeEventListener("click", onTap);
+      document.removeEventListener("focusin", onFocusIn);
+    };
   }, []);
   const [selectedPane, setSelectedPane] = useState<MobilePane>("editor");
   const [appMode, setAppMode] = useState<AppMode>("agentic");
@@ -369,7 +394,85 @@ export default function App() {
   // modes while it's selected would leave every pane hidden (blank screen).
   const mobilePane: MobilePane =
     selectedPane === "agent" && appMode !== "agentic" ? "editor" : selectedPane;
-  const setMobilePane = setSelectedPane;
+  // Which way the last section change went, so the new one slides in from
+  // that side. Set by swipes and by the bottom bar alike.
+  const [paneDirection, setPaneDirection] = useState<"next" | "prev" | null>(null);
+  const mobilePaneOrder: MobilePane[] = appMode === "agentic" ? ["files", "agent", "editor"] : ["files", "editor"];
+  const mobilePaneRef = useRef<MobilePane>(mobilePane);
+  mobilePaneRef.current = mobilePane;
+  const setMobilePane = (pane: MobilePane) => {
+    const from = mobilePaneOrder.indexOf(mobilePaneRef.current);
+    const to = mobilePaneOrder.indexOf(pane);
+    if (from !== to && from >= 0 && to >= 0) setPaneDirection(to > from ? "next" : "prev");
+    setSelectedPane(pane);
+  };
+  const isNarrowRef = useRef(isNarrow);
+  isNarrowRef.current = isNarrow;
+  // Opening the code from the agent on a phone gives the editor most of the
+  // screen: the terminal drops to a strip, until a dock is opened again.
+  const [compactDock, setCompactDock] = useState(false);
+  const [isPlansOpen, setIsPlansOpen] = useState(false);
+  const [isPluginsOpen, setIsPluginsOpen] = useState(false);
+  const [isBoardMenuOpen, setIsBoardMenuOpen] = useState(false);
+  // The profile menu opens from the sidebar now, which a resizable panel
+  // clips; it is placed on the page from where its row sits.
+  const [profileMenuAt, setProfileMenuAt] = useState<{ left: number; top: number } | null>(null);
+  /**
+   * The account's plan as the server reports it: "pro" (subscribed or
+   * granted), "unmetered", "free", or "lite" (free with the free tokens
+   * spent). Kept apart from `tier`, which the chat stream overwrites with
+   * "full"/"lite" and so cannot say whether someone is on PRO. Null until the
+   * server has answered, so a PRO user is never shown an upgrade in between.
+   */
+  const [accountTier, setAccountTier] = useState<string | null>(null);
+  const isPro = accountTier === "pro" || accountTier === "unmetered";
+
+  /**
+   * Swipe between the phone's sections: left for the next one, right for the
+   * previous, in the bottom bar's order. Only a quick, clearly sideways flick
+   * counts, so scrolling a chat or the terminal never switches sections by
+   * accident. A code line or terminal line that can still scroll sideways gets
+   * the swipe first, and the panel resize bar is left alone.
+   */
+  const swipeRef = useRef<{ x: number; y: number; t: number; scroller: HTMLElement | null; scrollLeft: number; skip: boolean } | null>(null);
+  const horizontalScrollerOf = (el: HTMLElement | null, stop: HTMLElement): HTMLElement | null => {
+    for (let node = el; node && node !== stop; node = node.parentElement) {
+      if (node.scrollWidth > node.clientWidth + 1) {
+        const overflowX = getComputedStyle(node).overflowX;
+        if (overflowX === "auto" || overflowX === "scroll") return node;
+      }
+    }
+    return null;
+  };
+  const handleMainTouchStart = (e: React.TouchEvent<HTMLElement>) => {
+    if (!isNarrow || e.touches.length !== 1) { swipeRef.current = null; return; }
+    const touch = e.touches[0];
+    const target = e.target as HTMLElement;
+    const scroller = horizontalScrollerOf(target, e.currentTarget);
+    swipeRef.current = {
+      x: touch.clientX, y: touch.clientY, t: Date.now(),
+      scroller, scrollLeft: scroller?.scrollLeft ?? 0,
+      skip: Boolean(target.closest?.('[role="separator"], [data-separator], [data-no-swipe]')),
+    };
+  };
+  const handleMainTouchEnd = (e: React.TouchEvent<HTMLElement>) => {
+    const start = swipeRef.current;
+    swipeRef.current = null;
+    if (!start || start.skip || e.changedTouches.length !== 1) return;
+    const touch = e.changedTouches[0];
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.8 || Date.now() - start.t > 700) return;
+    const sc = start.scroller;
+    if (sc) {
+      // Finger moving left reveals more to the right, and the reverse.
+      const canGoFurther = dx < 0 ? start.scrollLeft + sc.clientWidth < sc.scrollWidth - 1 : start.scrollLeft > 0;
+      if (canGoFurther) return;
+    }
+    const at = mobilePaneOrder.indexOf(mobilePane);
+    const next = mobilePaneOrder[at + (dx < 0 ? 1 : -1)];
+    if (next) setMobilePane(next);
+  };
   const [isWalletModalOpen, setIsWalletModalOpen] = useState(false);
   const [isEdgeImpulseModalOpen, setIsEdgeImpulseModalOpen] = useState(false);
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState(false);
@@ -548,7 +651,7 @@ export default function App() {
         const res = await fetch("/api/quota/status", { headers: { Authorization: `Bearer ${idToken}` } });
         if (!res.ok) return;
         const status = await res.json();
-        if (status.tier) setTier(status.tier);
+        if (status.tier) { setTier(status.tier); setAccountTier(status.tier); }
         if (status.blocked) {
           const info: QuotaBlockedInfo = { tier: status.subscriptionStatus === "active" ? "paid" : "free", tokensUsed: status.tokensUsed, tokenCap: status.tokenCap };
           setQuotaBlockInfo(info);
@@ -580,6 +683,7 @@ export default function App() {
         if (!res.ok) return;
         const status = await res.json();
         setUsageInfo({ tokensUsed: status.tokensUsed, tokenCap: status.tokenCap, subscriptionStatus: status.subscriptionStatus });
+        if (status.tier) setAccountTier(status.tier);
       } catch {
         // Non-fatal — the dropdown just won't show a usage figure this time.
       }
@@ -673,6 +777,10 @@ export default function App() {
     }
 
     const handleConnect = (e: any) => {
+      // A port Chrome itself reports as not connected is only a remembered
+      // permission — an FT232R, which carries a serial number, is remembered
+      // after it is unplugged, and was then shown as connected.
+      if (e.target?.connected === false) return;
       if (e.target && e.target.getInfo) {
         const info = e.target.getInfo();
         const vendorId = info.usbVendorId;
@@ -745,7 +853,7 @@ export default function App() {
       (async () => {
         try {
           const ports: any[] = await serial.getPorts();
-          const port = ports.find((p) => { try { return p.getInfo().usbVendorId !== 0x8086; } catch { return false; } });
+          const port = ports.find((p) => { try { return p.getInfo().usbVendorId !== 0x8086 && p.connected !== false; } catch { return false; } });
           if (port && !mcuPluggedInRef.current) handleConnect({ target: port });
         } catch { /* nothing granted, or getPorts unavailable */ }
       })();
@@ -1096,7 +1204,7 @@ export default function App() {
         try {
           const msg = JSON.parse(event.data);
           if (msg.type === 'serial_data' || msg.type === 'serial_raw') {
-            logToTerminal(`[SERIAL] ${msg.data}`, "serial");
+            logToTerminal(String(msg.data), "serial");
           } else if (msg.type === 'serial_error') {
             logToTerminal(`[SERIAL ERROR] ${msg.data}`, "error");
           } else if (msg.type === 'serial_disconnected') {
@@ -1756,7 +1864,7 @@ export default function App() {
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
     const emit = (line: string) => {
       const clean = printable(line).trim();
-      if (clean) logToTerminal(`[SERIAL] ${clean}`, "serial");
+      if (clean) logToTerminal(clean, "serial");
     };
     const scheduleFlush = () => {
       if (flushTimer) clearTimeout(flushTimer);
@@ -2132,6 +2240,9 @@ export default function App() {
     let assistantContent = "";
     let projectUpdate: any = null;
     let pendingCommand: string | null = null;
+    // Whether this request folded the earlier conversation into a summary:
+    // the one thing that makes the conversation genuinely smaller.
+    let compactedThisRequest = false;
     let started = false;
     const ensureStarted = () => {
       if (started) return;
@@ -2170,8 +2281,18 @@ export default function App() {
           } else if (event.type === "tier") {
             setTier(event.tier);
           } else if (event.type === "context") {
-            setContextUsage({ used: event.used, limit: event.limit });
+            // The model counts the whole request, and a plan-mode request goes
+            // out without the tool definitions and with a shorter instruction
+            // than a build request — so the same conversation read 11%, then
+            // 8% on the next plan question. A conversation only grows, so the
+            // meter keeps its high-water mark and only drops when the earlier
+            // part is summarized (or the project changes, which clears it).
+            const next = { used: event.used, limit: event.limit };
+            setContextUsage((prev) =>
+              !compactedThisRequest && prev && prev.limit === next.limit && next.used < prev.used ? prev : next
+            );
           } else if (event.type === "context_compacted") {
+            compactedThisRequest = true;
             // The server folded these messages into a summary before answering.
             // Keep them on screen, mark them, and put the summary after them.
             const folded = new Set<string>(event.compactedIds || []);
@@ -2227,6 +2348,12 @@ export default function App() {
       } else {
         if (projectUpdate && appMode === "agentic") {
           handleApplyProjectUpdate(projectUpdate);
+          // Auto-applied: on a phone, show the code it just wrote. Only here —
+          // a plan, an answer or a command leaves the user in the chat.
+          if (isNarrowRef.current && projectUpdate.code) {
+            setActiveTab("code");
+            setMobilePane("editor");
+          }
         }
 
         if (projectUpdate?.code && effectiveMode === "implement") {
@@ -2278,6 +2405,17 @@ export default function App() {
     if (update.connections) setConnections(update.connections);
 
     logToTerminal("[AI AGENT] Workspace Blueprints and Source Code Updated.", "success");
+  };
+
+  /** "Open Code" on a reply: put that code in the editor and, on a phone,
+   *  go to it with the terminal down to a strip so the code gets the screen. */
+  const handleOpenCode = (codeToOpen?: string) => {
+    if (codeToOpen) handleApplyProjectUpdate({ code: codeToOpen });
+    setActiveTab("code");
+    if (isNarrow) {
+      setCompactDock(true);
+      setMobilePane("editor");
+    }
   };
 
   const DEFAULT_DESCRIPTION = "A standard flashing LED circuit safely wired through a 220 Ohm current-limiting resistor. Ideal for validating MCU state loops.";
@@ -2522,6 +2660,8 @@ export default function App() {
               clearLastKnownBlock();
               setQuotaBlockInfo(null);
               setIsUpgradeModalOpen(false);
+              setIsPlansOpen(false);
+              setAccountTier("pro");
               logToTerminal("[BILLING] Subscription active. Thanks for upgrading!", "success");
             } else {
               const err = await verifyRes.json().catch(() => ({}));
@@ -2542,46 +2682,96 @@ export default function App() {
     }
   };
 
+  /** Give the board back and forget it: the header's Disconnect on every layout. */
+  const forgetBoard = () => {
+    // Give the port back. The monitor that starts after a flash held it
+    // open, so Detect Board's own open() then failed with "The port is
+    // already open" until the cable was pulled.
+    void (async () => {
+      await stopSerialMonitor();
+      if (activePortRef.current) {
+        try { await activePortRef.current.close(); } catch { /* already closed */ }
+        activePortRef.current = null;
+      }
+    })();
+    setDetectedBoard(null);
+    setDetectedBoardId(null);
+    setDetectedMcu(null);
+    setMcuPluggedIn(false);
+    webSerialPortRef.current = null;
+    logToTerminal("[USB] Connection disconnected/forgotten. You can scan again.", "info");
+  };
+
+  // A phone section slides in from the side it came from. Sections mount
+  // fresh on every switch, so the animation plays once per change.
+  const paneEnterClass = isNarrow && paneDirection ? (paneDirection === "next" ? "pane-in-next" : "pane-in-prev") : "";
+
+  /** Agent-Mode / Manual-Mode. Full width on a phone, where it has its own row. */
+  const modeSwitcher = (fullWidth: boolean) => (
+    <div className={`flex bg-[var(--bg-root)] p-[3px] rounded-lg border border-[var(--border-main)] ${fullWidth ? "w-full" : "shrink-0"}`}>
+      {([
+        { mode: "agentic" as const, label: "Agent-Mode", Icon: Bot, on: "bg-[var(--accent-primary-soft)] text-[var(--accent-primary)]" },
+        { mode: "manual" as const, label: "Manual-Mode", Icon: PenTool, on: "bg-[var(--accent-secondary-soft)] text-[var(--accent-secondary)]" },
+      ]).map(({ mode, label, Icon, on }) => (
+        <button
+          key={mode}
+          onClick={() => setAppMode(mode)}
+          aria-pressed={appMode === mode}
+          className={`flex items-center justify-center gap-1.5 rounded-md font-semibold tracking-wide transition-all duration-200 ${
+            fullWidth ? "flex-1 min-h-[40px] text-[13px]" : "px-4 min-h-[32px] text-[12px]"
+          } ${appMode === mode ? `${on} shadow-sm` : "text-[var(--text-muted)] hover:text-[var(--text-main)]"}`}
+        >
+          <Icon size={fullWidth ? 16 : 14} />
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+
   return (
     <div className="app-shell h-full bg-[var(--bg-root)] text-[var(--text-main)] flex flex-col antialiased overflow-hidden">
       {/* Universal Header — Glassmorphism */}
-      <header className="h-12 border-b border-[var(--border-main)] header-glass px-2 sm:px-4 flex items-center justify-between shrink-0 z-30">
-        <div className="flex items-center gap-1.5 sm:gap-3">
-          {/* Logo */}
-          <div className="flex items-center gap-2.5 logo-accent cursor-default select-none">
-            <img src="/logo.png" alt="Joint-Agent IDE" className="w-7 h-7 rounded-lg shrink-0 shadow-md" />
-            <div className="flex flex-col hidden sm:flex">
-              <h1 className="font-display font-bold text-[13px] text-[var(--text-main)] tracking-wide leading-tight flex items-center gap-1.5">
-                Joint-Agent <span className="gradient-text">IDE</span>
-                <span className="text-[8px] font-mono font-semibold text-[var(--text-subtle)] bg-[var(--bg-surface)] border border-[var(--border-main)] rounded px-1 py-px leading-none">
-                  v1.0
-                </span>
-              </h1>
-              <p className="text-[8px] text-[var(--text-subtle)] font-mono tracking-[0.2em] uppercase">IoT · Blockchain · AI</p>
+      <header className="border-b border-[var(--border-main)] header-glass shrink-0 z-30">
+        <div className="h-12 px-2 sm:px-4 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+          {isNarrow ? (
+            // On a phone the plan takes the logo's place: a way up for free
+            // accounts, a quiet badge for PRO ones — and nothing until the
+            // server has said which, so PRO never flashes an upgrade.
+            accountTier === null ? null : isPro ? (
+              <span
+                className="pro-electric flex items-center h-9 px-2.5 rounded-lg text-[15px] border border-orange-500/40 bg-orange-500/10 select-none"
+                title="You're on PRO"
+              >
+                PRO
+              </span>
+            ) : (
+              <button
+                onClick={() => setIsPlansOpen(true)}
+                className="btn-lift flex items-center gap-1.5 h-9 px-2.5 rounded-lg text-[11px] font-bold text-white shadow-md whitespace-nowrap"
+                style={{ background: "var(--gradient-hero)", boxShadow: "var(--shadow-glow)" }}
+              >
+                <Rocket size={15} className="rocket-blaze" /> Get PRO
+              </button>
+            )
+          ) : (
+            <div className="flex items-center gap-2.5 logo-accent cursor-default select-none">
+              <img src="/logo.png" alt="Joint-Agent IDE" className="w-7 h-7 rounded-lg shrink-0 shadow-md" />
+              <div className="flex flex-col">
+                <h1 className="font-display font-bold text-[13px] text-[var(--text-main)] tracking-wide leading-tight flex items-center gap-1.5">
+                  Joint-Agent <span className="gradient-text">IDE</span>
+                  <span className="text-[8px] font-mono font-semibold text-[var(--text-subtle)] bg-[var(--bg-surface)] border border-[var(--border-main)] rounded px-1 py-px leading-none">
+                    v1.0
+                  </span>
+                </h1>
+                <p className="text-[8px] text-[var(--text-subtle)] font-mono tracking-[0.2em] uppercase">IoT · Blockchain · AI</p>
+              </div>
             </div>
-          </div>
+          )}
 
-          <div className="h-5 w-px bg-[var(--border-main)] mx-1 hidden sm:block"></div>
+          {!isNarrow && <div className="h-5 w-px bg-[var(--border-main)] mx-1"></div>}
 
-          {/* Mode Switcher — Pill Style */}
-          <div className="flex bg-[var(--bg-root)] p-[3px] rounded-lg border border-[var(--border-main)] shrink-0">
-            <button
-              onClick={() => setAppMode("agentic")}
-              className={`flex items-center gap-1.5 px-3 py-1.5 sm:py-1 min-h-[34px] sm:min-h-0 rounded-md text-[10px] font-semibold tracking-wide uppercase transition-all duration-200 ${appMode === "agentic" ? "bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] shadow-sm" : "text-[var(--text-muted)] hover:text-[var(--text-main)]"
-                }`}
-            >
-              <Bot size={11} className={appMode === "agentic" ? "text-[var(--accent-primary)]" : ""} />
-              <span className="hidden sm:inline">Agent</span>
-            </button>
-            <button
-              onClick={() => setAppMode("manual")}
-              className={`flex items-center gap-1.5 px-3 py-1.5 sm:py-1 min-h-[34px] sm:min-h-0 rounded-md text-[10px] font-semibold tracking-wide uppercase transition-all duration-200 ${appMode === "manual" ? "bg-[var(--accent-secondary-soft)] text-[var(--accent-secondary)] shadow-sm" : "text-[var(--text-muted)] hover:text-[var(--text-main)]"
-                }`}
-            >
-              <PenTool size={11} className={appMode === "manual" ? "text-[var(--accent-secondary)]" : ""} />
-              <span className="hidden sm:inline">Manual</span>
-            </button>
-          </div>
+          {!isNarrow && modeSwitcher(false)}
         </div>
 
         {/* Global Controls */}
@@ -2596,7 +2786,7 @@ export default function App() {
                 onChange={(e) => setCurrentProjectName(e.target.value)}
                 onBlur={(e) => handleRenameProject(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-                className="bg-transparent border-none outline-none text-[11px] font-medium text-[var(--text-main)] w-full max-w-24 sm:max-w-36 min-w-0 py-1.5 sm:py-0"
+                className="bg-transparent border-none outline-none text-[11px] font-medium text-[var(--text-main)] w-full max-w-36 sm:max-w-36 min-w-0 py-1.5 sm:py-0"
                 placeholder="Project name"
                 title="Click to rename this project"
               />
@@ -2614,149 +2804,175 @@ export default function App() {
             {theme === "light" ? <Moon size={14} /> : <Sun size={14} />}
           </button>
 
-          {(detectedBoard && mcuPluggedIn) ? (
-            <div className="flex items-center gap-2 bg-green-500/5 px-2.5 py-1 rounded-lg border border-green-500/20 min-w-0 animate-slide-up">
-              <div className="relative w-1.5 h-1.5 rounded-full bg-green-500 status-online"></div>
-              <span className="text-[10px] font-mono text-green-400 flex items-center gap-1 tracking-wide min-w-0">
-                <Usb size={10} className="shrink-0" />
-                <span className="truncate">{detectedBoard}</span>
-              </span>
+          {isNarrow ? (
+            // A square that never grows: the project name keeps its room.
+            // Connected, it turns green and pulses; a tap shows which board
+            // and offers to disconnect it.
+            <div className="relative shrink-0">
+              {(detectedBoard && mcuPluggedIn) ? (
+                <button
+                  onClick={() => setIsBoardMenuOpen((open) => !open)}
+                  className="status-online w-9 h-9 flex items-center justify-center rounded-lg border border-green-500/50 bg-green-500/15 text-green-400 transition"
+                  aria-label={`Board connected: ${detectedBoard}`}
+                  title={detectedBoard}
+                >
+                  <Usb size={16} />
+                </button>
+              ) : (
+                <button
+                  onClick={handleAutoDetect}
+                  className="w-9 h-9 flex items-center justify-center rounded-lg border border-[var(--border-main)] bg-[var(--bg-surface)] text-[var(--text-muted)] transition"
+                  aria-label="Detect board"
+                  title="Detect board"
+                >
+                  <Usb size={16} />
+                </button>
+              )}
+              {isBoardMenuOpen && detectedBoard && mcuPluggedIn && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setIsBoardMenuOpen(false)} />
+                  <div className="absolute right-0 mt-2 w-64 z-50 bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-lg p-3 animate-slide-up" style={{ boxShadow: 'var(--shadow-panel)' }}>
+                    <div className="flex items-start gap-2">
+                      <span className="mt-1 w-2 h-2 rounded-full bg-green-500 status-online shrink-0" />
+                      <p className="text-[11px] font-mono text-green-400 leading-snug break-words">
+                        {detectedBoard.replace(/^Connected:\s*/, "")}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => { setIsBoardMenuOpen(false); forgetBoard(); }}
+                      className="mt-3 w-full flex items-center justify-center gap-1.5 py-2 rounded-md border border-[var(--border-main)] text-xs text-[var(--text-muted)] hover:text-red-400 hover:border-red-500/40 transition"
+                    >
+                      <X size={12} /> Disconnect
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (detectedBoard && mcuPluggedIn) ? (
+            // Just the icon, green and pulsing. Hovering (or tabbing to it)
+            // shows which board, with a small × that disconnects it. The
+            // details float below rather than widening the header, so nothing
+            // beside it moves.
+            <div className="group relative shrink-0">
               <button
-                onClick={() => {
-                  // Give the port back. The monitor that starts after a flash
-                  // held it open, so Detect Board's own open() then failed
-                  // with "The port is already open" until the cable was pulled.
-                  void (async () => {
-                    await stopSerialMonitor();
-                    if (activePortRef.current) {
-                      try { await activePortRef.current.close(); } catch { /* already closed */ }
-                      activePortRef.current = null;
-                    }
-                  })();
-                  setDetectedBoard(null);
-                  setDetectedBoardId(null);
-                  setDetectedMcu(null);
-                  setMcuPluggedIn(false);
-                  webSerialPortRef.current = null;
-                  logToTerminal("[USB] Connection disconnected/forgotten. You can scan again.", "info");
-                }}
-                className="p-0.5 rounded hover:bg-red-500/10 text-[var(--text-muted)] hover:text-red-400 transition"
-                title="Disconnect Board"
+                className="status-online w-8 h-8 flex items-center justify-center rounded-lg border border-green-500/50 bg-green-500/15 text-green-400 transition"
+                aria-label={`Board connected: ${detectedBoard}`}
               >
-                <X size={10} />
+                <Usb size={15} />
               </button>
+              <div className="absolute right-0 top-full pt-1.5 z-50 hidden group-hover:block group-focus-within:block">
+                <div className="flex items-center gap-2 whitespace-nowrap rounded-lg border border-[var(--border-main)] bg-[var(--bg-panel)] pl-3 pr-1.5 py-1.5" style={{ boxShadow: 'var(--shadow-panel)' }}>
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
+                  <span className="text-[10px] font-mono text-green-400">{detectedBoard.replace(/^Connected:\s*/, "")}</span>
+                  <button
+                    onClick={forgetBoard}
+                    className="w-5 h-5 flex items-center justify-center rounded text-[var(--text-muted)] hover:text-red-400 hover:bg-red-500/10 transition"
+                    aria-label="Disconnect board"
+                    title="Disconnect"
+                  >
+                    <X size={11} />
+                  </button>
+                </div>
+              </div>
             </div>
           ) : (
             <button
               onClick={handleAutoDetect}
-              className="btn-lift flex items-center gap-1.5 bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] px-2.5 py-1.5 sm:py-1 min-h-[34px] sm:min-h-0 rounded-lg border border-[var(--border-main)] text-[10px] font-medium text-[var(--text-muted)] hover:text-[var(--text-main)] transition shrink-0"
+              className="btn-lift flex items-center gap-1.5 bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] px-2.5 py-1 rounded-lg border border-[var(--border-main)] text-[10px] font-medium text-[var(--text-muted)] hover:text-[var(--text-main)] transition shrink-0"
             >
               <Cpu size={12} className="text-[var(--accent-secondary)]" />
-              <span className="hidden sm:inline">Detect Board</span>
+              <span>Detect Board</span>
             </button>
           )}
 
           </div>
-
-          {/* 3-Dot Menu — deliberately a sibling of the scroll container above,
-              not a child of it. overflow-x-auto makes the browser compute
-              overflow-y as auto too, which clips this dropdown (it hangs below
-              the 48px header) to invisibility — the menu opens but nothing is
-              visible. Keeping it outside lets it overlay freely. */}
-          <div className="relative shrink-0">
-            <button
-              onClick={handleOpenProfileMenu}
-              className="toolbar-btn p-2.5 sm:p-1.5 rounded-lg text-[var(--text-muted)] flex items-center gap-1.5"
-              title={user?.email || undefined}
-            >
-              {user?.photoURL ? (
-                <img src={user.photoURL} alt="" referrerPolicy="no-referrer" className="w-5 h-5 rounded-full" />
-              ) : (
-                <span
-                  className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[9px] font-bold shrink-0"
-                  style={{ background: 'var(--gradient-hero)' }}
-                >
-                  {(user?.displayName || user?.email || '?').charAt(0).toUpperCase()}
-                </span>
-              )}
-              <MoreVertical size={14} />
-            </button>
-            {isMenuOpen && (
-              <>
-                <div className="fixed inset-0 z-40" onClick={() => setIsMenuOpen(false)} />
-                <div className="absolute right-0 mt-2 w-52 bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-lg z-50 py-1 animate-slide-up" style={{ boxShadow: 'var(--shadow-panel)' }}>
-                  {user && (
-                    <div className="px-3 py-2 mb-1 border-b border-[var(--border-main)]">
-                      <p className="text-xs font-medium text-[var(--text-main)] truncate">{user.displayName || "Signed in"}</p>
-                      <p className="text-[10px] text-[var(--text-muted)] truncate">{user.email}</p>
-                    </div>
-                  )}
-                  {usageInfo && (
-                    <div className="px-3 py-2 mb-1 border-b border-[var(--border-main)]">
-                      <div className="flex items-center gap-1.5 text-[10px] text-[var(--text-muted)] mb-1">
-                        <Activity size={11} />
-                        <span>{usageInfo.subscriptionStatus === "active" ? "This cycle" : "Free tokens"}</span>
-                        <span className="ml-auto text-[var(--text-main)] font-medium">{usageInfo.tokensUsed.toLocaleString()} / {usageInfo.tokenCap.toLocaleString()}</span>
-                      </div>
-                      <div className="h-1 rounded-full bg-[var(--bg-hover)] overflow-hidden">
-                        <div
-                          className="h-full rounded-full"
-                          style={{ width: `${Math.min(100, (usageInfo.tokensUsed / usageInfo.tokenCap) * 100)}%`, background: 'var(--gradient-hero)' }}
-                        />
-                      </div>
-                      {usageInfo.subscriptionStatus === "active" ? (
-                        <button
-                          onClick={handleCancelSubscription}
-                          disabled={isCancelingSubscription}
-                          className="w-full flex items-center gap-1.5 mt-2 text-[10px] text-[var(--text-muted)] hover:text-red-400 transition disabled:opacity-50"
-                        >
-                          <X size={11} />
-                          {isCancelingSubscription ? "Canceling…" : "Cancel Subscription"}
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => { setIsMenuOpen(false); setIsUpgradeModalOpen(true); }}
-                          className="w-full flex items-center gap-1.5 mt-2 text-[10px] font-medium gradient-text hover:opacity-80 transition"
-                        >
-                          <Sparkles size={11} className="text-orange-500" />
-                          Upgrade — $7/mo
-                        </button>
-                      )}
-                    </div>
-                  )}
-                  <button
-                    onClick={() => { setIsMenuOpen(false); setFeedbackOpen(true); }}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition rounded-md mx-1 sm:hidden"
-                  >
-                    <MessageSquarePlus size={14} className="text-[var(--text-muted)]" />
-                    Send feedback
-                  </button>
-                  <button
-                    onClick={() => { setIsMenuOpen(false); signOut(); }}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition rounded-md mx-1"
-                  >
-                    <LogOut size={13} className="text-red-400" />
-                    Sign Out
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
         </div>
+        </div>
+
+        {/* On a phone the modes get a row of their own: labelled, full width,
+            and big enough to hit without aiming. */}
+        {isNarrow && <div className="px-2 pb-2">{modeSwitcher(true)}</div>}
       </header>
 
       {/* Main Workspace Layout with Resizable Panels */}
-      <main className="flex-1 flex overflow-hidden">
+      <main
+        className="flex-1 flex overflow-hidden"
+        onTouchStart={handleMainTouchStart}
+        onTouchEnd={handleMainTouchEnd}
+        onTouchCancel={() => { swipeRef.current = null; }}
+      >
         <PanelGroup orientation="horizontal">
 
           {/* Left Sidebar: File Explorer */}
           {(!isNarrow || mobilePane === "files") && (
           <Panel defaultSize={15} minSize={1}>
-            <aside className="w-full h-full bg-[var(--bg-panel)] border-r border-[var(--border-main)] flex flex-col shrink-0">
+            <aside className={`w-full h-full bg-[var(--bg-panel)] border-r border-[var(--border-main)] flex flex-col shrink-0 ${paneEnterClass}`}>
+              {/* The account, above the projects: who is signed in, and the
+                  menu with usage, the plan and sign-out. */}
+              {user && (
+                <div className="p-1.5 border-b border-[var(--border-main)] shrink-0 flex items-center gap-1">
+                  {/* Name and plan share a line when the sidebar has room; on a
+                      narrow desktop sidebar the plan wraps under the name
+                      rather than squeezing it out of sight. */}
+                  <div className="flex-1 min-w-0 flex flex-wrap items-center gap-x-1">
+                  <button
+                    onClick={(e) => {
+                      const r = e.currentTarget.getBoundingClientRect();
+                      setProfileMenuAt({ left: r.left + 4, top: r.bottom + 4 });
+                      handleOpenProfileMenu();
+                    }}
+                    className="min-w-0 max-w-full flex items-center gap-2.5 px-2 py-2 rounded-md hover:bg-[var(--bg-hover)] transition text-left"
+                    title={user.email || undefined}
+                  >
+                    {user.photoURL ? (
+                      <img src={user.photoURL} alt="" referrerPolicy="no-referrer" className="w-7 h-7 rounded-full shrink-0" />
+                    ) : (
+                      <span
+                        className="w-7 h-7 rounded-full flex items-center justify-center text-white text-[11px] font-bold shrink-0"
+                        style={{ background: 'var(--gradient-hero)' }}
+                      >
+                        {(user.displayName || user.email || '?').charAt(0).toUpperCase()}
+                      </span>
+                    )}
+                    <span className="min-w-0">
+                      <span className="block text-[12px] font-semibold text-[var(--text-main)] truncate">
+                        {user.displayName || user.email?.split("@")[0] || "Your account"}
+                      </span>
+                      {user.email && <span className="block text-[10px] text-[var(--text-subtle)] truncate">{user.email}</span>}
+                    </span>
+                  </button>
+                  {/* Beside the name: the way up for a free account, the plan
+                      itself for a PRO one — never an upgrade offer to PRO. */}
+                  {isPro ? (
+                    <span className="pro-electric text-[13px] px-1.5 shrink-0 select-none" title="You're on PRO">PRO</span>
+                  ) : accountTier !== null ? (
+                    <button
+                      onClick={() => setIsPlansOpen(true)}
+                      className="flex items-center gap-1 px-1.5 py-1.5 rounded-md text-[11px] font-extrabold text-[var(--accent-primary)] hover:bg-[var(--accent-primary-soft)] transition shrink-0 whitespace-nowrap"
+                    >
+                      <Rocket size={12} className="rocket-blaze" /> Upgrade to Pro
+                    </button>
+                  ) : null}
+                  </div>
+                  <button
+                    onClick={(e) => {
+                      const r = e.currentTarget.getBoundingClientRect();
+                      setProfileMenuAt({ left: r.left - 180, top: r.bottom + 4 });
+                      handleOpenProfileMenu();
+                    }}
+                    className="p-2 rounded-md text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)] transition shrink-0"
+                    aria-label="Account menu"
+                  >
+                    <MoreVertical size={14} />
+                  </button>
+                </div>
+              )}
+
+              <div className="flex-1 overflow-y-auto terminal-scrollbar">
               <div className="px-3 py-2.5 text-[9px] uppercase text-[var(--text-subtle)] font-bold tracking-[0.2em] border-b border-[var(--border-main)]">
                 Projects
               </div>
-              <div className="flex-1 overflow-y-auto py-1.5 space-y-0.5 terminal-scrollbar">
+              <div className="py-1.5 space-y-0.5">
                 <button
                   onClick={() => setShowNewProjectModal(true)}
                   className="w-[calc(100%-0.75rem)] text-left mx-1.5 px-2 py-1.5 flex items-center gap-2 text-[11px] text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] cursor-pointer transition rounded-md"
@@ -2792,11 +3008,61 @@ export default function App() {
                   onChange={handleImportFileSelected}
                   className="hidden"
                 />
+              </div>
 
-                {/* Recent work. Sits directly under the project actions so a
-                    returning user can reopen something without going through a
-                    modal — the sidebar was otherwise empty space. */}
-                <div className="pt-3 mt-2 border-t border-[var(--border-main)]">
+              {/* Plugins: integrations that extend a project, in one place. */}
+              <div className="border-t border-[var(--border-main)] p-2">
+                <button
+                  onClick={() => setIsPluginsOpen((open) => !open)}
+                  aria-expanded={isPluginsOpen}
+                  className="btn-lift w-full flex items-center gap-2 px-2 py-1.5 text-[11px] font-medium rounded-md transition border border-[var(--border-main)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]"
+                >
+                  <Puzzle size={13} className="text-[var(--accent-secondary)]" /> Plugins
+                  {walletState.connected && <span className="w-1.5 h-1.5 rounded-full bg-green-500" title="Wallet connected" />}
+                  <ChevronDown size={12} className={`ml-auto transition-transform ${isPluginsOpen ? "rotate-180" : ""}`} />
+                </button>
+                {isPluginsOpen && (
+                  <div className="mt-1.5 ml-2 pl-2 border-l border-[var(--border-main)] space-y-1.5 animate-slide-up">
+                <button
+                  onClick={() => setIsWalletModalOpen(true)}
+                  className={`btn-lift w-full flex items-center gap-2 px-2 py-1.5 text-[11px] font-medium rounded-md transition border ${walletState.connected
+                      ? "bg-green-500/8 border-green-500/20 text-green-400 hover:bg-green-500/15"
+                      : "border-[var(--border-main)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]"
+                    }`}
+                >
+                  <Wallet size={13} className={walletState.connected ? "text-green-400" : "text-[var(--accent-secondary)]"} />
+                  {walletState.connected ? "Wallet Connected" : "Web3 Oracle"}
+                </button>
+
+                <button
+                  onClick={() => setIsEdgeImpulseModalOpen(true)}
+                  className="btn-lift w-full flex items-center gap-2 px-2 py-1.5 text-[11px] font-medium rounded-md transition border border-[var(--border-main)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]"
+                >
+                  <Cloud size={13} className="text-purple-400" /> Edge Impulse
+                </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="border-t border-[var(--border-main)] p-1.5 space-y-0.5">
+                <button onClick={() => { setCompactDock(false); setIsTerminalOpen(!isTerminalOpen); if (isNarrow) { setMobilePane("editor"); if (!isTerminalOpen) setMobileDockTab("terminal"); } }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isTerminalOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
+                  <TerminalIcon size={13} /> Terminal
+                </button>
+                <button onClick={() => setWebPreviewOpen(true)} className="w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]">
+                  <Globe size={13} /> Web Preview
+                </button>
+                <button onClick={() => { setCompactDock(false); setIsSerialMonitorOpen(!isSerialMonitorOpen); if (isNarrow) { setMobilePane("editor"); if (!isSerialMonitorOpen) setMobileDockTab("serial"); } }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isSerialMonitorOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
+                  <Monitor size={13} /> Serial Monitor
+                </button>
+                <button onClick={() => { setCompactDock(false); setIsSerialPlotterOpen(!isSerialPlotterOpen); if (isNarrow) { setMobilePane("editor"); if (!isSerialPlotterOpen) setMobileDockTab("plotter"); } }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isSerialPlotterOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
+                  <Activity size={13} /> Serial Plotter
+                </button>
+                <FeedbackWidget variant="sidebar" boardId={boardId} mcu={mcu} />
+              </div>
+
+                {/* Recent work, last: below the tools and Feedback, where the
+                    list can run as long as it needs without pushing them away. */}
+                <div className="pt-3 pb-2 border-t border-[var(--border-main)]">
                   <div className="px-3.5 pb-1.5 text-[9px] uppercase text-[var(--text-subtle)] font-bold tracking-[0.2em]">
                     Recent
                   </div>
@@ -2870,42 +3136,6 @@ export default function App() {
                   )}
                 </div>
               </div>
-
-              <div className="border-t border-[var(--border-main)] p-2 space-y-1.5 shrink-0">
-                <button
-                  onClick={() => setIsWalletModalOpen(true)}
-                  className={`btn-lift w-full flex items-center gap-2 px-2 py-1.5 text-[11px] font-medium rounded-md transition border ${walletState.connected
-                      ? "bg-green-500/8 border-green-500/20 text-green-400 hover:bg-green-500/15"
-                      : "border-[var(--border-main)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]"
-                    }`}
-                >
-                  <Wallet size={13} className={walletState.connected ? "text-green-400" : "text-[var(--accent-secondary)]"} />
-                  {walletState.connected ? "Wallet Connected" : "Web3 Oracle"}
-                </button>
-
-                <button
-                  onClick={() => setIsEdgeImpulseModalOpen(true)}
-                  className="btn-lift w-full flex items-center gap-2 px-2 py-1.5 text-[11px] font-medium rounded-md transition border border-[var(--border-main)] bg-[var(--bg-surface)] text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]"
-                >
-                  <Cloud size={13} className="text-purple-400" /> Edge Impulse
-                </button>
-              </div>
-
-              <div className="border-t border-[var(--border-main)] p-1.5 space-y-0.5 mt-auto shrink-0">
-                <button onClick={() => { setIsTerminalOpen(!isTerminalOpen); if (isNarrow) { setMobilePane("editor"); if (!isTerminalOpen) setMobileDockTab("terminal"); } }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isTerminalOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
-                  <TerminalIcon size={13} /> Terminal
-                </button>
-                <button onClick={() => setWebPreviewOpen(true)} className="w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]">
-                  <Globe size={13} /> Web Preview
-                </button>
-                <button onClick={() => { setIsSerialMonitorOpen(!isSerialMonitorOpen); if (isNarrow) { setMobilePane("editor"); if (!isSerialMonitorOpen) setMobileDockTab("serial"); } }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isSerialMonitorOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
-                  <Monitor size={13} /> Serial Monitor
-                </button>
-                <button onClick={() => { setIsSerialPlotterOpen(!isSerialPlotterOpen); if (isNarrow) { setMobilePane("editor"); if (!isSerialPlotterOpen) setMobileDockTab("plotter"); } }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isSerialPlotterOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
-                  <Activity size={13} /> Serial Plotter
-                </button>
-                <FeedbackWidget variant="sidebar" boardId={boardId} mcu={mcu} />
-              </div>
             </aside>
           </Panel>
           )}
@@ -2916,10 +3146,7 @@ export default function App() {
           {appMode === "agentic" && (!isNarrow || mobilePane === "agent") && (
             <>
               <Panel defaultSize={55} minSize={1}>
-                <div className="w-full h-full bg-[var(--bg-panel)] flex flex-col min-w-0">
-                  <div className="flex bg-[var(--bg-panel)] border-b border-[var(--border-main)] shrink-0">
-                    <div className="flex-1 py-2 text-xs font-medium border-t-2 border-orange-500 text-[var(--text-main)] bg-[var(--bg-root)] text-center">AI Agent</div>
-                  </div>
+                <div className={`w-full h-full bg-[var(--bg-panel)] flex flex-col min-w-0 ${paneEnterClass}`}>
                   <div className="flex-1 relative overflow-hidden">
                     <div className="absolute inset-0 z-10">
                       <AgentChat
@@ -2928,6 +3155,7 @@ export default function App() {
                         isLoading={isLoading}
                         mcu={mcu}
                         onApplyUpdate={handleApplyProjectUpdate}
+                        onOpenCode={handleOpenCode}
                         chatMode={chatMode}
                         setChatMode={setChatMode}
                         mcuPluggedIn={mcuPluggedIn}
@@ -2936,7 +3164,7 @@ export default function App() {
                         contextUsage={contextUsage}
                         liteNotice={liteNoticeOpen}
                         onDismissLiteNotice={() => setLiteNoticeOpen(false)}
-                        onUpgrade={() => { setLiteNoticeOpen(false); setIsUpgradeModalOpen(true); }}
+                        onUpgrade={() => { setLiteNoticeOpen(false); setIsPlansOpen(true); }}
                         onSmartFlash={() => {
                           // Smart Flash is disabled until a board connects and
                           // enables the instant it does — the same instant the
@@ -2962,9 +3190,9 @@ export default function App() {
 
           {/* Right/Center: Editor & Terminal */}
           {(!isNarrow || mobilePane === "editor") && (
-          <Panel defaultSize={appMode === "agentic" ? 30 : 85} minSize={1}>
+          <Panel defaultSize={appMode === "agentic" ? 30 : 85} minSize={1} className={paneEnterClass}>
             <PanelGroup orientation="vertical">
-              <Panel defaultSize={isTerminalOpen || isSerialMonitorOpen || isSerialPlotterOpen ? 70 : 100} minSize={1}>
+              <Panel defaultSize={isTerminalOpen || isSerialMonitorOpen || isSerialPlotterOpen ? (isNarrow && compactDock ? "78%" : 70) : 100} minSize={1}>
                 {/* Editor Area */}
                 <div className="w-full h-full flex flex-col min-h-0 bg-[var(--bg-root)]">
                   {/* Tabs */}
@@ -3028,7 +3256,7 @@ export default function App() {
               {(isTerminalOpen || isSerialMonitorOpen || isSerialPlotterOpen) && (
                 <>
                   <PanelResizeHandle className="panel-separator h-[3px] bg-[var(--border-main)] hover:bg-[var(--accent-primary)] transition-all duration-200 cursor-row-resize z-10" />
-                  <Panel defaultSize={isNarrow ? 42 : 30} minSize={1}>
+                  <Panel defaultSize={isNarrow ? (compactDock ? "22%" : 42) : 30} minSize={1}>
                     <div className="w-full h-full bg-[var(--bg-panel)] flex flex-col min-h-0 min-w-0">
                       {isNarrow && openDocks.length > 1 && (
                         <div className="flex shrink-0 border-b border-[var(--border-main)] bg-[var(--bg-panel)]">
@@ -3194,6 +3422,81 @@ export default function App() {
         </nav>
       )}
 
+      {/* The profile menu, opened from the account row at the top of the
+          sidebar. Fixed to the page: a resizable panel would clip it. */}
+      {isMenuOpen && profileMenuAt && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setIsMenuOpen(false)} />
+          <div
+            className="fixed w-56 bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-lg z-50 py-1 animate-slide-up"
+            style={{ boxShadow: 'var(--shadow-panel)', left: Math.max(8, Math.min(profileMenuAt.left, window.innerWidth - 232)), top: profileMenuAt.top }}
+          >
+            {user && (
+              <div className="px-3 py-2 mb-1 border-b border-[var(--border-main)]">
+                <p className="text-xs font-medium text-[var(--text-main)] truncate">{user.displayName || "Signed in"}</p>
+                <p className="text-[10px] text-[var(--text-muted)] truncate">{user.email}</p>
+              </div>
+            )}
+            {usageInfo && (
+              <div className="px-3 py-2 mb-1 border-b border-[var(--border-main)]">
+                <div className="flex items-center gap-1.5 text-[10px] text-[var(--text-muted)] mb-1">
+                  <Activity size={11} />
+                  <span>{usageInfo.subscriptionStatus === "active" ? "This cycle" : "Free tokens"}</span>
+                  <span className="ml-auto text-[var(--text-main)] font-medium">{usageInfo.tokensUsed.toLocaleString()} / {usageInfo.tokenCap.toLocaleString()}</span>
+                </div>
+                <div className="h-1 rounded-full bg-[var(--bg-hover)] overflow-hidden">
+                  <div
+                    className="h-full rounded-full"
+                    style={{ width: `${Math.min(100, (usageInfo.tokensUsed / usageInfo.tokenCap) * 100)}%`, background: 'var(--gradient-hero)' }}
+                  />
+                </div>
+                {usageInfo.subscriptionStatus === "active" ? (
+                  <button
+                    onClick={handleCancelSubscription}
+                    disabled={isCancelingSubscription}
+                    className="w-full flex items-center gap-1.5 mt-2 text-[10px] text-[var(--text-muted)] hover:text-red-400 transition disabled:opacity-50"
+                  >
+                    <X size={11} />
+                    {isCancelingSubscription ? "Canceling…" : "Cancel Subscription"}
+                  </button>
+                ) : !isPro && accountTier !== null ? (
+                  // PRO accounts, paid or granted, are never offered an upgrade.
+                  <button
+                    onClick={() => { setIsMenuOpen(false); setIsPlansOpen(true); }}
+                    className="w-full flex items-center gap-1.5 mt-2 text-[10px] font-medium gradient-text hover:opacity-80 transition"
+                  >
+                    <Rocket size={12} className="text-orange-500 rocket-blaze" />
+                    Upgrade — $7/mo
+                  </button>
+                ) : null}
+              </div>
+            )}
+            <button
+              onClick={() => { setIsMenuOpen(false); setFeedbackOpen(true); }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition rounded-md mx-1 sm:hidden"
+            >
+              <MessageSquarePlus size={14} className="text-[var(--text-muted)]" />
+              Send feedback
+            </button>
+            <button
+              onClick={() => { setIsMenuOpen(false); signOut(); }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition rounded-md mx-1"
+            >
+              <LogOut size={13} className="text-red-400" />
+              Sign Out
+            </button>
+          </div>
+        </>
+      )}
+
+      {isPlansOpen && !isPro && (
+        <PlansModal
+          onClose={() => setIsPlansOpen(false)}
+          onUpgrade={handleSubscribe}
+          upgrading={isSubscribing}
+        />
+      )}
+
       {/* Web3 Wallet Modal */}
       {isWalletModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
@@ -3248,7 +3551,7 @@ export default function App() {
           <div className="bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl w-full max-w-sm shadow-2xl overflow-hidden">
             <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border-main)] bg-[var(--bg-root)] shrink-0">
               <h2 className="font-display font-bold text-sm text-[var(--text-main)] flex items-center gap-2">
-                <Lock size={14} className="text-orange-400" /> Free AI Tokens Used Up
+                <Lock size={14} className="text-orange-400" /> {quotaBlockInfo?.tier === "paid" ? "This Cycle's AI Tokens Used Up" : "Free AI Tokens Used Up"}
               </h2>
               <button onClick={() => setIsUpgradeModalOpen(false)} className="text-[var(--text-muted)] hover:text-[var(--text-main)]">
                 <X size={18} />
@@ -3261,7 +3564,9 @@ export default function App() {
               >
                 <Sparkles size={26} />
               </div>
-              <h3 className="font-display font-bold text-lg gradient-text">Upgrade to keep building</h3>
+              <h3 className="font-display font-bold text-lg gradient-text">
+                {quotaBlockInfo?.tier === "paid" ? "Back on your next billing date" : "Upgrade to keep building"}
+              </h3>
               <p className="text-xs text-[var(--text-muted)] leading-relaxed max-w-xs">
                 {quotaBlockInfo?.tier === "paid"
                   ? <>Subscribers get {PAID_TOKEN_CAP.toLocaleString()} AI tokens every billing cycle. You've used this cycle's allowance — it refreshes on your next billing date.</>
