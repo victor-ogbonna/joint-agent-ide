@@ -194,6 +194,13 @@ class SerialBuffer {
     if (w) w();
   }
 
+  /** Why the stream stopped, if it did: a dead USB link rather than a silent
+   *  board. Both used to read as "0 bytes" and got the same advice. */
+  get failure(): string | null {
+    if (this.err) return this.err.message;
+    return this.ended ? "the port closed" : null;
+  }
+
   /** Drop anything already received — used right after a reset pulse. */
   discard(): void {
     this.buf.length = 0;
@@ -339,21 +346,53 @@ async function command(
   return body;
 }
 
+/** A vendor USB-serial chip (FTDI, CH340, CP210x), on the board or on an adapter. */
+function isUsbSerialChip(port: any): boolean {
+  try {
+    const vendor = port?.getInfo?.()?.usbVendorId;
+    return vendor === 0x0403 || vendor === 0x1a86 || vendor === 0x10c4;
+  } catch { return false; }
+}
+
 /**
  * Sync failed — say which of the two very different faults it was, because the
  * fix is completely different. Silence means we are not connected to the
  * board at all (wrong port, charge-only cable, no auto-reset). Bytes that
  * never formed a valid reply means we ARE talking to something, but it is not
  * speaking this protocol.
+ *
+ * Two more cases get their own words. A read stream that died is a USB link
+ * fault, not a silent board. And silence through a USB-serial chip that has
+ * just accepted every reset signal is not a cable or port problem — the chip
+ * is plainly there. On a phone that chip is usually a separate adapter wired
+ * to a genuine board, where silence means those wires or the board's power,
+ * and "the cable is charge-only" sent the user the wrong way.
  */
-function heardNothing(received: number, sample = ""): Error {
-  const e: any = new Error(received === 0
-    ? "Could not reach the bootloader — the port sent nothing at all (0 bytes). " +
+function heardNothing(rx: SerialBuffer, port: any): Error {
+  const framing = typeof port?.describeFraming === "function" ? ` [${port.describeFraming()}]` : "";
+  let text: string;
+  if (rx.failure) {
+    text = `Could not reach the bootloader — the USB link stopped delivering data (${rx.failure}). ` +
+      "Unplug the board or adapter, plug it back in, tap Detect Board and try again.";
+  } else if (rx.received > 0) {
+    text = `Could not reach the bootloader — the port sent ${rx.received} bytes but none formed a valid ` +
+      `reply.${rx.describeSample()}${framing} Close any serial monitor holding the port and try again.`;
+  } else if (isUsbSerialChip(port)) {
+    text = "Could not reach the bootloader — the board sent nothing back (0 bytes). The USB-serial chip " +
+      "itself is connected: it accepted every reset signal. If the board is wired to a separate adapter, " +
+      "the break is between the adapter and the board. Check: the board's power LED is on (adapter 5V → " +
+      "board 5V, or power the board separately); adapter GND → board GND; adapter TX → board RX (pin 0) " +
+      "and adapter RX → board TX (pin 1) — crossed, not TX to TX; adapter DTR → 0.1 µF capacitor → board " +
+      "RESET. An Uno's L LED flashes briefly each time it is reset, so if it stays still when flashing " +
+      "starts, the reset wire is not reaching the board. If the chip is on the board itself, unplug and " +
+      `replug it and try again.${framing}`;
+  } else {
+    text = "Could not reach the bootloader — the port sent nothing at all (0 bytes). " +
       "That usually means this is not the board's port, the cable is charge-only, " +
       "or the board is not auto-resetting. Unplug and replug the board, then use " +
-      "Detect Board and pick the Arduino in the chooser."
-    : `Could not reach the bootloader — the port sent ${received} bytes but none formed a valid ` +
-      `reply.${sample} Close any serial monitor holding the port and try again.`);
+      "Detect Board and pick the Arduino in the chooser.";
+  }
+  const e: any = new Error(text);
   // Failed before a single byte was written, as opposed to partway through a
   // write — so flashAvr may still ask the board in the other protocol.
   e.noSync = true;
@@ -500,7 +539,7 @@ async function flashStk500v2(
     }
   }
   if (!signedOn) {
-    throw heardNothing(rx.received, rx.describeSample());
+    throw heardNothing(rx, port);
   }
 
   // Values mirror what avrdude sends for wiring boards.
@@ -686,10 +725,11 @@ export async function flashAvr({
     // first, then the historical ones.
     const bauds = [baudRate, 57600, 19200].filter((b, i, a) => a.indexOf(b) === i);
     let synced = false;
+    let lastBaud = baudRate;
 
     for (const baud of bauds) {
       if (baud !== baudRate) {
-        log(`No reply at ${baudRate} baud. Trying ${baud}…`);
+        log(`No reply at ${lastBaud} baud. Trying ${baud}…`);
         await reopen(baud);
       }
 
@@ -707,16 +747,14 @@ export async function flashAvr({
         if (baud !== baudRate) log(`Synced at ${baud} baud.`);
         break;
       }
+      lastBaud = baud;
     }
 
     if (!synced) {
-      // Surface the raw framing when the adapter can describe it. Post-strip
-      // bytes alone could not settle whether the status-byte handling was
-      // right; the pre-strip packets can.
-      const framing = typeof (port as any).describeFraming === "function"
-        ? ` ${(port as any).describeFraming()}`
-        : "";
-      await askOtherProtocol(heardNothing(rx!.received, rx!.describeSample() + framing));
+      // heardNothing surfaces the raw framing when the adapter can describe
+      // it. Post-strip bytes alone could not settle whether the status-byte
+      // handling was right; the pre-strip packets can.
+      await askOtherProtocol(heardNothing(rx!, port));
     }
     // Drain BEFORE asking anything else. Sync may have succeeded by skipping
     // past junk, and the rest of that junk is still queued — a probe issued now

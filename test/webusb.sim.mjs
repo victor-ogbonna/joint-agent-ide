@@ -215,12 +215,19 @@ function mockUsbDevice(boot, kind) {
       // baud-fallback path started closing and reopening the port, and the
       // suite failed roughly one run in three for reasons that had nothing to
       // do with the code under test.
+      const gen = this.__gen ?? 0;
       for (let i = 0; i < 800; i++) {
+        if ((this.__gen ?? 0) !== gen) break;
         if (outQueue.length) break;
         const d = boot.drain();
         if (d && d.length) { outQueue.push(...d); break; }
         await new Promise((r) => setTimeout(r, 1));
       }
+      // A device model that counts closes (__gen) cancels a read the way
+      // Chrome does when its interface is released or the device closed:
+      // the read rejects and takes nothing, rather than surfacing later and
+      // eating the next session's reply.
+      if ((this.__gen ?? 0) !== gen) throw new DOMException("The transfer was cancelled.", "AbortError");
       const take = outQueue.splice(0, Math.min(len, 64));
       let bytes = new Uint8Array(take);
       // FTDI puts two modem-status bytes in front of every IN packet.
@@ -501,22 +508,181 @@ for (const kind of ["cdc", "ch34x", "cp210x", "ftdi"]) {
       boot: () => new OptibootSim(64),
       opts: { uploadProtocol: "wiring", chip: "ATMEGA2560" },
       want: (e) => e.code === "WRONG_BOARD" && e.answeredAs === "stk500v1" && /Uno/.test(e.message) },
-    { label: "nothing answering either protocol keeps the original error",
+    // The reported failure: an Uno build through the FTDI adapter, and not one
+    // byte back from the board. The chip took every reset, so the advice has to
+    // be the adapter-to-board wiring, never "the cable is charge-only".
+    { label: "silent board behind the FTDI adapter (Uno build) -> adapter wiring, not the cable",
+      boot: () => { const b = new OptibootSim(64); b.reset = () => {}; return b; },
+      opts: { uploadProtocol: "arduino", chip: "ATMEGA328P" },
+      want: (e, logs) => !e.code && /board sent nothing back \(0 bytes\)/.test(e.message)
+        && /adapter TX → board RX \(pin 0\)/.test(e.message) && /bridge=ftdi/.test(e.message)
+        && !/charge-only/.test(e.message)
+        && logs.includes("No reply at 115200 baud. Trying 57600…")
+        && logs.includes("No reply at 57600 baud. Trying 19200…") },
+    { label: "silent board behind the FTDI adapter (Mega build) -> same, original error kept",
       boot: () => { const b = new MegaBootloader({ chunkBytes: 64 }); b.reset = () => {}; return b; },
       opts: { uploadProtocol: "wiring", chip: "ATMEGA2560" },
-      want: (e) => !e.code && /Could not reach the bootloader/.test(e.message) },
+      want: (e) => !e.code && /Could not reach the bootloader — the board sent nothing back/.test(e.message) },
+    // A read stream that dies is a link fault, and must not be reported as a
+    // board that stayed quiet.
+    { label: "a USB link that stops delivering data says so",
+      boot: () => new MegaBootloader({ chunkBytes: 64 }),
+      opts: { uploadProtocol: "wiring", chip: "ATMEGA2560" },
+      device: (d) => { d.transferIn = async () => { throw new Error("A transfer error has occurred."); }; },
+      want: (e) => /USB link stopped delivering data/.test(e.message) },
   ];
   for (const c of cases) {
     const boot = c.boot();
     const device = mockUsbDevice(boot, "ftdi");
+    c.device?.(device);
     const port = new WebUsbSerialPort(device, "ftdi");
     let err = null;
+    const logs = [];
     try {
-      await flashAvr({ hex, uploadSpeed: 115200, port, onProgress: () => {}, ...c.opts });
+      await flashAvr({ hex, uploadSpeed: 115200, port, onProgress: (m) => logs.push(m), ...c.opts });
     } catch (e) { err = e; }
-    const ok = err !== null && c.want(err) && blank(boot.flash);
+    const ok = err !== null && c.want(err, logs) && blank(boot.flash);
     if (!ok) failures++;
     console.log(`  ${ok ? "ok  " : "FAIL"}  ${c.label}${ok ? "" : `  (${err ? `${err.code || ""} ${err.message.slice(0, 90)}` : "no error"})`}`);
+  }
+}
+
+// --- a genuine Mega on an Android phone --------------------------------------
+// Modelled on the sources, not guessed. Android's cdc_acm driver binds the
+// 16U2's control interface (0) at plug-in and claims its data interface (1)
+// with it. Chrome detaches a kernel driver before a claim only where
+// usb_interface_detach_allowlist.cc allows: cdc_acm from a CDC control
+// interface (class 02, subclass 02, protocol 0-6), never from the data
+// interface (class 0A) — the phone's chrome://device-log said exactly "Not
+// allowed to detach interface 1 attached to driver cdc_acm". acm_disconnect()
+// releases the sibling interface. Releasing an interface Chrome detached
+// re-attaches cdc_acm (ReleaseInterfaceComplete -> USBDEVFS_CONNECT), whose
+// probe takes both interfaces back if both are free.
+function androidMega(boot, { held = true } = {}) {
+  const dev = mockUsbDevice(boot, "cdc");
+  const driver = held ? { 0: "cdc_acm", 1: "cdc_acm" } : { 0: null, 1: null };
+  const claimed = new Set();
+  const detached = new Set();
+  dev.chromeLog = [];
+  dev.claims = [];
+  dev.configurations = [{ interfaces: [
+    { interfaceNumber: 0, alternates: [{ interfaceClass: 0x02, interfaceSubclass: 0x02, interfaceProtocol: 0x01,
+      endpoints: [{ direction: "in", type: "interrupt", endpointNumber: 2, packetSize: 8 }] }] },
+    { interfaceNumber: 1, alternates: [{ interfaceClass: 0x0a, interfaceSubclass: 0x00, interfaceProtocol: 0x00,
+      endpoints: [{ direction: "in", type: "bulk", endpointNumber: 3, packetSize: 64 },
+                  { direction: "out", type: "bulk", endpointNumber: 4, packetSize: 64 }] }] },
+  ] }];
+  dev.configuration = dev.configurations[0];
+  dev.driverOf = (n) => driver[n];
+  dev.claimInterface = async (n) => {
+    if (claimed.has(n)) return;
+    if (driver[n] === "cdc_acm") {
+      const a = dev.configurations[0].interfaces[n].alternates[0];
+      const allowed = a.interfaceClass === 0x02 && a.interfaceSubclass === 0x02 && a.interfaceProtocol <= 6;
+      if (!allowed) {
+        dev.chromeLog.push(`Not allowed to detach interface ${n} attached to driver cdc_acm`);
+        throw new DOMException("Unable to claim interface.", "NetworkError");
+      }
+      driver[0] = null; driver[1] = null;          // acm_disconnect() lets go of both
+      detached.add(n);
+    } else if (driver[n]) {
+      throw new DOMException("Unable to claim interface.", "NetworkError");
+    }
+    driver[n] = "usbfs"; claimed.add(n); dev.claims.push(n);
+  };
+  dev.__gen = 0;
+  dev.releaseInterface = async (n) => {
+    if (!claimed.has(n)) throw new DOMException("The interface is not claimed.", "InvalidStateError");
+    claimed.delete(n); driver[n] = null;
+    dev.__gen++;                                   // pending transfers are cancelled
+    if (detached.delete(n) && driver[0] === null && driver[1] === null) {
+      driver[0] = "cdc_acm"; driver[1] = "cdc_acm";  // re-attached: cdc_acm probes and takes both
+    }
+  };
+  // Closing the fd frees the page's claims; Chrome re-attaches only on release.
+  // A USB reset force-unbinds usbfs and re-probes those interfaces, which
+  // hands them to cdc_acm; cdc_acm itself survives a reset (pre/post_reset).
+  dev.reset = async () => {
+    if (claimed.size) { claimed.clear(); detached.clear(); driver[0] = "cdc_acm"; driver[1] = "cdc_acm"; }
+  };
+  dev.close = async () => { for (const n of claimed) driver[n] = null; claimed.clear(); detached.clear(); dev.opened = false; dev.__gen++; };
+  const control = dev.controlTransferOut.bind(dev);
+  dev.controlTransferOut = async (setup, data) => {
+    if (setup.recipient === "interface" && !claimed.has(setup.index & 0xff)) {
+      throw new DOMException("The specified interface has not been claimed.", "InvalidStateError");
+    }
+    return control(setup, data);
+  };
+  return dev;
+}
+{
+  // Held by cdc_acm, then flashed twice in a row with the port closed between
+  // (the monitor handing it back does exactly that): each open has to take the
+  // board back from the phone's driver, which got it back on the close.
+  const boot = new MegaBootloader({ chunkBytes: 64 });
+  const device = androidMega(boot);
+  const port = new WebUsbSerialPort(device, "cdc");
+  let verdict = "";
+  const backToPhone = [];
+  try {
+    for (let run = 1; run <= 2; run++) {
+      await flashAvr({ hex, uploadProtocol: "wiring", uploadSpeed: 115200, chip: "ATMEGA2560", port, onProgress: () => {} });
+      backToPhone.push(device.driverOf(0) === "cdc_acm" && device.driverOf(1) === "cdc_acm");
+    }
+    let bad = -1;
+    for (let i = 0; i < SIZE; i++) if (boot.flash[i] !== program[i]) { bad = i; break; }
+    verdict = bad >= 0 ? `flash corrupt at byte ${bad}` : "identical";
+  } catch (e) { verdict = `threw: ${e.code || ""} ${e.message.slice(0, 80)}`; }
+  const ok = verdict === "identical" && device.claims.join(",") === "0,1,0,1" && backToPhone.every(Boolean)
+    && device.chromeLog.length === 0;
+  if (!ok) failures++;
+  console.log(`  ${ok ? "ok  " : "FAIL"}  a Mega held by the phone's cdc_acm is taken back (control interface first) and flashed twice` +
+    (ok ? "" : `  (${verdict}; claims ${device.claims.join(",")}; ${device.chromeLog.join("; ")})`));
+}
+{
+  // The second flash on the phone died on the first request after opening:
+  // "A transfer error has occurred" on SET_LINE_CODING. One such failure is
+  // recovered by opening again; a request that keeps failing says so.
+  for (const failTimes of [1, 5]) {
+    const boot = new MegaBootloader({ chunkBytes: 64 });
+    // Not held at the start, as on the phone that session: this isolates the
+    // retry from the claim order.
+    const device = androidMega(boot, { held: false });
+    const control = device.controlTransferOut;
+    let left = failTimes, opens = 0;
+    const open = device.open.bind(device);
+    device.open = async () => { opens++; return open(); };
+    device.controlTransferOut = async (setup, data) => {
+      if (setup.request === 0x20 && left > 0) { left--; throw new DOMException("A transfer error has occurred.", "NetworkError"); }
+      return control(setup, data);
+    };
+    const port = new WebUsbSerialPort(device, "cdc");
+    let err = null;
+    try {
+      await flashAvr({ hex, uploadProtocol: "wiring", uploadSpeed: 115200, chip: "ATMEGA2560", port, onProgress: () => {} });
+    } catch (e) { err = e; }
+    const ok = failTimes === 1
+      ? err === null && opens === 2 && boot.flash[0] === program[0]
+      : err !== null && /Could not set up 0x2341:0x0042 at 115200 baud — the USB request failed twice \(A transfer error has occurred\.\)/.test(err.message)
+        && !device.opened;
+    if (!ok) failures++;
+    console.log(`  ${ok ? "ok  " : "FAIL"}  ${failTimes === 1
+      ? "one USB transfer error on opening is recovered by opening again"
+      : "a USB request that keeps failing names the step and leaves the device closed"}${ok ? "" : `  (${err ? err.message.slice(0, 120) : "no error"}; opens=${opens})`}`);
+  }
+  // Only a USB transfer error is retried. Any other failure while setting up
+  // comes through word for word, from a single open.
+  {
+    const device = mockUsbDevice(new MegaBootloader({ chunkBytes: 64 }), "ch34x");
+    let opens = 0;
+    const open = device.open.bind(device);
+    device.open = async () => { opens++; return open(); };
+    const port = new WebUsbSerialPort(device, "ch34x");
+    let msg = "";
+    try { await port.open({ baudRate: 10 }); } catch (e) { msg = e.message; }
+    const ok = msg === "The CH340 cannot do 10 baud." && opens === 1;
+    if (!ok) failures++;
+    console.log(`  ${ok ? "ok  " : "FAIL"}  any other set-up error is reported unchanged, without a retry${ok ? "" : `  (${msg}; opens=${opens})`}`);
   }
 }
 

@@ -158,25 +158,27 @@ export class WebUsbSerialPort {
     this.findEndpoints();
 
     try {
-      await this.device.claimInterface(this.ifaceNumber);
+      await this.claimInterfaces();
     } catch {
       // Recovery, in increasing force. A claim left over from an earlier open
       // that never released it — an attempt that died mid-flight — is freed
-      // by closing the device. A hold that survives that (a Mega whose cable
-      // dropped out mid-flash stayed unclaimable on a phone that had flashed
-      // it before) gets a USB reset: the device drops off the bus and comes
-      // back as if replugged, which clears what a close cannot.
+      // by closing the device. A hold that survives that gets a USB reset:
+      // the device drops off the bus and comes back as if replugged, which
+      // clears what a close cannot. Claims are given back first: a reset
+      // re-probes interfaces a page holds, which hands them to the phone's
+      // driver.
       const reclaim = async () => {
         try { await this.device.close(); } catch { /* not open */ }
         await this.device.open();
         if (!this.device.configuration) await this.device.selectConfiguration(1);
-        await this.device.claimInterface(this.ifaceNumber);
+        await this.claimInterfaces();
       };
       try {
         await reclaim();
       } catch {
         try {
           try { if (!this.device.opened) await this.device.open(); } catch { /* reset below will say */ }
+          await this.releaseClaims();
           await this.device.reset();
           await new Promise((r) => setTimeout(r, 300));
           await reclaim();
@@ -191,12 +193,36 @@ export class WebUsbSerialPort {
         }
       }
     }
-    if (this.commIfaceNumber !== null && this.commIfaceNumber !== this.ifaceNumber) {
-      // Best effort: the control interface is what carries CDC line coding.
-      try { await this.device.claimInterface(this.commIfaceNumber); } catch { /* some stacks expose it read-only */ }
-    }
 
-    await this.configure(baudRate);
+    try {
+      await this.configure(baudRate);
+    } catch (first: any) {
+      // Only a USB transfer error is worth another go; anything else (a rate
+      // the bridge cannot do, an unplugged board) is reported as it was.
+      if (first?.name !== "NetworkError") throw first;
+      // The first request after the claims failed at the USB level. On a
+      // phone that was "A transfer error has occurred" on the Mega's
+      // SET_LINE_CODING, on the flash straight after the monitor had handed
+      // the board back — the first flash of the session had been fine. Start
+      // again once from a closed device, claiming in the same order, rather
+      // than failing the flash over one request.
+      try {
+        await this.releaseClaims();
+        try { await this.device.close(); } catch { /* already closed */ }
+        await new Promise((r) => setTimeout(r, 250));
+        await this.device.open();
+        if (!this.device.configuration) await this.device.selectConfiguration(1);
+        await this.claimInterfaces();
+        await this.configure(baudRate);
+      } catch (e: any) {
+        try { await this.releaseClaims(); } catch { /* best effort */ }
+        try { await this.device.close(); } catch { /* already closed */ }
+        throw new Error(
+          `Could not set up ${usbId(this.device.vendorId, this.device.productId)} at ${baudRate} baud — ` +
+          `the USB request failed twice (${e?.message || e}). Unplug the board, plug it back in, tap Detect Board and try again.`
+        );
+      }
+    }
     this.baudRate = baudRate;
     this.startPump();
     this.writable = new WritableStream<Uint8Array>({
@@ -205,13 +231,53 @@ export class WebUsbSerialPort {
   }
 
   /**
+   * Claim the interfaces this port needs — for a standard USB-serial device,
+   * the CDC control interface BEFORE the data interface.
+   *
+   * On Android the phone's own cdc_acm driver takes a genuine Uno or Mega's
+   * ATmega16U2 (and any other standard USB-serial device) the moment it is
+   * plugged in. Chrome detaches that driver before claiming, but only from an
+   * interface on its allowlist (services/device/usb/
+   * usb_interface_detach_allowlist.cc in Chromium): the CDC control interface
+   * (class 02, subclass 02 — the 16U2's is 02/02/01) is on it, the CDC data
+   * interface (class 0A) is not. Claiming the data interface first therefore
+   * always failed — the phone's chrome://device-log read "Not allowed to detach
+   * interface 1 attached to driver cdc_acm" — and the board was written off as
+   * out of a phone's reach. Claiming the control interface first detaches
+   * cdc_acm from it, and cdc_acm lets go of the data interface with it
+   * (acm_disconnect() in the Linux driver releases the sibling), so the data
+   * claim finds it free. Chrome gives cdc_acm the board back when the port is
+   * closed, and the next open takes it again the same way.
+   */
+  private async claimInterfaces(): Promise<void> {
+    const comm = this.commIfaceNumber;
+    const separateComm = comm !== null && comm !== this.ifaceNumber;
+    // Required for CDC: line coding and DTR are requests to this interface.
+    if (separateComm && this.kind === "cdc") await this.device.claimInterface(comm);
+    await this.device.claimInterface(this.ifaceNumber);
+    if (separateComm && this.kind !== "cdc") {
+      // A vendor bridge speaks its own requests; the control interface is spare.
+      try { await this.device.claimInterface(comm); } catch { /* not needed */ }
+    }
+  }
+
+  /** Give back what claimInterfaces took, data interface first. */
+  private async releaseClaims(): Promise<void> {
+    try { await this.device.releaseInterface(this.ifaceNumber); } catch { /* not claimed */ }
+    if (this.commIfaceNumber !== null && this.commIfaceNumber !== this.ifaceNumber) {
+      try { await this.device.releaseInterface(this.commIfaceNumber); } catch { /* not claimed */ }
+    }
+  }
+
+  /**
    * Why a claim failed, naming the device so a log can be read without
    * guessing. A standard USB-serial board (CDC-ACM: a genuine Uno or Mega's
    * ATmega16U2, a Leonardo, an ESP32-S3) is the case to explain: many Android
-   * phones build the system's own serial driver in, it takes such devices the
-   * moment they are plugged in, and a web page has no way to take one back.
-   * CH340, CP210x and FTDI bridges have no such driver on a phone, which is
-   * why those boards flash from one and a genuine Mega may not.
+   * phones build the system's own serial driver in, and it takes such devices
+   * the moment they are plugged in. Current Chrome detaches it (see
+   * claimInterfaces); a Chrome that does not leaves the page no way to take
+   * the board back. CH340, CP210x and FTDI bridges have no such driver on a
+   * phone.
    */
   private describeClaimFailure(e: any): string {
     const chip = usbChipName(this.device.vendorId, this.device.productId);
@@ -482,10 +548,7 @@ export class WebUsbSerialPort {
     this.controller = null;
     this.readable = null;
     this.writable = null;
-    try { await this.device.releaseInterface(this.ifaceNumber); } catch { /* already released */ }
-    if (this.commIfaceNumber !== null && this.commIfaceNumber !== this.ifaceNumber) {
-      try { await this.device.releaseInterface(this.commIfaceNumber); } catch { /* not claimed */ }
-    }
+    await this.releaseClaims();
     try { await this.device.close(); } catch { /* already closed */ }
   }
 }
