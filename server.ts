@@ -17,6 +17,7 @@ import { loadAdminConfig, saveAdminConfig } from './server/adminConfig';
 import { readAccessLists, sanitiseEmailList } from './server/access';
 import { requireAuthAndQuota, requireFirebaseAuth, incrementTokenUsage, getOrCreateUserDoc, consumeCompile, refundCompile, CompileReceipt, tierOf, allowanceFor, compileAllowance, formatWait, FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES } from './server/quota';
 import { accessLevelFor } from './server/access';
+import { voiceNoteTooLong, MAX_VOICE_NOTE_SECONDS } from './server/voiceNote';
 import { registerPaystackRoutes } from './server/paystack';
 import { registerWaitlistRoutes } from './server/waitlist';
 import { registerFeedbackRoutes } from './server/feedback';
@@ -850,7 +851,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
           : result.truncated
             ? (free
               ? "That's more than the Free plan can write in one reply. Ask for it in smaller steps, or get PRO for full-size projects."
-              : "That was too big to write in one reply. Ask for it in two steps — for example the display and graphics first, then the game logic.")
+              : "That was too big to write in one reply. Ask for it in two steps, for example the display and graphics first, then the game logic.")
             : "I didn't catch that — could you say it another way?",
       });
     }
@@ -1288,6 +1289,9 @@ app.post("/api/ai/transcribe", requireAuthAndQuota, async (req, res) => {
   try {
     const { audioData, mimeType } = req.body;
     if (!audioData) return res.status(400).json({ error: "No audio data provided." });
+    if (typeof audioData !== "string" || voiceNoteTooLong(audioData, mimeType)) {
+      return res.status(413).json({ error: `Voice notes can be up to ${MAX_VOICE_NOTE_SECONDS / 60} minutes.`, code: "VOICE_TOO_LONG" });
+    }
 
     if (!ai) {
       return res.status(503).json({ error: "AI transcription is not available. GEMINI_API_KEY is not configured." });
@@ -1353,6 +1357,7 @@ app.post("/api/compile", requireFirebaseAuth, async (req, res) => {
       return res.status(429).json({
         error: `The Free plan includes ${FREE_WINDOW_COMPILES} compiles every 5 hours (${FREE_DAILY_COMPILES} a day), and they're used. More in ${formatWait(spend.resetAt)}, or get PRO for unlimited compiles.`,
         code: "FREE_COMPILE_LIMIT",
+        reason: spend.reason,
         resetAt: spend.resetAt,
       });
     }

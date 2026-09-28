@@ -8,13 +8,14 @@
  */
 import {
   tierOf, allowanceFor, compileAllowance, formatWait, utcDay, WINDOW_MS,
-  tokenUsagePatch, spendCompile, refundPatch,
+  tokenUsagePatch, spendCompile, refundPatch, noteAutoDebugRound, continueAutoDebugRun, AUTO_DEBUG_ROUNDS,
   FREE_WINDOW_TOKENS, FREE_DAILY_TOKENS, PRO_WINDOW_TOKENS, PAID_TOKEN_CAP,
   FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES,
 } from "../server/quota.ts";
 import { modelFor, PRO_MODEL, FREE_MODEL, FREE_MAX_OUTPUT_TOKENS } from "../server/deepseek.ts";
 import { attachedImages } from "../server/context.ts";
 import * as shown from "../src/lib/plans.ts";
+import { voiceNoteSeconds, voiceNoteTooLong, MAX_VOICE_NOTE_SECONDS } from "../server/voiceNote.ts";
 
 let bad = 0;
 const check = (cond, label, extra = "") => {
@@ -196,10 +197,40 @@ check(!allowanceFor(doc({ windowStart: NOW, windowTokens: 1e9, tokenDay: TODAY, 
   check(r === null, "counts never go below zero");
 }
 
+// A PRO auto-debug run that started inside the allowance finishes its rounds.
+check(AUTO_DEBUG_ROUNDS === 5, "an auto-debug run is at most 5 rounds, as in Smart Flash");
+check(!continueAutoDebugRun("u-a", "run1", NOW), "a paused account cannot start a run");
+noteAutoDebugRound("u-a", "run1", NOW);
+{
+  let extra = 0;
+  while (continueAutoDebugRun("u-a", "run1", NOW + 60e3)) extra++;
+  check(extra === AUTO_DEBUG_ROUNDS - 1, "after its first round is admitted, a run gets its remaining 4 even when paused", `${extra}`);
+}
+noteAutoDebugRound("u-b", "run1", NOW);
+noteAutoDebugRound("u-b", "run1", NOW + 1000);
+{
+  let extra = 0;
+  while (continueAutoDebugRun("u-b", "run1", NOW + 60e3)) extra++;
+  check(extra === AUTO_DEBUG_ROUNDS - 2, "rounds already admitted are not given twice", `${extra}`);
+}
+noteAutoDebugRound("u-c", "old", NOW);
+noteAutoDebugRound("u-c", "new", NOW);
+check(!continueAutoDebugRun("u-c", "old", NOW), "only the latest run per account is remembered");
+check(continueAutoDebugRun("u-c", "new", NOW), "the latest run continues");
+noteAutoDebugRound("u-d", "run1", NOW);
+check(!continueAutoDebugRun("u-d", "run1", NOW + 16 * 60e3), "a run left hanging for 15 minutes is over");
+
 // Waiting times
 check(formatWait(NOW + (2 * 60 + 13) * 60000, NOW) === "2 h 13 min", "2 h 13 min");
 check(formatWait(NOW + 13 * 60000, NOW) === "13 min", "13 min");
 check(formatWait(NOW + 3 * HOUR, NOW) === "3 h", "3 h");
+check(formatWait(NOW + (76 * 60 + 12) * 60000, NOW) === "3 days 4 h", "past a day it reads in days: 3 days 4 h");
+check(formatWait(NOW + 24 * HOUR, NOW) === "1 day", "exactly a day: 1 day");
+check(formatWait(NOW + 25 * HOUR, NOW) === "1 day 1 h", "a day and an hour: 1 day 1 h");
+check(formatWait(NOW + (23 * 60 + 59) * 60000, NOW) === "23 h 59 min", "just under a day stays in hours");
+for (const w of [30e3, 13 * 60e3, 3 * HOUR, 25 * HOUR, 76.2 * HOUR, 9 * 24 * HOUR]) {
+  check(shown.formatWait(NOW + w, NOW) === formatWait(NOW + w, NOW), `the app words a ${Math.round(w / 60e3)}-minute wait like the server`);
+}
 check(formatWait(NOW + 20000, NOW) === "less than a minute", "less than a minute");
 check(formatWait(null, NOW) === "your next billing date", "unknown refill: the next billing date");
 
@@ -208,6 +239,26 @@ check(PRO_MODEL.maxOutputTokens === 40000, "PRO replies may run to 40,000 tokens
 check(FREE_MAX_OUTPUT_TOKENS === 5000 && FREE_MODEL.maxOutputTokens === 5000, "Free replies are capped at 5,000 tokens");
 check(FREE_MODEL.model === PRO_MODEL.model && FREE_MODEL.baseUrl === PRO_MODEL.baseUrl, "Free runs on the same DeepSeek model as PRO");
 check(modelFor(false) === PRO_MODEL && modelFor(true) === FREE_MODEL, "each plan gets its own model profile");
+
+// Voice notes: 2 minutes, measured from the WAV the app sends (16 kHz mono 16-bit).
+const wav = (seconds, rate = 16000) => {
+  const data = Math.round(seconds * rate) * 2;
+  const buf = Buffer.alloc(44 + data);
+  buf.write("RIFF", 0, "ascii"); buf.writeUInt32LE(36 + data, 4); buf.write("WAVEfmt ", 8, "ascii");
+  buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20); buf.writeUInt16LE(1, 22);
+  buf.writeUInt32LE(rate, 24); buf.writeUInt32LE(rate * 2, 28); buf.writeUInt16LE(2, 32); buf.writeUInt16LE(16, 34);
+  buf.write("data", 36, "ascii"); buf.writeUInt32LE(data, 40);
+  return buf.toString("base64");
+};
+check(MAX_VOICE_NOTE_SECONDS === 120, "voice notes are capped at 2 minutes");
+check(Math.abs(voiceNoteSeconds(wav(45), "audio/wav") - 45) < 0.01, "a 45 s note measures 45 s");
+check(!voiceNoteTooLong(wav(120.3), "audio/wav"), "a note the app stopped at 2:00 is accepted");
+check(!voiceNoteTooLong(wav(125, 48000), "audio/wav"), "measured the same at 48 kHz, just past 2:00 is still within the grace");
+check(voiceNoteTooLong(wav(180), "audio/wav"), "a 3-minute note is refused");
+check(voiceNoteSeconds("bm90IGEgd2F2IGZpbGUgYXQgYWxsLCBqdXN0IHRleHQgcGFkZGVkIG91dCB0byBiZSBsb25nIGVub3VnaA==", "audio/wav") === null,
+      "something that is not WAV cannot be measured");
+check(!voiceNoteTooLong("A".repeat(1000), "audio/webm") && voiceNoteTooLong("A".repeat(17 * 1024 * 1024), "audio/webm"),
+      "an unmeasurable note is bounded by size instead");
 
 // Attached images
 const jpeg = "data:image/jpeg;base64,/9j/4AAQSkZJRg==";
