@@ -2,6 +2,7 @@ import { execFile } from "child_process";
 import util from "util";
 import path from "path";
 import fs from "fs";
+import { compilerOptions } from "./buildUser";
 
 const execFilePromise = util.promisify(execFile);
 
@@ -53,8 +54,10 @@ export async function loadBoardCatalog(): Promise<void> {
   try {
     let pioPath = path.join(process.cwd(), ".platformio", "penv", "bin", "pio");
     if (!fs.existsSync(pioPath)) pioPath = "pio";
+    // As the build account, like every compiler launch, so nothing it writes
+    // in the compiler's folder ends up owned by the server (server/buildUser.ts).
     const { stdout } = await execFilePromise(pioPath, ["boards", "--json-output"], {
-      env: { ...process.env, PLATFORMIO_CORE_DIR: path.join(process.cwd(), ".platformio") },
+      ...(await compilerOptions(path.join(process.cwd(), ".platformio"))),
       maxBuffer: 1024 * 1024 * 20,
     });
     const raw = JSON.parse(stdout);

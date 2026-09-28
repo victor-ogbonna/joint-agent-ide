@@ -396,56 +396,26 @@ app.get("/api/boards", (req, res) => {
 
 // Generate microcontroller code and schematic
 
-// Terminal execution endpoint (with command whitelist for security).
-// Deliberately excludes general-purpose interpreters (node/python3/pip/npm)
-// even though PlatformIO itself is a Python tool — those let a caller run
-// `node -e "..."` / `python3 -c "..."` and execute arbitrary code, which
-// defeats the whitelist's entire purpose. Nothing legitimate this terminal
-// is for (compiling/flashing/inspecting an embedded project) needs them.
-
-import { WORKSPACE_COMMANDS, isWorkspaceCommand, toWorkspaceCommand, ALLOWED_COMMAND_PREFIXES, isCommandAllowed } from "./server/commands.js";
+import { WORKSPACE_COMMANDS, isWorkspaceCommand, toWorkspaceCommand } from "./server/commands.js";
 import { scrubToolchainNames } from "./server/scrub.js";
 import { buildEnv } from "./server/buildEnv.js";
+import { setUpBuildAccount, compilerOptions, handOver, buildIsolation } from "./server/buildUser.js";
 // Re-exported so the branding test can reach it from the server entrypoint too.
 export { scrubToolchainNames };
 
 
 
-app.post("/api/terminal/execute", requireFirebaseAuth, async (req, res) => {
-  const { command } = req.body;
-  if (!command) return res.status(400).json({ error: "Command required." });
-
-  // Security: reject dangerous shell operators and only allow whitelisted commands
-  const dangerousPatterns = /[;&|`$(){}\\]|\bsudo\b|\brm\b|\bdd\b|\bmkfs\b|\bchmod\b|\bchown\b|\bcurl\b|\bwget\b|\bnc\b|\bncat\b/;
-  if (dangerousPatterns.test(command)) {
-    return res.status(403).json({ error: "Command contains disallowed characters or keywords.", stdout: "", stderr: "Blocked: This command contains shell operators or dangerous keywords that are not permitted." });
-  }
-
-  if (!isCommandAllowed(command)) {
-    return res.status(403).json({ error: "Command not in whitelist.", stdout: "", stderr: `Blocked: '${command.split(/\s+/)[0]}' is not an allowed command. Permitted: ${ALLOWED_COMMAND_PREFIXES.join(', ')}` });
-  }
-
-  // Version-query commands are answered directly rather than actually shelling
-  // out — the real toolchain is presented to users as "Joint-Agent Engine",
-  // never a raw "PlatformIO Core, version X.X.X" string.
-  const versionQueryPattern = /^(pio|platformio)\s+(--version|system)$/;
-  if (versionQueryPattern.test(command.trim())) {
-    return res.json({
-      stdout: "Joint-Agent Engine System Information:\n  Engine:        Joint-Agent Engine (embedded build core)\n  Framework:     Arduino compiler suite\n",
-      stderr: "",
-    });
-  }
-
-  try {
-    const { stdout, stderr } = await execPromise(command, { cwd: process.cwd(), timeout: 60000, env: buildEnv() });
-    res.json({ stdout: scrubToolchainNames(stdout), stderr: scrubToolchainNames(stderr) });
-  } catch (error: any) {
-    res.json({
-      stdout: scrubToolchainNames(error.stdout || ""),
-      stderr: scrubToolchainNames(error.stderr || error.message || ""),
-      error: true,
-    });
-  }
+// The in-app terminal runs every one of its commands in the browser (see
+// handleExecuteCommand in src/App.tsx); nothing in the app calls this. It
+// used to run allowed shell commands on the server, and "cat" alone was
+// enough for any signed-in account to read the server's keys (from
+// /proc/1/environ) or its settings file. So it refuses everything now.
+app.post("/api/terminal/execute", requireFirebaseAuth, (_req, res) => {
+  res.status(410).json({
+    error: "The server terminal is no longer available.",
+    stdout: "",
+    stderr: "Commands run in the Joint-Agent terminal itself. Type 'help' there to see them.",
+  });
 });
 
 
@@ -1432,9 +1402,11 @@ lib_deps =
     if (!fs.existsSync(pioPath)) {
       pioPath = "pio";
     }
+    // Run under the build account when there is one (server/buildUser.ts).
+    handOver(tempDir);
     const { stdout, stderr } = await execFilePromise(pioPath, ['run'], {
       cwd: tempDir,
-      env: buildEnv(path.join(process.cwd(), ".platformio")),
+      ...(await compilerOptions(path.join(process.cwd(), ".platformio"))),
       maxBuffer: 1024 * 1024 * 50
     });
 
@@ -1594,9 +1566,10 @@ lib_deps =
     }
 
     console.log(`[Flash] Compiling and uploading to ${mcu}...`);
+    handOver(tempDir);
     const { stdout, stderr } = await execFilePromise(pioPath, ['run', '-t', 'upload'], {
       cwd: tempDir,
-      env: buildEnv(path.join(process.cwd(), ".platformio")),
+      ...(await compilerOptions(path.join(process.cwd(), ".platformio"))),
       maxBuffer: 1024 * 1024 * 50,
       timeout: 120000
     });
@@ -1770,6 +1743,8 @@ app.get("/api/status", (_req, res) => {
     geminiConfigured: !!ai,
     geminiApiKeySet: !!activeApiKey,
     platformioInstalled: fs.existsSync(path.join(process.cwd(), ".platformio", "penv", "bin", "pio")),
+    // Builds run under their own account, away from the server's keys.
+    buildsIsolated: buildIsolation().isolated,
     webSerialSupport: 'server-side',
     serialPortAvailable: true
   });
@@ -1849,6 +1824,22 @@ async function startServer() {
     console.log(`AI Microcontroller Web3 IDE Server running on http://0.0.0.0:${PORT}`);
     console.log(`WebSocket Serial Monitor available at ws://0.0.0.0:${PORT}/ws/serial`);
   });
+
+  // Builds get their own account first: every later compiler launch waits
+  // for this check (server/buildUser.ts).
+  const coreDir = path.join(process.cwd(), ".platformio");
+  setUpBuildAccount({
+    coreDir,
+    pioPath: path.join(coreDir, "penv", "bin", "pio"),
+    // The server's settings and users' libraries. Without ADMIN_CONFIG_DIR
+    // they sit next to the app, so those exact paths are locked instead.
+    privatePaths: [
+      ...(process.env.ADMIN_CONFIG_DIR
+        ? [process.env.ADMIN_CONFIG_DIR]
+        : [path.join(process.cwd(), ".admin-config.json"), path.join(process.cwd(), "data"), path.join(process.cwd(), ".env")]),
+      ...(process.env.LIBRARIES_DIR ? [process.env.LIBRARIES_DIR] : []),
+    ],
+  }).catch(console.error);
 
   // Install PIO asynchronously without blocking server start
   setupPlatformIO().catch(console.error);

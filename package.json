@@ -11,7 +11,7 @@
     "lint": "tsc --noEmit",
     "test:flash": "node test/avrFlash.sim.mjs",
     "test:webusb": "node test/webusb.sim.mjs",
-    "test": "npm run test:flash && npm run test:webusb && npm run test:esp32 && npm run test:serial && npm run test:pump && npm run test:scrub && npm run test:commands && npm run test:monitor && npm run test:markup && npm run test:context && npm run test:tiers && npm run test:baud && npm run test:detect && npm run test:libraries",
+    "test": "npm run test:flash && npm run test:webusb && npm run test:esp32 && npm run test:serial && npm run test:pump && npm run test:scrub && npm run test:commands && npm run test:monitor && npm run test:markup && npm run test:context && npm run test:tiers && npm run test:baud && npm run test:detect && npm run test:libraries && npm run test:builduser",
     "test:esp32": "node test/esp32.sim.mjs",
     "test:pump": "node test/pump.sim.mjs",
     "test:serial": "node test/serialLines.sim.mjs",
@@ -23,7 +23,8 @@
     "test:tiers": "tsx test/tiers.mjs",
     "test:baud": "tsx test/sketchBaud.mjs",
     "test:detect": "node test/detect.sim.mjs",
-    "test:libraries": "tsx test/libraries.mjs"
+    "test:libraries": "tsx test/libraries.mjs",
+    "test:builduser": "tsx test/buildUser.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
