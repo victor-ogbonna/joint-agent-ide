@@ -6,31 +6,50 @@ import { accessLevelFor, bypassesLaunchLock, LAUNCH_LOCKED_CODE, LAUNCH_LOCKED_M
 
 /** Sentinel subscription status for accounts whose usage is never counted. */
 export const UNMETERED_STATUS = "unmetered";
+
 /**
- * Sentinel subscription status for a free user whose free tokens are spent.
- * They are no longer refused: they are answered by the less capable LITE
- * model, with no auto-debug and LITE_DAILY_COMPILES compiles a day, until
- * they subscribe. Their usage is counted separately, for monitoring only.
+ * Every metered account works in 5-hour windows, the way ChatGPT, Claude and
+ * Gemini meter their plans. A window opens with the first counted reply after
+ * the previous one closed, and refills in full when it ends.
+ *
+ * Free: FREE_WINDOW_TOKENS a window and at most FREE_DAILY_TOKENS a UTC day.
+ * PRO: PRO_WINDOW_TOKENS a window (10x Free), and a subscriber at most
+ * PAID_TOKEN_CAP a billing cycle (reset by server/paystack.ts on each
+ * successful charge). A granted PRO account has the window, not the cycle
+ * cap: nothing would ever reset it.
+ *
+ * Only what the model writes is counted, as before.
  */
-export const LITE_STATUS = "lite";
-export const LITE_DAILY_COMPILES = 5;
+export const WINDOW_MS = 5 * 60 * 60 * 1000;
+export const FREE_WINDOW_TOKENS = 5000;
+export const FREE_DAILY_TOKENS = 10000;
+export const PRO_WINDOW_TOKENS = 50000;
+export const PAID_TOKEN_CAP = 600000;
+
+/** Free compiles. Only successful builds count: a failed one is handed back. */
+export const FREE_WINDOW_COMPILES = 8;
+export const FREE_DAILY_COMPILES = 25;
+
+export type Tier = "unmetered" | "pro" | "free";
+
+/** What the quota middleware learned about the caller, for the route. */
+export interface QuotaContext {
+  tier: Tier;
+  subscriptionStatus: string;
+  tokensUsed: number;
+  tokenCap: number;
+}
 
 declare global {
   namespace Express {
     interface Request {
       uid?: string;
-      quota?: { subscriptionStatus: string; tokensUsed: number; tokenCap: number };
+      quota?: QuotaContext;
       email?: string | null;
       emailVerified?: boolean;
     }
   }
 }
-
-// Free users get this once, for life. Active subscribers get PAID_TOKEN_CAP
-// fresh every billing cycle instead (reset by the Paystack webhook/verify
-// handlers in server/paystack.ts on each successful charge).
-export const FREE_TOKEN_CAP = 50000;
-export const PAID_TOKEN_CAP = 400000;
 
 // Per-uid request throttle, independent of the token cap — bounds how fast a
 // single account can hammer the 4 Gemini-calling routes regardless of how
@@ -54,6 +73,7 @@ function isRateLimited(uid: string): boolean {
 }
 
 export interface UserQuotaDoc {
+  /** Every token a free account has used, ever. Monitoring only now. */
   lifetimeFreeTokensUsed: number;
   cycleTokensUsed: number;
   subscriptionStatus: "none" | "active" | "past_due" | "canceled";
@@ -61,10 +81,17 @@ export interface UserQuotaDoc {
   paystackSubscriptionCode: string | null;
   paystackEmailToken: string | null;
   currentPeriodEnd: Timestamp | null;
-  liteTokensUsed: number;
-  /** UTC date (YYYY-MM-DD) the lite compile count below belongs to. */
-  liteCompileDay: string | null;
-  liteCompileCount: number;
+  /** When the current token window opened (ms since epoch). */
+  windowStart: number | null;
+  windowTokens: number;
+  /** UTC date (YYYY-MM-DD) dayTokens belongs to. */
+  tokenDay: string | null;
+  dayTokens: number;
+  compileWindowStart: number | null;
+  compileWindowCount: number;
+  /** UTC date (YYYY-MM-DD) compileDayCount belongs to. */
+  compileDay: string | null;
+  compileDayCount: number;
 }
 
 const DEFAULT_USER_DOC: UserQuotaDoc = {
@@ -75,10 +102,38 @@ const DEFAULT_USER_DOC: UserQuotaDoc = {
   paystackSubscriptionCode: null,
   paystackEmailToken: null,
   currentPeriodEnd: null,
-  liteTokensUsed: 0,
-  liteCompileDay: null,
-  liteCompileCount: 0,
+  windowStart: null,
+  windowTokens: 0,
+  tokenDay: null,
+  dayTokens: 0,
+  compileWindowStart: null,
+  compileWindowCount: 0,
+  compileDay: null,
+  compileDayCount: 0,
 };
+
+function readUserDoc(data: any): UserQuotaDoc {
+  data = data || {};
+  const num = (v: any) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const time = (v: any) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  return {
+    lifetimeFreeTokensUsed: num(data.lifetimeFreeTokensUsed),
+    cycleTokensUsed: num(data.cycleTokensUsed),
+    subscriptionStatus: data.subscriptionStatus ?? "none",
+    paystackCustomerCode: data.paystackCustomerCode ?? null,
+    paystackSubscriptionCode: data.paystackSubscriptionCode ?? null,
+    paystackEmailToken: data.paystackEmailToken ?? null,
+    currentPeriodEnd: data.currentPeriodEnd ?? null,
+    windowStart: time(data.windowStart),
+    windowTokens: num(data.windowTokens),
+    tokenDay: typeof data.tokenDay === "string" ? data.tokenDay : null,
+    dayTokens: num(data.dayTokens),
+    compileWindowStart: time(data.compileWindowStart),
+    compileWindowCount: num(data.compileWindowCount),
+    compileDay: typeof data.compileDay === "string" ? data.compileDay : null,
+    compileDayCount: num(data.compileDayCount),
+  };
+}
 
 export async function getOrCreateUserDoc(uid: string): Promise<UserQuotaDoc> {
   const ref = adminDb.collection("users").doc(uid);
@@ -88,19 +143,7 @@ export async function getOrCreateUserDoc(uid: string): Promise<UserQuotaDoc> {
     await ref.set({ ...DEFAULT_USER_DOC, createdAt: now, updatedAt: now });
     return DEFAULT_USER_DOC;
   }
-  const data = snap.data() || {};
-  return {
-    lifetimeFreeTokensUsed: data.lifetimeFreeTokensUsed ?? 0,
-    cycleTokensUsed: data.cycleTokensUsed ?? 0,
-    subscriptionStatus: data.subscriptionStatus ?? "none",
-    paystackCustomerCode: data.paystackCustomerCode ?? null,
-    paystackSubscriptionCode: data.paystackSubscriptionCode ?? null,
-    paystackEmailToken: data.paystackEmailToken ?? null,
-    currentPeriodEnd: data.currentPeriodEnd ?? null,
-    liteTokensUsed: data.liteTokensUsed ?? 0,
-    liteCompileDay: data.liteCompileDay ?? null,
-    liteCompileCount: data.liteCompileCount ?? 0,
-  };
+  return readUserDoc(snap.data());
 }
 
 type Identity = { uid: string; email: string | null; emailVerified: boolean };
@@ -147,50 +190,134 @@ export async function requireFirebaseAuth(req: Request, res: Response, next: Nex
   next();
 }
 
-export type Tier = "unmetered" | "pro" | "free" | "lite";
-
-/** Where an account stands: paid or granted Pro, free with tokens left, or
- *  free with them spent (lite). */
+/** Where an account stands: the owner, paid or granted PRO, or free. */
 export function tierOf(doc: UserQuotaDoc, level: string): Tier {
   if (level === "unmetered") return "unmetered";
   if (doc.subscriptionStatus === "active" || level === "pro") return "pro";
-  return doc.lifetimeFreeTokensUsed >= FREE_TOKEN_CAP ? "lite" : "free";
+  return "free";
 }
 
-export function utcDay(d = new Date()): string {
-  return d.toISOString().slice(0, 10);
+export function utcDay(ms = Date.now()): string {
+  return new Date(ms).toISOString().slice(0, 10);
 }
 
-/** Lite compiles left today. */
-export function liteCompilesLeft(doc: UserQuotaDoc, today = utcDay()): number {
-  const used = doc.liteCompileDay === today ? doc.liteCompileCount : 0;
-  return Math.max(0, LITE_DAILY_COMPILES - used);
+function nextUtcMidnight(ms: number): number {
+  const d = new Date(ms);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
 }
 
-/**
- * Spend one of a lite account's daily compiles. Every other tier compiles
- * without limit. Transactional, so two compiles at once cannot both take
- * the last one.
- */
-export async function consumeCompile(uid: string, email: string | null, emailVerified: boolean): Promise<{ allowed: boolean; left: number | null }> {
-  const level = accessLevelFor(email, emailVerified);
-  if (level === "unmetered") return { allowed: true, left: null };
-  const ref = adminDb.collection("users").doc(uid);
-  return adminDb.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    const data: any = snap.exists ? snap.data() : {};
-    const doc = { ...DEFAULT_USER_DOC, ...data } as UserQuotaDoc;
-    if (tierOf(doc, level) !== "lite") return { allowed: true, left: null };
-    const today = utcDay();
-    const left = liteCompilesLeft(doc, today);
-    if (left <= 0) return { allowed: false, left: 0 };
-    const used = doc.liteCompileDay === today ? doc.liteCompileCount : 0;
-    tx.set(ref, { liteCompileDay: today, liteCompileCount: used + 1, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
-    return { allowed: true, left: left - 1 };
-  });
+/** The window in force at `now`: the stored one while it lasts, else none. */
+function liveWindow(start: number | null, used: number, now: number): { start: number | null; used: number } {
+  if (start !== null && now >= start && now < start + WINDOW_MS) return { start, used };
+  return { start: null, used: 0 };
 }
 
-// Auth + token-cap enforcement — for every route that calls Gemini.
+/** Of several pauses, the one that lifts last governs; null (unknown) is last. */
+function latest(blockers: Array<{ reason: PauseReason; at: number | null }>) {
+  let pick = blockers[0];
+  for (const b of blockers) {
+    if (pick.at === null) break;
+    if (b.at === null || b.at > pick.at) pick = b;
+  }
+  return pick;
+}
+
+export type PauseReason = "window" | "day" | "cycle";
+
+export interface Allowance {
+  blocked: boolean;
+  reason: PauseReason | null;
+  /** When the pause lifts (ms since epoch). Null when not paused, or when it
+   *  lifts on a billing date the server has not been told. */
+  resetAt: number | null;
+  windowUsed: number;
+  windowCap: number;
+  /** When the current window refills; null before it has opened. */
+  windowResetAt: number | null;
+  dayUsed: number | null;
+  dayCap: number | null;
+  cycleUsed: number | null;
+  cycleCap: number | null;
+}
+
+/** How much an account may still use, and if nothing, until when. */
+export function allowanceFor(doc: UserQuotaDoc, tier: Tier, now = Date.now()): Allowance {
+  if (tier === "unmetered") {
+    return {
+      blocked: false, reason: null, resetAt: null,
+      windowUsed: 0, windowCap: 0, windowResetAt: null,
+      dayUsed: null, dayCap: null, cycleUsed: null, cycleCap: null,
+    };
+  }
+  const win = liveWindow(doc.windowStart, doc.windowTokens, now);
+  const windowCap = tier === "free" ? FREE_WINDOW_TOKENS : PRO_WINDOW_TOKENS;
+  const windowResetAt = win.start === null ? null : win.start + WINDOW_MS;
+  const blockers: Array<{ reason: PauseReason; at: number | null }> = [];
+  if (win.used >= windowCap) blockers.push({ reason: "window", at: windowResetAt });
+
+  let dayUsed: number | null = null;
+  let dayCap: number | null = null;
+  let cycleUsed: number | null = null;
+  let cycleCap: number | null = null;
+  if (tier === "free") {
+    dayUsed = doc.tokenDay === utcDay(now) ? doc.dayTokens : 0;
+    dayCap = FREE_DAILY_TOKENS;
+    if (dayUsed >= dayCap) blockers.push({ reason: "day", at: nextUtcMidnight(now) });
+  } else if (doc.subscriptionStatus === "active") {
+    cycleUsed = doc.cycleTokensUsed;
+    cycleCap = PAID_TOKEN_CAP;
+    if (cycleUsed >= cycleCap) {
+      const end = doc.currentPeriodEnd && typeof (doc.currentPeriodEnd as any).toMillis === "function"
+        ? (doc.currentPeriodEnd as any).toMillis() as number
+        : null;
+      // A billing date already passed means the renewal has not landed yet:
+      // when it does is not something the server can promise.
+      blockers.push({ reason: "cycle", at: end !== null && end > now ? end : null });
+    }
+  }
+
+  const governing = blockers.length ? latest(blockers) : null;
+  return {
+    blocked: governing !== null,
+    reason: governing ? governing.reason : null,
+    resetAt: governing ? governing.at : null,
+    windowUsed: win.used,
+    windowCap,
+    windowResetAt,
+    dayUsed,
+    dayCap,
+    cycleUsed,
+    cycleCap,
+  };
+}
+
+/** "2 h 13 min", "13 min", "less than a minute". */
+export function formatWait(resetAt: number | null, now = Date.now()): string {
+  if (resetAt === null) return "your next billing date";
+  const minutes = Math.ceil((resetAt - now) / 60000);
+  if (minutes <= 1) return "less than a minute";
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (!h) return `${m} min`;
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
+
+function pauseMessage(tier: Tier, a: Allowance, now = Date.now()): string {
+  if (a.reason === "cycle") {
+    return a.resetAt === null
+      ? "You've used this cycle's AI tokens. They refresh on your next billing date."
+      : `You've used this cycle's AI tokens. They refresh in ${formatWait(a.resetAt, now)}, on your next billing date.`;
+  }
+  const when = formatWait(a.resetAt, now);
+  if (tier === "free") {
+    return a.reason === "day"
+      ? `You've used today's free AI tokens. They refill in ${when}. Get PRO for 10x more every 5 hours.`
+      : `You've used your free AI tokens for now. They refill in ${when}. Get PRO for 10x more every 5 hours.`;
+  }
+  return `You've used this 5-hour window's AI tokens. They refill in ${when}.`;
+}
+
+// Auth + token-allowance enforcement — for every route that calls a model.
 export async function requireAuthAndQuota(req: Request, res: Response, next: NextFunction) {
   if (!isFirebaseAdminConfigured()) {
     return res.status(503).json({ error: "Sign-in is not configured on the server yet.", code: "AUTH_NOT_CONFIGURED" });
@@ -210,65 +337,177 @@ export async function requireAuthAndQuota(req: Request, res: Response, next: Nex
 
   const level = accessLevelFor(who.email, who.emailVerified);
 
-  // The owner is never metered. UNMETERED_STATUS flows through to
+  // The owner is never metered. The unmetered tier flows through to
   // incrementTokenUsage via req.quota, which short-circuits on it, so no call
   // site needs to know about the exemption.
   if (level === "unmetered") {
     req.uid = uid;
     req.email = who.email;
-    req.quota = { subscriptionStatus: UNMETERED_STATUS, tokensUsed: 0, tokenCap: Number.MAX_SAFE_INTEGER };
+    req.emailVerified = who.emailVerified;
+    req.quota = { tier: "unmetered", subscriptionStatus: UNMETERED_STATUS, tokensUsed: 0, tokenCap: Number.MAX_SAFE_INTEGER };
     return next();
   }
 
   const doc = await getOrCreateUserDoc(uid);
-  // A granted Pro account gets the paid cap without a Paystack subscription,
-  // and is still metered — the grant raises the ceiling, it does not remove it.
-  const isPaid = doc.subscriptionStatus === "active" || level === "pro";
-  const tokenCap = isPaid ? PAID_TOKEN_CAP : FREE_TOKEN_CAP;
-  const tokensUsed = isPaid ? doc.cycleTokensUsed : doc.lifetimeFreeTokensUsed;
+  const tier = tierOf(doc, level);
+  const now = Date.now();
+  const a = allowanceFor(doc, tier, now);
 
-  // A free user past their free tokens is not refused: the lite model
-  // answers them from here on, with its own limits, until they subscribe.
-  if (!isPaid && tokensUsed >= tokenCap) {
-    req.uid = uid;
-    req.email = who.email;
-    req.emailVerified = who.emailVerified;
-    req.quota = { subscriptionStatus: LITE_STATUS, tokensUsed, tokenCap };
-    return next();
-  }
-
-  if (tokensUsed >= tokenCap) {
+  // Paused, not refused for good: the response says when it lifts, so the
+  // app can count down to it.
+  if (a.blocked) {
+    const used = a.reason === "cycle" ? a.cycleUsed : a.reason === "day" ? a.dayUsed : a.windowUsed;
+    const cap = a.reason === "cycle" ? a.cycleCap : a.reason === "day" ? a.dayCap : a.windowCap;
     return res.status(402).json({
-      error: isPaid ? "You've used this cycle's AI tokens — they'll refresh on your next billing date." : "You've used up your free AI tokens.",
+      error: pauseMessage(tier, a, now),
       code: "TOKEN_CAP_REACHED",
-      tier: isPaid ? "paid" : "free",
-      tokensUsed,
-      tokenCap,
+      tier: tier === "free" ? "free" : "paid",
+      reason: a.reason,
+      resetAt: a.resetAt,
+      tokensUsed: used ?? 0,
+      tokenCap: cap ?? 0,
     });
   }
 
   req.uid = uid;
   req.email = who.email;
   req.emailVerified = who.emailVerified;
-  req.quota = { subscriptionStatus: doc.subscriptionStatus, tokensUsed, tokenCap };
+  req.quota = { tier, subscriptionStatus: doc.subscriptionStatus, tokensUsed: a.windowUsed, tokenCap: a.windowCap };
   next();
 }
 
-// Call after a successful Gemini response, before res.json(...). Awaited by
-// the caller so the counter is durably updated before the client could fire
-// a follow-up request.
-export async function incrementTokenUsage(uid: string, subscriptionStatus: string, tokens: number): Promise<void> {
+/**
+ * The counters after `tokens` more are written. A window opens with the first
+ * counted reply after the last one closed. Applied inside a transaction, so
+ * reading and adding cannot interleave with another request's.
+ */
+export function tokenUsagePatch(doc: UserQuotaDoc, quota: Pick<QuotaContext, "tier" | "subscriptionStatus">, tokens: number, now: number): Partial<UserQuotaDoc> {
+  const win = liveWindow(doc.windowStart, doc.windowTokens, now);
+  const patch: Partial<UserQuotaDoc> = { windowStart: win.start ?? now, windowTokens: win.used + tokens };
+  if (quota.tier === "free") {
+    const today = utcDay(now);
+    patch.tokenDay = today;
+    patch.dayTokens = (doc.tokenDay === today ? doc.dayTokens : 0) + tokens;
+    patch.lifetimeFreeTokensUsed = doc.lifetimeFreeTokensUsed + tokens;
+  } else if (quota.subscriptionStatus === "active") {
+    patch.cycleTokensUsed = doc.cycleTokensUsed + tokens;
+  }
+  return patch;
+}
+
+// Call after a successful model response, before responding. Awaited by the
+// caller so the counters are durably updated before the client could fire a
+// follow-up request.
+export async function incrementTokenUsage(uid: string, quota: QuotaContext | undefined, tokens: number): Promise<void> {
   if (!tokens || tokens <= 0) return;
-  if (subscriptionStatus === UNMETERED_STATUS) return;
-  const field = subscriptionStatus === "active" ? "cycleTokensUsed"
-    : subscriptionStatus === LITE_STATUS ? "liteTokensUsed"
-    : "lifetimeFreeTokensUsed";
+  if (!quota || quota.tier === "unmetered") return;
+  const ref = adminDb.collection("users").doc(uid);
   try {
-    await adminDb.collection("users").doc(uid).update({
-      [field]: FieldValue.increment(tokens),
-      updatedAt: FieldValue.serverTimestamp(),
+    await adminDb.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const doc = readUserDoc(snap.exists ? snap.data() : {});
+      tx.set(ref, { ...tokenUsagePatch(doc, quota, tokens, Date.now()), updatedAt: FieldValue.serverTimestamp() }, { merge: true });
     });
   } catch (err) {
-    console.error(`[Quota] Failed to increment ${field} for uid=${uid}:`, err);
+    console.error(`[Quota] Failed to count ${tokens} tokens for uid=${uid}:`, err);
   }
+}
+
+export interface CompileAllowance {
+  blocked: boolean;
+  /** Compiles left before the next pause. */
+  left: number;
+  resetAt: number | null;
+}
+
+/** A free account's compiles: FREE_WINDOW_COMPILES a window, FREE_DAILY_COMPILES a day. */
+export function compileAllowance(doc: UserQuotaDoc, now = Date.now()): CompileAllowance {
+  const win = liveWindow(doc.compileWindowStart, doc.compileWindowCount, now);
+  const dayCount = doc.compileDay === utcDay(now) ? doc.compileDayCount : 0;
+  const blockers: Array<{ reason: PauseReason; at: number | null }> = [];
+  if (win.used >= FREE_WINDOW_COMPILES) blockers.push({ reason: "window", at: (win.start as number) + WINDOW_MS });
+  if (dayCount >= FREE_DAILY_COMPILES) blockers.push({ reason: "day", at: nextUtcMidnight(now) });
+  const governing = blockers.length ? latest(blockers) : null;
+  return {
+    blocked: governing !== null,
+    left: Math.max(0, Math.min(FREE_WINDOW_COMPILES - win.used, FREE_DAILY_COMPILES - dayCount)),
+    resetAt: governing ? governing.at : null,
+  };
+}
+
+/** Which window and day a compile was counted in, so it can be handed back. */
+export interface CompileReceipt {
+  windowStart: number;
+  day: string;
+}
+
+export interface CompileSpend {
+  allowed: boolean;
+  /** Compiles left after this one; null when the plan has no limit. */
+  left: number | null;
+  resetAt: number | null;
+  patch: Partial<UserQuotaDoc> | null;
+  receipt: CompileReceipt | null;
+}
+
+/** Take one free compile, if one is left. */
+export function spendCompile(doc: UserQuotaDoc, now: number): CompileSpend {
+  const allowance = compileAllowance(doc, now);
+  if (allowance.blocked) return { allowed: false, left: 0, resetAt: allowance.resetAt, patch: null, receipt: null };
+  const win = liveWindow(doc.compileWindowStart, doc.compileWindowCount, now);
+  const today = utcDay(now);
+  const start = win.start ?? now;
+  return {
+    allowed: true,
+    left: allowance.left - 1,
+    resetAt: null,
+    patch: {
+      compileWindowStart: start,
+      compileWindowCount: win.used + 1,
+      compileDay: today,
+      compileDayCount: (doc.compileDay === today ? doc.compileDayCount : 0) + 1,
+    },
+    receipt: { windowStart: start, day: today },
+  };
+}
+
+/** Give back a failed compile — only to the window and day it was taken from. */
+export function refundPatch(doc: UserQuotaDoc, receipt: CompileReceipt): Partial<UserQuotaDoc> | null {
+  const patch: Partial<UserQuotaDoc> = {};
+  if (doc.compileWindowStart === receipt.windowStart && doc.compileWindowCount > 0) {
+    patch.compileWindowCount = doc.compileWindowCount - 1;
+  }
+  if (doc.compileDay === receipt.day && doc.compileDayCount > 0) {
+    patch.compileDayCount = doc.compileDayCount - 1;
+  }
+  return Object.keys(patch).length ? patch : null;
+}
+
+/**
+ * Count one of a free account's compiles; every other tier compiles without
+ * limit. Transactional, so two compiles at once cannot both take the last one.
+ */
+export async function consumeCompile(uid: string, email: string | null, emailVerified: boolean): Promise<Omit<CompileSpend, "patch">> {
+  const level = accessLevelFor(email, emailVerified);
+  if (level === "unmetered") return { allowed: true, left: null, resetAt: null, receipt: null };
+  const ref = adminDb.collection("users").doc(uid);
+  return adminDb.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const doc = readUserDoc(snap.exists ? snap.data() : {});
+    if (tierOf(doc, level) !== "free") return { allowed: true, left: null, resetAt: null, receipt: null };
+    const { patch, ...spend } = spendCompile(doc, Date.now());
+    if (patch) tx.set(ref, { ...patch, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    return spend;
+  });
+}
+
+/** Hand back a compile that failed. */
+export async function refundCompile(uid: string, receipt: CompileReceipt): Promise<void> {
+  const ref = adminDb.collection("users").doc(uid);
+  await adminDb.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return;
+    const patch = refundPatch(readUserDoc(snap.data()), receipt);
+    if (patch) tx.set(ref, { ...patch, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+  });
 }

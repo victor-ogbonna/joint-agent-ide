@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Sparkles, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download} from "lucide-react";
+import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip } from "recharts";
@@ -26,6 +26,7 @@ import GithubPanel from "./components/GithubPanel";
 import WebPreviewPanel from "./components/WebPreviewPanel";
 import PlansModal from "./components/PlansModal";
 import { canInstallApp, installApp, isInstalledFullscreenApp, onInstallAvailabilityChange } from "./lib/installApp";
+import { WINDOW_HOURS, FREE_WINDOW_TOKENS, FREE_DAILY_TOKENS, PRO_WINDOW_TOKENS, PAID_TOKEN_CAP, formatWait, formatClock } from "./lib/plans";
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
 import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts, describeVisibleUsbDevices } from "./lib/webusbSerial";
@@ -215,11 +216,6 @@ const getBoardInfoBase = (vendorId: number | undefined, productId: number | unde
 
   return null;
 };
-
-// Mirrors server/quota.ts's FREE_TOKEN_CAP / PAID_TOKEN_CAP — used for display
-// copy only, the real enforcement is server-side.
-const FREE_TOKEN_CAP = 50000;
-const PAID_TOKEN_CAP = 400000;
 
 const INITIAL_CODE = `/**
  * Joint-Agent IoT Core Node
@@ -430,13 +426,16 @@ export default function App() {
   useEffect(() => onInstallAvailabilityChange(() => setCanInstall(canInstallApp())), []);
   /**
    * The account's plan as the server reports it: "pro" (subscribed or
-   * granted), "unmetered", "free", or "lite" (free with the free tokens
-   * spent). Kept apart from `tier`, which the chat stream overwrites with
-   * "full"/"lite" and so cannot say whether someone is on PRO. Null until the
-   * server has answered, so a PRO user is never shown an upgrade in between.
+   * granted), "unmetered" or "free". Kept apart from `tier`, which the chat
+   * stream overwrites with "full"/"free" and so cannot say whether someone is
+   * on PRO. Null until the server has answered, so a PRO user is never shown
+   * an upgrade in between.
    */
   const [accountTier, setAccountTier] = useState<string | null>(null);
   const isPro = accountTier === "pro" || accountTier === "unmetered";
+  // Plan Mode is part of PRO. Until the plan is known it stays hidden, so a
+  // free account never sees it appear and vanish.
+  const planModeAvailable = isPro;
 
   /**
    * Swipe between the phone's sections: left for the next one, right for the
@@ -488,6 +487,32 @@ export default function App() {
   const [isEdgeImpulseModalOpen, setIsEdgeImpulseModalOpen] = useState(false);
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState(false);
   const [quotaBlockInfo, setQuotaBlockInfo] = useState<QuotaBlockedInfo | null>(null);
+  // While paused, tick so the countdown moves, and lift the pause the moment
+  // its refill time comes: the agent is usable again without a reload.
+  const [pauseNow, setPauseNow] = useState(() => Date.now());
+  useEffect(() => {
+    const resetAt = quotaBlockInfo?.resetAt;
+    if (!resetAt) return;
+    const tick = () => {
+      const now = Date.now();
+      setPauseNow(now);
+      if (now >= resetAt) {
+        clearLastKnownBlock();
+        setQuotaBlockInfo(null);
+        setIsUpgradeModalOpen(false);
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 15000);
+    // A phone that slept through the refill catches up as soon as it wakes.
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, [quotaBlockInfo?.resetAt]);
+  /** "2 h 13 min", or null when only the billing date lifts the pause. */
+  const pauseWait = quotaBlockInfo?.resetAt ? formatWait(quotaBlockInfo.resetAt, pauseNow) : null;
   const [isSubscribing, setIsSubscribing] = useState(false);
   const [mcuPluggedIn, setMcuPluggedIn] = useState(false);
   const mcuPluggedInRef = useRef(false);
@@ -524,14 +549,21 @@ export default function App() {
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  // "lite" once a free user has spent their free tokens: a less capable
-  // model, no auto-debug, a daily compile allowance. A ref as well, because
-  // Smart Flash runs from closures that predate the latest state.
+  // "free" on the Free plan: shorter replies, no auto-debug, no Plan Mode, a
+  // compile allowance. A ref as well, because Smart Flash runs from closures
+  // that predate the latest state.
   const [tier, setTier] = useState<string | null>(null);
   const tierRef = useRef<string | null>(null);
   useEffect(() => { tierRef.current = tier; }, [tier]);
-  const [liteNoticeOpen, setLiteNoticeOpen] = useState(false);
-  const [usageInfo, setUsageInfo] = useState<{ tokensUsed: number; tokenCap: number; subscriptionStatus: string } | null>(null);
+  const [usageInfo, setUsageInfo] = useState<{
+    tokensUsed: number;
+    /** Null: never metered. */
+    tokenCap: number | null;
+    windowResetAt: number | null;
+    cycleUsed: number | null;
+    cycleCap: number | null;
+    subscriptionStatus: string;
+  } | null>(null);
   const [isCancelingSubscription, setIsCancelingSubscription] = useState(false);
 
   const [mcu, setMcu] = useState<MCUType>("esp32");
@@ -664,7 +696,13 @@ export default function App() {
         const status = await res.json();
         if (status.tier) { setTier(status.tier); setAccountTier(status.tier); }
         if (status.blocked) {
-          const info: QuotaBlockedInfo = { tier: status.subscriptionStatus === "active" ? "paid" : "free", tokensUsed: status.tokensUsed, tokenCap: status.tokenCap };
+          const info: QuotaBlockedInfo = {
+            tier: status.tier === "free" ? "free" : "paid",
+            tokensUsed: status.tokensUsed,
+            tokenCap: status.tokenCap ?? 0,
+            reason: status.reason ?? null,
+            resetAt: typeof status.resetAt === "number" ? status.resetAt : null,
+          };
           setQuotaBlockInfo(info);
           primeLastKnownBlock(info);
         }
@@ -673,16 +711,6 @@ export default function App() {
       }
     })();
   }, [user]);
-
-  // Tell a user once, briefly, that they have moved to the lite tier.
-  useEffect(() => {
-    if (tier !== "lite" || !user) return;
-    const key = `liteNoticeSeen:${user.uid}`;
-    try { if (localStorage.getItem(key)) return; localStorage.setItem(key, "1"); } catch { /* storage off: show it anyway */ }
-    setLiteNoticeOpen(true);
-    logToTerminal("[PLAN] Your free Pro tokens are used up. You're now on the Lite tier: a less capable model, no auto-debug, and 5 compiles a day. Subscribe to Pro for the full agent.", "info");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tier, user]);
 
   const handleOpenProfileMenu = () => {
     setIsMenuOpen((open) => !open);
@@ -693,7 +721,14 @@ export default function App() {
         const res = await fetch("/api/quota/status", { headers: { Authorization: `Bearer ${idToken}` } });
         if (!res.ok) return;
         const status = await res.json();
-        setUsageInfo({ tokensUsed: status.tokensUsed, tokenCap: status.tokenCap, subscriptionStatus: status.subscriptionStatus });
+        setUsageInfo({
+          tokensUsed: status.tokensUsed ?? 0,
+          tokenCap: typeof status.tokenCap === "number" ? status.tokenCap : null,
+          windowResetAt: typeof status.windowResetAt === "number" ? status.windowResetAt : null,
+          cycleUsed: typeof status.cycleUsed === "number" ? status.cycleUsed : null,
+          cycleCap: typeof status.cycleCap === "number" ? status.cycleCap : null,
+          subscriptionStatus: status.subscriptionStatus,
+        });
         if (status.tier) setAccountTier(status.tier);
       } catch {
         // Non-fatal — the dropdown just won't show a usage figure this time.
@@ -703,7 +738,7 @@ export default function App() {
 
   const handleCancelSubscription = async () => {
     if (!user) return;
-    if (!window.confirm("Cancel your $7/month subscription? You'll keep access until the current cycle ends, then the free token cap applies again.")) return;
+    if (!window.confirm("Cancel your $7/month subscription? You'll keep PRO until the current cycle ends, then your account returns to the Free plan.")) return;
     setIsCancelingSubscription(true);
     try {
       const idToken = await user.getIdToken();
@@ -1350,9 +1385,9 @@ export default function App() {
         throw new Error(`Server returned an invalid response (Compilation failed or timed out): ${response.statusText}`);
       }
 
-      const liteLeft = response.headers.get("X-Lite-Compiles-Left");
-      if (liteLeft && liteLeft !== "unlimited") {
-        logToTerminal(`[COMPILER] Lite tier: ${liteLeft} compile${liteLeft === "1" ? "" : "s"} left today.`, "info");
+      const freeLeft = response.headers.get("X-Free-Compiles-Left");
+      if (freeLeft && freeLeft !== "unlimited") {
+        logToTerminal(`[COMPILER] Free plan: ${freeLeft} compile${freeLeft === "1" ? "" : "s"} left for now. Failed builds don't count.`, "info");
       }
       if (data.success) {
         logToTerminal(`[COMPILER] Build succeeded! Binary size: ${Math.round(data.binary.length * 0.75)} bytes.`, "success");
@@ -2029,7 +2064,7 @@ export default function App() {
       if (result.blocked) {
         setQuotaBlockInfo(result.info);
         setIsUpgradeModalOpen(true);
-        logToTerminal("[DEBUGGER] Free AI tokens used up — upgrade to keep instrumenting code.", "error");
+        logToTerminal("[DEBUGGER] AI tokens used for now. They refill soon — see the countdown in the chat.", "error");
         setIsDebugging(false);
         return;
       }
@@ -2097,7 +2132,7 @@ export default function App() {
           resultBlocked = true;
           setQuotaBlockInfo(result.info);
           setIsUpgradeModalOpen(true);
-          logToTerminal("[AI AGENT] Free AI tokens used up — upgrade to keep auto-debugging.", "error");
+          logToTerminal("[AI AGENT] AI tokens used for now. They refill soon — see the countdown in the chat.", "error");
         } else {
           throw new Error(result.error);
         }
@@ -2164,10 +2199,10 @@ export default function App() {
       return;
     }
 
-    // Auto-debug is a Pro feature. The lite tier stops at the compile error;
+    // Auto-debug is a PRO feature. The Free plan stops at the compile error;
     // the Debug button and the agent can still be asked to fix it.
-    if (!compileResult.success && tierRef.current === "lite") {
-      logToTerminal("[SMART FLASH] Compile failed. Auto-debug is part of Pro — fix the error above, press Debug, or ask the agent. Subscribe to Pro to have Smart Flash fix and retry automatically.", "error");
+    if (!compileResult.success && tierRef.current === "free") {
+      logToTerminal("[SMART FLASH] Compile failed. Auto-debug is part of PRO — fix the error above, press Debug, or ask the agent. Get PRO to have Smart Flash fix and retry automatically.", "error");
       setIsSmartFlashing(false);
       return;
     }
@@ -2238,7 +2273,8 @@ export default function App() {
 
     logToTerminal(`[AI AGENT] Processing request: "${text.slice(0, 30)}..."`, "info");
 
-    const effectiveMode = modeOverride || chatMode;
+    // Plan Mode is a PRO feature; everyone else's request is built.
+    const effectiveMode = planModeAvailable ? (modeOverride || chatMode) : "implement";
 
     // Streamed: the assistant bubble is created empty on the first chunk
     // (replacing the "Agent is thinking" indicator) and grows as text
@@ -3164,15 +3200,15 @@ export default function App() {
                         mcu={mcu}
                         onApplyUpdate={handleApplyProjectUpdate}
                         onOpenCode={handleOpenCode}
-                        chatMode={chatMode}
+                        chatMode={planModeAvailable ? chatMode : "implement"}
                         setChatMode={setChatMode}
+                        planModeAvailable={planModeAvailable}
                         mcuPluggedIn={mcuPluggedIn}
                         onStopGeneration={handleStopGeneration}
                         isSmartFlashing={isSmartFlashing}
                         contextUsage={contextUsage}
-                        liteNotice={liteNoticeOpen}
-                        onDismissLiteNotice={() => setLiteNoticeOpen(false)}
-                        onUpgrade={() => { setLiteNoticeOpen(false); setIsPlansOpen(true); }}
+                        pause={quotaBlockInfo ? { free: quotaBlockInfo.tier === "free", reason: quotaBlockInfo.reason ?? null, wait: pauseWait } : null}
+                        onUpgrade={() => setIsPlansOpen(true)}
                         onSmartFlash={() => {
                           // Smart Flash is disabled until a board connects and
                           // enables the instant it does — the same instant the
@@ -3446,17 +3482,30 @@ export default function App() {
             )}
             {usageInfo && (
               <div className="px-3 py-2 mb-1 border-b border-[var(--border-main)]">
-                <div className="flex items-center gap-1.5 text-[10px] text-[var(--text-muted)] mb-1">
-                  <Activity size={11} />
-                  <span>{usageInfo.subscriptionStatus === "active" ? "This cycle" : "Free tokens"}</span>
-                  <span className="ml-auto text-[var(--text-main)] font-medium">{usageInfo.tokensUsed.toLocaleString()} / {usageInfo.tokenCap.toLocaleString()}</span>
-                </div>
-                <div className="h-1 rounded-full bg-[var(--bg-hover)] overflow-hidden">
-                  <div
-                    className="h-full rounded-full"
-                    style={{ width: `${Math.min(100, (usageInfo.tokensUsed / usageInfo.tokenCap) * 100)}%`, background: 'var(--gradient-hero)' }}
-                  />
-                </div>
+                {usageInfo.tokenCap !== null && (
+                  <>
+                    <div className="flex items-center gap-1.5 text-[10px] text-[var(--text-muted)] mb-1">
+                      <Activity size={11} />
+                      <span>This {WINDOW_HOURS}-hour window</span>
+                      <span className="ml-auto text-[var(--text-main)] font-medium">{usageInfo.tokensUsed.toLocaleString()} / {usageInfo.tokenCap.toLocaleString()}</span>
+                    </div>
+                    <div className="h-1 rounded-full bg-[var(--bg-hover)] overflow-hidden">
+                      <div
+                        className="h-full rounded-full"
+                        style={{ width: `${Math.min(100, (usageInfo.tokensUsed / usageInfo.tokenCap) * 100)}%`, background: 'var(--gradient-hero)' }}
+                      />
+                    </div>
+                    <p className="mt-1 text-[10px] text-[var(--text-subtle)]">
+                      {usageInfo.windowResetAt ? `Refills at ${formatClock(usageInfo.windowResetAt)}` : "Your next message starts a window"}
+                    </p>
+                    {usageInfo.cycleCap !== null && usageInfo.cycleUsed !== null && (
+                      <p className="mt-0.5 flex text-[10px] text-[var(--text-muted)]">
+                        <span>This cycle</span>
+                        <span className="ml-auto text-[var(--text-main)] font-medium">{usageInfo.cycleUsed.toLocaleString()} / {usageInfo.cycleCap.toLocaleString()}</span>
+                      </p>
+                    )}
+                  </>
+                )}
                 {usageInfo.subscriptionStatus === "active" ? (
                   <button
                     onClick={handleCancelSubscription}
@@ -3561,15 +3610,21 @@ export default function App() {
         </div>
       )}
 
-      {/* Upgrade Modal — shown when the free AI token cap is hit */}
+      {/* Pause screen — shown when the account's AI tokens are used for now.
+          Counts down to the refill; Free accounts are shown the way up. */}
       {isUpgradeModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl w-full max-w-sm shadow-2xl overflow-hidden">
+          <div role="dialog" aria-modal="true" aria-labelledby="pause-title" className="bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl w-full max-w-sm shadow-2xl overflow-hidden">
             <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border-main)] bg-[var(--bg-root)] shrink-0">
-              <h2 className="font-display font-bold text-sm text-[var(--text-main)] flex items-center gap-2">
-                <Lock size={14} className="text-orange-400" /> {quotaBlockInfo?.tier === "paid" ? "This Cycle's AI Tokens Used Up" : "Free AI Tokens Used Up"}
+              <h2 id="pause-title" className="font-display font-bold text-sm text-[var(--text-main)] flex items-center gap-2">
+                <Lock size={14} className="text-orange-400" />
+                {quotaBlockInfo?.reason === "cycle"
+                  ? "This cycle's AI tokens are used"
+                  : quotaBlockInfo?.tier === "free"
+                    ? (quotaBlockInfo?.reason === "day" ? "Today's free AI tokens are used" : "Free AI tokens used for now")
+                    : "This session's AI tokens are used"}
               </h2>
-              <button onClick={() => setIsUpgradeModalOpen(false)} className="text-[var(--text-muted)] hover:text-[var(--text-main)]">
+              <button onClick={() => setIsUpgradeModalOpen(false)} aria-label="Close" className="text-[var(--text-muted)] hover:text-[var(--text-main)]">
                 <X size={18} />
               </button>
             </div>
@@ -3578,32 +3633,35 @@ export default function App() {
                 className="w-14 h-14 rounded-2xl flex items-center justify-center text-white shadow-lg"
                 style={{ background: 'var(--gradient-hero)', boxShadow: 'var(--shadow-glow)' }}
               >
-                <Sparkles size={26} />
+                <Clock size={26} />
               </div>
               <h3 className="font-display font-bold text-lg gradient-text">
-                {quotaBlockInfo?.tier === "paid" ? "Back on your next billing date" : "Upgrade to keep building"}
+                {pauseWait ? `Back in ${pauseWait}` : "Back on your next billing date"}
               </h3>
+              {quotaBlockInfo?.resetAt ? (
+                <p className="-mt-2 text-[11px] text-[var(--text-subtle)]">at {formatClock(quotaBlockInfo.resetAt)}</p>
+              ) : null}
               <p className="text-xs text-[var(--text-muted)] leading-relaxed max-w-xs">
-                {quotaBlockInfo?.tier === "paid"
-                  ? <>Subscribers get {PAID_TOKEN_CAP.toLocaleString()} AI tokens every billing cycle. You've used this cycle's allowance — it refreshes on your next billing date.</>
-                  : <>Every account gets {FREE_TOKEN_CAP.toLocaleString()} free AI tokens to build with. You've used them all. Subscribe for $7/month for a {PAID_TOKEN_CAP.toLocaleString()}-token allowance every cycle.</>
-                }
+                {quotaBlockInfo?.tier === "free"
+                  ? <>Free gives you {FREE_WINDOW_TOKENS.toLocaleString()} AI tokens every {WINDOW_HOURS} hours, up to {FREE_DAILY_TOKENS.toLocaleString()} a day. PRO gives you {PRO_WINDOW_TOKENS.toLocaleString()} every {WINDOW_HOURS} hours: 10× more, with auto-debug and Plan Mode.</>
+                  : quotaBlockInfo?.reason === "cycle"
+                    ? <>PRO includes up to {PAID_TOKEN_CAP.toLocaleString()} AI tokens every billing cycle. You've used this cycle's; they refresh on your next billing date.</>
+                    : <>PRO gives you {PRO_WINDOW_TOKENS.toLocaleString()} AI tokens every {WINDOW_HOURS} hours. This window's are used; the agent picks up again when it refills.</>}
               </p>
-              {quotaBlockInfo?.tier !== "paid" && (
+              {quotaBlockInfo?.tier === "free" && !isPro && (
                 <button
-                  onClick={handleSubscribe}
-                  disabled={isSubscribing}
-                  className="w-full mt-2 py-2.5 rounded-lg text-white text-sm font-semibold shadow-md disabled:opacity-60 disabled:cursor-not-allowed transition"
+                  onClick={() => { setIsUpgradeModalOpen(false); setIsPlansOpen(true); }}
+                  className="w-full mt-2 py-2.5 rounded-lg text-white text-sm font-bold shadow-md flex items-center justify-center gap-2 transition"
                   style={{ background: 'var(--gradient-hero)' }}
                 >
-                  {isSubscribing ? "Opening checkout…" : "Subscribe — $7/mo"}
+                  <Rocket size={15} /> Get PRO — 10× more
                 </button>
               )}
               <button
                 onClick={() => setIsUpgradeModalOpen(false)}
                 className="text-[10px] text-[var(--text-subtle)] hover:text-[var(--text-muted)] transition"
               >
-                Maybe later
+                {quotaBlockInfo?.tier === "free" ? "Wait for the refill" : "OK"}
               </button>
             </div>
           </div>

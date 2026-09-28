@@ -3,7 +3,7 @@ import express from "express";
 import path from "path";
 import http from "http";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 import dotenv from "dotenv";
 import { exec, execFile } from 'child_process';
 import util from 'util';
@@ -15,7 +15,7 @@ import { SerialPort } from 'serialport';
 import { ReadlineParser } from '@serialport/parser-readline';
 import { loadAdminConfig, saveAdminConfig } from './server/adminConfig';
 import { readAccessLists, sanitiseEmailList } from './server/access';
-import { requireAuthAndQuota, requireFirebaseAuth, incrementTokenUsage, FREE_TOKEN_CAP, PAID_TOKEN_CAP, getOrCreateUserDoc, LITE_STATUS, LITE_DAILY_COMPILES, consumeCompile, tierOf, liteCompilesLeft } from './server/quota';
+import { requireAuthAndQuota, requireFirebaseAuth, incrementTokenUsage, getOrCreateUserDoc, consumeCompile, refundCompile, CompileReceipt, tierOf, allowanceFor, compileAllowance, formatWait, FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES } from './server/quota';
 import { accessLevelFor } from './server/access';
 import { registerPaystackRoutes } from './server/paystack';
 import { registerWaitlistRoutes } from './server/waitlist';
@@ -356,24 +356,28 @@ registerWaitlistRoutes(app, requireAdmin);
 registerFeedbackRoutes(app, requireFirebaseAuth, requireAdmin);
 registerGithubRoutes(app, requireFirebaseAuth);
 
-// Lets the frontend check where a signed-in user stands relative to their
-// token cap — used both to seed the UI on load and by a blocked user's
-// upgrade modal (hence requireFirebaseAuth, not the quota-enforcing variant).
+// Lets the frontend check where a signed-in user stands in their 5-hour
+// allowance — used both to seed the UI on load and by a paused user's
+// countdown (hence requireFirebaseAuth, not the quota-enforcing variant).
 app.get("/api/quota/status", requireFirebaseAuth, async (req, res) => {
   const doc = await getOrCreateUserDoc(req.uid!);
-  const isPaid = doc.subscriptionStatus === "active";
-  const tokenCap = isPaid ? PAID_TOKEN_CAP : FREE_TOKEN_CAP;
-  const tokensUsed = isPaid ? doc.cycleTokensUsed : doc.lifetimeFreeTokensUsed;
   const tier = tierOf(doc, accessLevelFor(req.email ?? null, req.emailVerified === true));
+  const a = allowanceFor(doc, tier);
   res.json({
     subscriptionStatus: doc.subscriptionStatus,
-    tokensUsed,
-    tokenCap,
-    // A free user past the cap is on the lite tier, not blocked.
-    blocked: isPaid && tokensUsed >= tokenCap,
     tier,
-    liteCompilesLeft: tier === "lite" ? liteCompilesLeft(doc) : null,
-    liteDailyCompiles: LITE_DAILY_COMPILES,
+    // The current 5-hour window. Null cap: never metered.
+    tokensUsed: a.windowUsed,
+    tokenCap: tier === "unmetered" ? null : a.windowCap,
+    windowResetAt: a.windowResetAt,
+    dayUsed: a.dayUsed,
+    dayCap: a.dayCap,
+    cycleUsed: a.cycleUsed,
+    cycleCap: a.cycleCap,
+    blocked: a.blocked,
+    reason: a.reason,
+    resetAt: a.resetAt,
+    compilesLeft: tier === "free" ? compileAllowance(doc).left : null,
   });
 });
 
@@ -606,7 +610,10 @@ Do NOT tell the user to switch modes or click any button. Just state the plan an
 
 // Chat endpoint with function calling
 app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
-  const { messages, mcu, chatMode, boardId } = req.body;
+  const { messages, mcu, boardId } = req.body;
+  // Plan Mode is a PRO feature: a free account's request is always built.
+  const free = req.quota!.tier === "free";
+  const chatMode = free ? "implement" : req.body.chatMode;
   // The sketch in the user's editor. The agent used to see only the chat,
   // so every change was written blind: asked to adjust one thing, it had no
   // way to know the pins and logic already there.
@@ -679,12 +686,10 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     // unchanged — which is exactly the prefix DeepSeek caches automatically,
     // so the Gemini explicit-cache machinery has no equivalent to port.
     const systemText = buildChatSystemInstruction(mcuDescription, mcuPowerPin, chatMode);
-    // Free users past their free tokens are answered by the lite model.
-    const lite = req.quota!.subscriptionStatus === LITE_STATUS;
-    const model = modelFor(lite);
-    // Lets the browser tell the user, the moment it happens, that the free
-    // tokens are spent and the lite tier has taken over.
-    send({ type: "tier", tier: lite ? "lite" : "full" });
+    // Free replies are capped shorter; the model is the same.
+    const model = modelFor(free);
+    // Keeps the browser's idea of the plan current: it gates auto-debug.
+    send({ type: "tier", tier: free ? "free" : "full" });
 
     // Full at AUTOCOMPACT_AT: fold everything but the recent tail into a
     // summary, tell the browser which messages it replaced, and carry on.
@@ -770,7 +775,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     // and cannot be used, and nothing reached the user. Ask once more for a
     // compact version rather than answer "I didn't catch that" to a request
     // that was perfectly clear, just large.
-    if (result.truncated && !result.toolCall && !result.textToolCall && !result.sentText && chatMode !== "plan" && !lite) {
+    if (result.truncated && !result.toolCall && !result.textToolCall && !result.sentText && chatMode !== "plan" && !free) {
       send({ type: "tool_progress", text: "That's a big one — writing a more compact version…" });
       result = await runChat([
         ...dsMessages,
@@ -799,7 +804,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
         toWorkspaceCommand(textToolCall.args?.command) === "monitor";
       if (chatMode !== "plan" || opensMonitor) call = textToolCall;
     }
-    await incrementTokenUsage(req.uid!, req.quota!.subscriptionStatus, outputTokens);
+    await incrementTokenUsage(req.uid!, req.quota, outputTokens);
 
     if (call?.name === "generate_project") {
       // Claims only what actually happened. Schematic rendering is not shipped
@@ -843,8 +848,8 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
         text: textToolCall && chatMode === "plan"
           ? "Turn off Plan Mode and ask again, and I'll make that change."
           : result.truncated
-            ? (lite
-              ? "That's more than the Lite tier can write in one reply. Ask for it in smaller steps, or subscribe to Pro for full-size projects."
+            ? (free
+              ? "That's more than the Free plan can write in one reply. Ask for it in smaller steps, or get PRO for full-size projects."
               : "That was too big to write in one reply. Ask for it in two steps — for example the display and graphics first, then the game logic.")
             : "I didn't catch that — could you say it another way?",
       });
@@ -950,9 +955,9 @@ Wire colours: #EF4444 power, #000000 GND, #3B82F6 signal.
 All four top-level keys are required. Do not wrap the JSON in markdown fences.`,
       },
       { role: "user", content: `Create: ${prompt}` },
-    ], { jsonMode: true }, modelFor(req.quota!.subscriptionStatus === LITE_STATUS));
+    ], { jsonMode: true }, modelFor(req.quota!.tier === "free"));
 
-    await incrementTokenUsage(req.uid!, req.quota!.subscriptionStatus, response.outputTokens);
+    await incrementTokenUsage(req.uid!, req.quota, response.outputTokens);
 
     const resultText = response.text;
     if (!resultText) {
@@ -1011,9 +1016,9 @@ Respond with a single JSON object and nothing else, in exactly this shape:
 Both keys are required. Do not wrap the JSON in markdown fences.`,
       },
       { role: "user", content: `CODE:\n${code}\n\nERROR:\n${error}` },
-    ], { jsonMode: true }, modelFor(req.quota!.subscriptionStatus === LITE_STATUS));
+    ], { jsonMode: true }, modelFor(req.quota!.tier === "free"));
 
-    await incrementTokenUsage(req.uid!, req.quota!.subscriptionStatus, response.outputTokens);
+    await incrementTokenUsage(req.uid!, req.quota, response.outputTokens);
 
     const resultText = response.text;
     if (!resultText) {
@@ -1256,6 +1261,29 @@ void loop() {
 // ----------------------------------------------------
 // Transcription Endpoint
 // ----------------------------------------------------
+// Not a word-for-word transcript: what the user meant to type. Filler and
+// false starts go, small slips are fixed, electronics terms are spelled the
+// way the agent expects, and numbers are never touched — "pin 4" must stay
+// pin 4, or the agent wires the wrong pin.
+const TRANSCRIBE_INSTRUCTION = [
+  "You turn a spoken voice note into the message the speaker meant to type to an AI that writes Arduino and ESP32 firmware.",
+  "- Remove filler words and sounds (um, uh, er, ah, hmm, like, you know, I mean, sort of, kind of, so, okay so) whenever they are only filler.",
+  "- Remove stutters, false starts and repeated words; when the speaker corrects themselves, keep only the corrected version.",
+  "- Fix small grammar slips and words that were clearly misheard, using the context of electronics and embedded programming. Accents vary: understand the meaning rather than transcribing sounds literally.",
+  "- Spell technical terms the standard way: Arduino, Uno, Mega, Nano, ESP32, ESP8266, GPIO, LED, PWM, I2C, SPI, UART, ADC, DHT11, DHT22, HC-SR04, SG90, OLED, LCD, relay, servo, breadboard, sketch, baud rate, Serial Monitor.",
+  "- NEVER change a number, pin, value, unit, time or name. Write numbers as digits (\"pin 4\", \"500 ms\", \"9600 baud\", \"A0\") exactly as spoken.",
+  "- Never add, answer, summarise or explain anything. Keep the speaker's meaning and wording otherwise.",
+  "Output only the cleaned message: no preamble, no commentary, no quotation marks.",
+  "CRITICAL: if the audio contains no intelligible human speech — silence, a tone, music, background noise, a fragment too short to make out — output an empty response. Do NOT invent, guess at, or pad out words that were not spoken. Returning nothing is always correct when nothing was said.",
+].join("\n");
+
+const TRANSCRIBE_ATTEMPTS: Array<{ model: string; thinkingLow: boolean }> = [
+  { model: "gemini-3.5-flash", thinkingLow: true },
+  { model: "gemini-flash-latest", thinkingLow: true },
+  { model: "gemini-flash-latest", thinkingLow: false },
+  { model: "gemini-flash-lite-latest", thinkingLow: false },
+];
+
 app.post("/api/ai/transcribe", requireAuthAndQuota, async (req, res) => {
   try {
     const { audioData, mimeType } = req.body;
@@ -1265,27 +1293,34 @@ app.post("/api/ai/transcribe", requireAuthAndQuota, async (req, res) => {
       return res.status(503).json({ error: "AI transcription is not available. GEMINI_API_KEY is not configured." });
     }
 
-    const response = await ai.models.generateContent({
-      model: "gemini-flash-latest",
-      contents: [
-        {
-          role: "user",
-          parts: [
-            { text: "Transcribe the following audio. Correct obvious disfluencies and stuttering while preserving the speaker's exact meaning and wording. Output the transcription and nothing else — no preamble, no commentary, no quotation marks.\n\nCRITICAL: if the audio contains no intelligible human speech — silence, a tone, music, background noise, a fragment too short to make out — output an empty response. Do NOT invent, guess at, or pad out words that were not spoken. Returning nothing is always correct when nothing was said." },
-            {
-              inlineData: {
-                data: audioData,
-                mimeType: mimeType || "audio/webm"
-              }
-            }
-          ]
-        }
-      ],
-      config: {
-        maxOutputTokens: 1024,
+    const parts = [
+      { text: TRANSCRIBE_INSTRUCTION },
+      { inlineData: { data: audioData, mimeType: mimeType || "audio/webm" } },
+    ];
+    // Pinned to Gemini 3.5 Flash, the better listener, with thinking kept low:
+    // it is billed as output and a voice note needs little. If the key cannot
+    // use it (a free-tier key, a renamed model), the next attempt runs, ending
+    // on exactly the call this endpoint made before, then the Flash-Lite alias.
+    let response: any = null;
+    let lastError: any = null;
+    for (const attempt of TRANSCRIBE_ATTEMPTS) {
+      try {
+        response = await ai.models.generateContent({
+          model: attempt.model,
+          contents: [{ role: "user", parts }],
+          config: {
+            maxOutputTokens: 2048,
+            ...(attempt.thinkingLow ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}),
+          },
+        });
+        break;
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`[Transcribe] ${attempt.model}${attempt.thinkingLow ? " (low thinking)" : ""} failed: ${String(err?.message || err).slice(0, 200)}`);
       }
-    });
-    await incrementTokenUsage(req.uid!, req.quota!.subscriptionStatus, response.usageMetadata?.candidatesTokenCount || 0);
+    }
+    if (!response) throw lastError || new Error("No transcription model answered.");
+    await incrementTokenUsage(req.uid!, req.quota, response.usageMetadata?.candidatesTokenCount || 0);
     res.json({ text: response.text || "" });
   } catch (err: any) {
     // "Transcription failed." told the user nothing and told us nothing
@@ -1306,23 +1341,39 @@ app.post("/api/compile", requireFirebaseAuth, async (req, res) => {
   const { code, mcu, boardId } = req.body;
   if (!code || !mcu) return res.status(400).json({ error: "Code and MCU are required." });
 
-  // The lite tier compiles LITE_DAILY_COMPILES times a day; every other tier
-  // without limit. Counted before the build, so a failed build still counts.
-  let liteCompilesLeftAfter: number | null = null;
+  // Free accounts compile FREE_WINDOW_COMPILES times every 5 hours, at most
+  // FREE_DAILY_COMPILES a day; every other plan without limit. Counted before
+  // the build so two at once cannot both take the last one, and handed back
+  // below if the build fails: only successful compiles count.
+  let freeCompilesLeft: number | null = null;
+  let compileReceipt: CompileReceipt | null = null;
   try {
     const spend = await consumeCompile(req.uid!, req.email ?? null, req.emailVerified === true);
     if (!spend.allowed) {
       return res.status(429).json({
-        error: `The Lite tier includes ${LITE_DAILY_COMPILES} compiles a day, and today's are used. They reset at midnight UTC — or subscribe to Pro for unlimited compiles.`,
-        code: "LITE_COMPILE_LIMIT",
+        error: `The Free plan includes ${FREE_WINDOW_COMPILES} compiles every 5 hours (${FREE_DAILY_COMPILES} a day), and they're used. More in ${formatWait(spend.resetAt)}, or get PRO for unlimited compiles.`,
+        code: "FREE_COMPILE_LIMIT",
+        resetAt: spend.resetAt,
       });
     }
-    liteCompilesLeftAfter = spend.left;
+    freeCompilesLeft = spend.left;
+    compileReceipt = spend.receipt;
   } catch (err: any) {
     // A counting failure must not stop anyone compiling.
     console.error("[Quota] compile count failed:", err?.message || err);
   }
-  res.setHeader("X-Lite-Compiles-Left", liteCompilesLeftAfter === null ? "unlimited" : String(liteCompilesLeftAfter));
+  const setCompilesLeft = () => res.setHeader("X-Free-Compiles-Left", freeCompilesLeft === null ? "unlimited" : String(freeCompilesLeft));
+  // A failed build is not the user's to pay for: often it is the agent's own
+  // mistake, and free accounts have no auto-debug to fix it for them.
+  const refundFailedCompile = async () => {
+    if (!compileReceipt) return;
+    try {
+      await refundCompile(req.uid!, compileReceipt);
+      if (freeCompilesLeft !== null) freeCompilesLeft += 1;
+    } catch (err: any) {
+      console.error("[Quota] compile refund failed:", err?.message || err);
+    }
+  };
 
   const board = resolveBoard(boardId, mcu);
 
@@ -1420,6 +1471,7 @@ lib_deps =
       // flasher needs protocol and speed, and taking them from the same
       // resolution that produced this binary means they can never disagree
       // with what was actually built.
+      setCompilesLeft();
       res.json({
         success: true,
         binary: binaryData,
@@ -1434,6 +1486,8 @@ lib_deps =
       // compileSucceeded tells the client this is NOT a code problem, so it
       // must not burn five AI debug rounds trying to "fix" working code.
       const tail = scrubToolchainNames((stderr || stdout || "").trim()).split("\n").slice(-12).join("\n");
+      await refundFailedCompile();
+      setCompilesLeft();
       res.status(500).json({
         error: "The build reported success but no firmware file was produced. This is a build-server problem, not a problem with your code.",
         compileSucceeded: true,
@@ -1441,6 +1495,8 @@ lib_deps =
       });
     }
   } catch (err: any) {
+    await refundFailedCompile();
+    setCompilesLeft();
     res.status(500).json({
       error: "Compilation failed.",
       stdout: scrubToolchainNames(err.stdout || ""),

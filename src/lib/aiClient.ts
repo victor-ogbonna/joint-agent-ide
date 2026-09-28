@@ -4,6 +4,10 @@ export interface QuotaBlockedInfo {
   tier: "free" | "paid";
   tokensUsed: number;
   tokenCap: number;
+  /** Why the account is paused: its 5-hour window, a free day, or a PRO billing cycle. */
+  reason?: "window" | "day" | "cycle" | null;
+  /** When the pause lifts (ms since epoch); null when only the billing date will lift it. */
+  resetAt?: number | null;
 }
 
 // Flat shape (not a discriminated union) — this project's tsconfig doesn't
@@ -19,12 +23,18 @@ export interface AiCallResult<T> {
 }
 
 // Last-known block status, so a call site can skip a pointless network round
-// trip (and the Gemini call it would otherwise trigger server-side) when the
-// user is already known to be capped out.
+// trip (and the model call it would otherwise trigger server-side) when the
+// user is already known to be paused. A pause ends by itself: once its refill
+// time has passed it is forgotten and the next call goes through.
 let lastKnownBlocked: QuotaBlockedInfo | null = null;
 
-export function getLastKnownBlock(): QuotaBlockedInfo | null {
+function currentBlock(): QuotaBlockedInfo | null {
+  if (lastKnownBlocked?.resetAt && Date.now() >= lastKnownBlocked.resetAt) lastKnownBlocked = null;
   return lastKnownBlocked;
+}
+
+export function getLastKnownBlock(): QuotaBlockedInfo | null {
+  return currentBlock();
 }
 
 export function primeLastKnownBlock(info: QuotaBlockedInfo | null): void {
@@ -78,7 +88,8 @@ type AuthedRequestResult = { response: Response } | { blocked: QuotaBlockedInfo 
 // token, retries once on a stale/expired token, and normalizes the 402
 // "token cap reached" response so callers don't each re-implement this.
 async function authedRequest(path: string, body: any, signal?: AbortSignal): Promise<AuthedRequestResult> {
-  if (lastKnownBlocked) return { blocked: lastKnownBlocked };
+  const known = currentBlock();
+  if (known) return { blocked: known };
 
   try {
     let response = await authedFetch(path, body, signal);
@@ -93,6 +104,8 @@ async function authedRequest(path: string, body: any, signal?: AbortSignal): Pro
         tier: payload.tier === "paid" ? "paid" : "free",
         tokensUsed: payload.tokensUsed ?? 0,
         tokenCap: payload.tokenCap ?? 0,
+        reason: payload.reason ?? null,
+        resetAt: typeof payload.resetAt === "number" ? payload.resetAt : null,
       };
       lastKnownBlocked = info;
       return { blocked: info };
