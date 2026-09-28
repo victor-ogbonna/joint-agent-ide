@@ -173,6 +173,61 @@ select:focus-visible,
   animation: slideUp 0.3s ease-out forwards;
 }
 
+/* The Get PRO rocket: a flame that flickers, and a small lift when motion is
+   welcome. Only the glow runs under reduced motion — it moves nothing. */
+@keyframes rocketFlame {
+  0%, 100% { filter: drop-shadow(0 0 2px rgba(255, 196, 64, 0.95)) drop-shadow(0 2px 3px rgba(255, 120, 40, 0.8)); }
+  50% { filter: drop-shadow(0 0 4px rgba(255, 222, 120, 1)) drop-shadow(0 3px 6px rgba(255, 90, 30, 0.95)); }
+}
+@keyframes rocketLift {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  50% { transform: translate(1px, -1.5px) rotate(-4deg); }
+}
+.rocket-blaze {
+  animation: rocketFlame 0.9s ease-in-out infinite, rocketLift 1.8s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rocket-blaze { animation: rocketFlame 0.9s ease-in-out infinite; }
+}
+
+/* PRO: bold orange with an electric glow that pulses. Only the glow
+   changes — nothing moves — so it stays on under reduced motion. */
+@keyframes proElectric {
+  0%, 100% {
+    text-shadow: 0 0 2px rgba(255, 170, 60, 0.9), 0 0 6px rgba(249, 115, 22, 0.75), 0 0 12px rgba(249, 115, 22, 0.35);
+  }
+  45% {
+    text-shadow: 0 0 3px rgba(255, 220, 140, 1), 0 0 10px rgba(255, 140, 40, 0.95), 0 0 22px rgba(249, 115, 22, 0.7);
+  }
+  50% {
+    text-shadow: 0 0 1px rgba(255, 240, 200, 1), 0 0 4px rgba(255, 160, 60, 0.8), 0 0 8px rgba(249, 115, 22, 0.4);
+  }
+  55% {
+    text-shadow: 0 0 3px rgba(255, 220, 140, 1), 0 0 12px rgba(255, 140, 40, 1), 0 0 26px rgba(249, 115, 22, 0.75);
+  }
+}
+.pro-electric {
+  color: #fb923c;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  animation: proElectric 1.8s ease-in-out infinite;
+}
+
+/* A phone section sliding in from the side it was swiped from. */
+@keyframes paneInFromRight {
+  from { opacity: 0.4; transform: translateX(28px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes paneInFromLeft {
+  from { opacity: 0.4; transform: translateX(-28px); }
+  to { opacity: 1; transform: none; }
+}
+.pane-in-next { animation: paneInFromRight 0.2s ease-out; }
+.pane-in-prev { animation: paneInFromLeft 0.2s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .pane-in-next, .pane-in-prev { animation: none; }
+}
+
 /* Pulse ring */
 @keyframes pulseRing {
   0% { box-shadow: 0 0 0 0 var(--accent-primary); opacity: 1; }

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { X, FolderOpen, Plus, Trash2, Cpu, Loader2, FileCode } from "lucide-react";
+import { X, FolderOpen, Plus, Trash2, Cpu, Loader2, FileCode, Search } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { listProjects, deleteProject, ProjectSummary } from "../lib/projects";
 
@@ -27,6 +27,15 @@ export default function ProjectsBrowser({ onClose, onOpenProject, onNewProject, 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  // Name or board, any order of words: "mega blink" finds "Blink" on a Mega.
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const shown = words.length
+    ? projects.filter((p) => {
+        const haystack = `${p.name} ${p.boardId || ""} ${p.mcu || ""}`.toLowerCase();
+        return words.every((w) => haystack.includes(w));
+      })
+    : projects;
 
   const refresh = async () => {
     if (!user) return;
@@ -71,6 +80,20 @@ export default function ProjectsBrowser({ onClose, onOpenProject, onNewProject, 
           </button>
         </div>
 
+        <div className="px-5 py-3 border-b border-[var(--border-main)] shrink-0">
+          <div className="relative">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] pointer-events-none" />
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search projects by name or board"
+              aria-label="Search projects"
+              className="w-full bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-lg pl-9 pr-3 py-2 text-sm text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] transition"
+            />
+          </div>
+        </div>
+
         <div className="flex-1 overflow-y-auto p-5 terminal-scrollbar">
           {loading ? (
             <div className="flex items-center justify-center py-16 text-[var(--text-muted)]">
@@ -88,7 +111,7 @@ export default function ProjectsBrowser({ onClose, onOpenProject, onNewProject, 
                 <span className="text-xs font-semibold">New Project</span>
               </button>
 
-              {projects.map((p) => (
+              {shown.map((p) => (
                 <div
                   key={p.id}
                   onClick={() => onOpenProject(p.id)}
@@ -120,6 +143,11 @@ export default function ProjectsBrowser({ onClose, onOpenProject, onNewProject, 
               {!loading && projects.length === 0 && (
                 <div className="col-span-full text-center py-8 text-xs text-[var(--text-muted)]">
                   No saved projects yet — create one to get started.
+                </div>
+              )}
+              {!loading && projects.length > 0 && shown.length === 0 && (
+                <div className="col-span-full text-center py-8 text-xs text-[var(--text-muted)]">
+                  No project matches "{query.trim()}".
                 </div>
               )}
             </div>
