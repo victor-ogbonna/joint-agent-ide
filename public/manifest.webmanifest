@@ -1,0 +1,17 @@
+{
+  "id": "/",
+  "name": "Joint-Agent IDE",
+  "short_name": "Joint-Agent",
+  "description": "Describe your project. The agent writes the code, compiles it and flashes it to your ESP32 or Arduino.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "fullscreen",
+  "background_color": "#08090d",
+  "theme_color": "#0B0D12",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

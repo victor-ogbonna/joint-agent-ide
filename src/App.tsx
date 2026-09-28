@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Sparkles, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle} from "lucide-react";
+import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Sparkles, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip } from "recharts";
@@ -25,6 +25,7 @@ import FeedbackWidget from "./components/FeedbackWidget";
 import GithubPanel from "./components/GithubPanel";
 import WebPreviewPanel from "./components/WebPreviewPanel";
 import PlansModal from "./components/PlansModal";
+import { canInstallApp, installApp, isInstalledFullscreenApp, onInstallAvailabilityChange } from "./lib/installApp";
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
 import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts, describeVisibleUsbDevices } from "./lib/webusbSerial";
@@ -347,12 +348,18 @@ export default function App() {
    * text field taking focus exits fullscreen itself, the page resizes above
    * the keyboard as it always did outside fullscreen, and the next tap on
    * the workspace once typing is done goes back in.
+   *
+   * The installed app (opened from its home-screen icon) is already
+   * fullscreen, with the keyboard resizing the page, so none of this runs
+   * there. Asking for fullscreen on top would bring back Chrome's "drag from
+   * the top" message and the covered chat box.
    */
   useEffect(() => {
     // A touch-only device, in either orientation — not just a narrow window,
     // since a phone turned sideways is wider than the narrow layout's cutoff.
     const touchOnly = window.matchMedia?.("(hover: none) and (pointer: coarse)").matches;
     if (!touchOnly) return;
+    if (isInstalledFullscreenApp()) return;
     const doc: any = document;
     const root: any = document.documentElement;
     const request = root.requestFullscreen || root.webkitRequestFullscreen;
@@ -417,6 +424,10 @@ export default function App() {
   // The profile menu opens from the sidebar now, which a resizable panel
   // clips; it is placed on the page from where its row sits.
   const [profileMenuAt, setProfileMenuAt] = useState<{ left: number; top: number } | null>(null);
+  // Whether Chrome will install the site as an app right now. Never true
+  // inside the installed app itself.
+  const [canInstall, setCanInstall] = useState(canInstallApp);
+  useEffect(() => onInstallAvailabilityChange(() => setCanInstall(canInstallApp())), []);
   /**
    * The account's plan as the server reports it: "pro" (subscribed or
    * granted), "unmetered", "free", or "lite" (free with the free tokens
@@ -3470,6 +3481,15 @@ export default function App() {
                   </button>
                 ) : null}
               </div>
+            )}
+            {canInstall && (
+              <button
+                onClick={() => { setIsMenuOpen(false); installApp(); }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition rounded-md mx-1"
+              >
+                <Download size={14} className="text-[var(--text-muted)]" />
+                Install app
+              </button>
             )}
             <button
               onClick={() => { setIsMenuOpen(false); setFeedbackOpen(true); }}
