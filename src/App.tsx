@@ -2750,10 +2750,8 @@ export default function App() {
             // accounts, a quiet badge for PRO ones — and nothing until the
             // server has said which, so PRO never flashes an upgrade.
             accountTier === null ? null : isPro ? (
-              <span
-                className="pro-electric flex items-center h-9 px-2.5 rounded-lg text-[15px] border border-orange-500/40 bg-orange-500/10 select-none"
-                title="You're on PRO"
-              >
+              <span className="pro-badge h-9 px-1 text-[15px] select-none" title="You're on PRO">
+                <Zap size={16} fill="currentColor" strokeWidth={1.5} aria-hidden="true" />
                 PRO
               </span>
             ) : (
@@ -2933,7 +2931,6 @@ export default function App() {
                       handleOpenProfileMenu();
                     }}
                     className="min-w-0 max-w-full flex items-center gap-2.5 px-2 py-2 rounded-md hover:bg-[var(--bg-hover)] transition text-left"
-                    title={user.email || undefined}
                   >
                     {user.photoURL ? (
                       <img src={user.photoURL} alt="" referrerPolicy="no-referrer" className="w-7 h-7 rounded-full shrink-0" />
@@ -2945,17 +2942,17 @@ export default function App() {
                         {(user.displayName || user.email || '?').charAt(0).toUpperCase()}
                       </span>
                     )}
-                    <span className="min-w-0">
-                      <span className="block text-[12px] font-semibold text-[var(--text-main)] truncate">
-                        {user.displayName || user.email?.split("@")[0] || "Your account"}
-                      </span>
-                      {user.email && <span className="block text-[10px] text-[var(--text-subtle)] truncate">{user.email}</span>}
+                    <span className="min-w-0 block text-[12px] font-semibold text-[var(--text-main)] truncate">
+                      {user.displayName || user.email?.split("@")[0] || "Your account"}
                     </span>
                   </button>
                   {/* Beside the name: the way up for a free account, the plan
                       itself for a PRO one — never an upgrade offer to PRO. */}
                   {isPro ? (
-                    <span className="pro-electric text-[13px] px-1.5 shrink-0 select-none" title="You're on PRO">PRO</span>
+                    <span className="pro-badge text-[13px] px-1.5 shrink-0 select-none" title="You're on PRO">
+                      <Zap size={13} fill="currentColor" strokeWidth={1.5} aria-hidden="true" />
+                      PRO
+                    </span>
                   ) : accountTier !== null ? (
                     <button
                       onClick={() => setIsPlansOpen(true)}
@@ -3444,8 +3441,7 @@ export default function App() {
           >
             {user && (
               <div className="px-3 py-2 mb-1 border-b border-[var(--border-main)]">
-                <p className="text-xs font-medium text-[var(--text-main)] truncate">{user.displayName || "Signed in"}</p>
-                <p className="text-[10px] text-[var(--text-muted)] truncate">{user.email}</p>
+                <p className="text-xs font-medium text-[var(--text-main)] truncate">{user.displayName || user.email?.split("@")[0] || "Your account"}</p>
               </div>
             )}
             {usageInfo && (

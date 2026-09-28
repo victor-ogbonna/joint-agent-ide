@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import {
-  Cpu, Wallet, TerminalSquare, X, Loader2, Zap,
+  Cpu, Puzzle, TerminalSquare, X, Loader2, Zap,
   Mail, Lock, User as UserIcon, ArrowRight, Sparkles,
   MessageSquare, FileCode2, FlaskConical, Activity, Chrome, Bell, Check, Smartphone, Play, Pause
 } from "lucide-react";
@@ -771,7 +771,7 @@ const WORKFLOW = [
 const DIFFERENTIATORS = [
   { icon: Chrome, title: "Nothing to install", desc: "The whole toolchain runs in a browser tab: Chrome or Edge on a computer, Chrome on Android. Reaching USB hardware needs one of those — a browser limit, not ours." },
   { icon: FlaskConical, title: "466 boards, one workspace", desc: "Every ESP32 and AVR board the engine supports, picked from a real catalog — not two hardcoded defaults." },
-  { icon: Wallet, title: "Web3, when you need it", desc: "Bring on-chain data and wallet connections into a project without leaving the IDE." },
+  { icon: Puzzle, title: "Plugins, when you need them", desc: "Add AI, Web3 and more to a project without leaving the IDE: on-device machine learning with Edge Impulse, on-chain data and wallet connections for Web3." },
 ];
 
 // The discovery survey offered right after someone joins — the highest-intent
