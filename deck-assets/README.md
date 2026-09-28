@@ -16,3 +16,9 @@ Expected files:
 
 Originals go here at full resolution. The build downscales and embeds them,
 so don't pre-shrink them yourself.
+
+Two of them are also on the homepage, as copies in `public/`:
+`board-off.jpg` is `public/hero-circuit-off.jpg` and `board-on.jpg` is
+`public/hero-circuit.jpg`. The hero crossfades from one to the other when
+its demo lights the LED, so if either photo is replaced, replace both with
+the same framing.
