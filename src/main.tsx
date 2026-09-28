@@ -7,6 +7,11 @@ import PrivacyPage from './PrivacyPage.tsx';
 import ThanksPage from './ThanksPage.tsx';
 import { AuthProvider, useAuth } from './contexts/AuthContext.tsx';
 import './index.css';
+import { startInstallSupport } from './lib/installApp.ts';
+
+// Caught before anything renders: Chrome's install offer can arrive while the
+// launch screen is still up.
+startInstallSupport();
 
 // No router library yet. Every extra route here bypasses Firebase auth on
 // purpose: /admin has its own password gate, /privacy has to be publicly
