@@ -48,6 +48,16 @@ interface AgentChatProps {
 const MAX_IMAGES = 4;
 const MAX_IMAGE_SIDE = 1600;
 
+/** The longest voice note: long enough to describe a project, short enough
+ *  that one recording cannot run up the transcription bill. */
+const MAX_RECORDING_MS = 2 * 60 * 1000;
+
+/** 83000 ms -> "1:23". */
+function formatClockTime(ms: number): string {
+  const total = Math.min(Math.floor(ms / 1000), Math.floor(MAX_RECORDING_MS / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
 /** Read an image file and return it as a downscaled JPEG data URL. */
 function loadImage(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -377,15 +387,35 @@ export default function AgentChat({
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
+  // Voice notes stop themselves at MAX_RECORDING_MS; the server refuses longer.
+  const [recordingMs, setRecordingMs] = useState(0);
+  const [voiceNote, setVoiceNote] = useState("");
+  const recordTimerRef = useRef<number | null>(null);
+
+  /** Stops a recording, from the button or the 2-minute limit. Refs and
+   *  setters only, so the timer can call it without a stale closure. */
+  const stopRecording = (hitLimit = false) => {
+    if (recordTimerRef.current !== null) {
+      window.clearInterval(recordTimerRef.current);
+      recordTimerRef.current = null;
+    }
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") recorder.stop();
+    setIsRecording(false);
+    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    if (audioContextRef.current && audioContextRef.current.state !== "closed") audioContextRef.current.close();
+    setAudioLevel(0);
+    setAudioBars([0, 0, 0, 0, 0]);
+    if (hitLimit) setVoiceNote("Voice notes can be up to 2 minutes, so recording stopped there.");
+  };
+
+  useEffect(() => () => {
+    if (recordTimerRef.current !== null) window.clearInterval(recordTimerRef.current);
+  }, []);
 
   const toggleRecording = async () => {
     if (isRecording) {
-      mediaRecorderRef.current?.stop();
-      setIsRecording(false);
-      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-      if (audioContextRef.current) audioContextRef.current.close();
-      setAudioLevel(0);
-      setAudioBars([0, 0, 0, 0, 0]);
+      stopRecording();
     } else {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -500,9 +530,17 @@ export default function AgentChat({
         };
 
         setVoiceError("");
+        setVoiceNote("");
         peakLevelRef.current = 0;
         mediaRecorder.start();
         setIsRecording(true);
+        const startedAt = Date.now();
+        setRecordingMs(0);
+        recordTimerRef.current = window.setInterval(() => {
+          const elapsed = Date.now() - startedAt;
+          setRecordingMs(elapsed);
+          if (elapsed >= MAX_RECORDING_MS) stopRecording(true);
+        }, 250);
       } catch (err: any) {
         setVoiceError(
           err?.name === "NotAllowedError"
@@ -584,6 +622,7 @@ export default function AgentChat({
         <div className="flex items-center gap-3 shrink-0">
         {contextUsage && <ContextMeter used={contextUsage.used} limit={contextUsage.limit} />}
         <button
+          data-tour="smart-flash"
           type="button"
           onClick={onSmartFlash}
           disabled={!mcuPluggedIn || isSmartFlashing}
@@ -835,6 +874,7 @@ export default function AgentChat({
         </div>
       )}
       <form
+        data-tour="agent-input"
         onSubmit={handleSubmit}
         className="bg-[var(--bg-root)] border-t border-[var(--border-main)] p-2 sm:p-3 flex items-center gap-1.5 sm:gap-2 shrink-0"
       >
@@ -893,6 +933,14 @@ export default function AgentChat({
           />
           {/* A failed transcription used to be invisible — it went to
               console.error only, so the mic looked simply broken. */}
+          {voiceNote && !voiceError && (
+            <p className="mt-1 text-[10px] text-[var(--text-muted)] leading-snug flex items-start gap-1">
+              <span className="flex-1">{voiceNote}</span>
+              <button type="button" onClick={() => setVoiceNote("")} className="text-[var(--text-muted)] hover:text-[var(--text-main)] shrink-0" title="Dismiss">
+                <X size={10} />
+              </button>
+            </p>
+          )}
           {voiceError && (
             <p className="mt-1 text-[10px] text-red-500 leading-snug flex items-start gap-1">
               <span className="flex-1">{voiceError}</span>
@@ -921,14 +969,19 @@ export default function AgentChat({
           onClick={toggleRecording}
         >
           {isRecording ? (
-            <div className="flex items-center gap-0.5 h-4">
-              {audioBars.map((v, i) => (
-                <span
-                  key={i}
-                  className="w-0.5 rounded-full bg-red-500"
-                  style={{ height: `${Math.max(3, Math.min(16, v * 16 + audioLevel * 6))}px`, transition: "height 60ms linear" }}
-                />
-              ))}
+            <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-0.5 h-4">
+                {audioBars.map((v, i) => (
+                  <span
+                    key={i}
+                    className="w-0.5 rounded-full bg-red-500"
+                    style={{ height: `${Math.max(3, Math.min(16, v * 16 + audioLevel * 6))}px`, transition: "height 60ms linear" }}
+                  />
+                ))}
+              </div>
+              <span className="text-[10px] font-semibold tabular-nums" aria-live="off">
+                {formatClockTime(recordingMs)}<span className="text-red-500/60"> / {formatClockTime(MAX_RECORDING_MS)}</span>
+              </span>
             </div>
           ) : (
             <Mic size={16} />

@@ -83,10 +83,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # setupPlatformIO() checks for this exact path and skips reinstalling if
 # present, so this closes the "PlatformIO baked into the image" gap without
 # needing any server.ts changes.
+#
+# Builds run as "jabuild", an account with no access to the server's keys or
+# data (see server/buildUser.ts), so it owns the compiler's folder: builds
+# install frameworks and write caches there. The chown is in the same RUN as
+# the install on purpose; a separate one would copy the whole toolchain into
+# a second layer. Setting BUILD_USER= (empty) in .env turns this off.
 ENV PLATFORMIO_CORE_DIR=/app/.platformio
-RUN python3 -m venv /app/.platformio/penv \
+RUN useradd --system --create-home --home-dir /home/jabuild --shell /usr/sbin/nologin jabuild \
+    && python3 -m venv /app/.platformio/penv \
     && /app/.platformio/penv/bin/pip install --no-cache-dir platformio \
-    && /app/.platformio/penv/bin/pio platform install espressif32 atmelavr
+    && /app/.platformio/penv/bin/pio platform install espressif32 atmelavr \
+    && chown -R jabuild:jabuild /app/.platformio
+ENV BUILD_USER=jabuild
 
 # Already production-only (pruned in the build stage) — copying it directly
 # avoids re-running any install scripts here. vite lives in "dependencies"

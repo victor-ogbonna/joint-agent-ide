@@ -12,17 +12,32 @@ export const FREE_WINDOW_COMPILES = 8;
 export const FREE_DAILY_COMPILES = 25;
 export const PRO_PRICE = "$7/month";
 
-/** "2 h 13 min", "13 min", "less than a minute" until `resetAt`. */
+/** How much of an allowance is used, as a whole percentage: never shown as token counts. */
+export function percentUsed(used: number, cap: number): number {
+  if (!cap || cap <= 0) return 0;
+  const p = (used / cap) * 100;
+  // 0.4% reads as 1%, never as a reassuring 0% after real use; never above 100.
+  return Math.min(100, used > 0 ? Math.max(1, Math.round(p)) : 0);
+}
+
+/** "3 days 4 h", "2 h 13 min", "13 min", "less than a minute" until `resetAt`. */
 export function formatWait(resetAt: number, now = Date.now()): string {
   const minutes = Math.ceil((resetAt - now) / 60000);
   if (minutes <= 1) return "less than a minute";
-  const h = Math.floor(minutes / 60);
+  const d = Math.floor(minutes / 1440);
+  const h = Math.floor((minutes % 1440) / 60);
   const m = minutes % 60;
+  // Past a day, minutes are noise: "3 days 4 h" reads better than "76 h 12 min".
+  if (d) return `${d} day${d === 1 ? "" : "s"}${h ? ` ${h} h` : ""}`;
   if (!h) return `${m} min`;
   return m ? `${h} h ${m} min` : `${h} h`;
 }
 
-/** The refill time on the user's own clock, e.g. "9:40 PM". */
-export function formatClock(at: number): string {
-  return new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+/** The refill time on the user's own clock: "at 9:40 PM" today, "on Fri 3 Oct, 9:40 PM" on another day. */
+export function formatWhen(at: number, now = Date.now()): string {
+  const when = new Date(at);
+  if (when.toDateString() === new Date(now).toDateString()) {
+    return `at ${when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+  }
+  return `on ${when.toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}`;
 }

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock} from "lucide-react";
+import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip } from "recharts";
@@ -13,7 +13,7 @@ import {
   ChatMessage,
   BoardInfo
 } from "./types";
-import CodeEditor from "./components/CodeEditor";
+import CodeEditor, { AskAiRequest } from "./components/CodeEditor";
 import SchematicViewer from "./components/SchematicViewer";
 import Terminal from "./components/Terminal";
 import AgentChat from "./components/AgentChat";
@@ -25,8 +25,10 @@ import FeedbackWidget from "./components/FeedbackWidget";
 import GithubPanel from "./components/GithubPanel";
 import WebPreviewPanel from "./components/WebPreviewPanel";
 import PlansModal from "./components/PlansModal";
+import LibrariesModal from "./components/LibrariesModal";
+import OnboardingTour, { TourStep } from "./components/OnboardingTour";
 import { canInstallApp, installApp, isInstalledFullscreenApp, onInstallAvailabilityChange } from "./lib/installApp";
-import { WINDOW_HOURS, FREE_WINDOW_TOKENS, FREE_DAILY_TOKENS, PRO_WINDOW_TOKENS, PAID_TOKEN_CAP, formatWait, formatClock } from "./lib/plans";
+import { WINDOW_HOURS, FREE_WINDOW_TOKENS, PRO_WINDOW_TOKENS, formatWait, formatWhen, percentUsed } from "./lib/plans";
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
 import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts, describeVisibleUsbDevices } from "./lib/webusbSerial";
@@ -415,6 +417,7 @@ export default function App() {
   // screen: the terminal drops to a strip, until a dock is opened again.
   const [compactDock, setCompactDock] = useState(false);
   const [isPlansOpen, setIsPlansOpen] = useState(false);
+  const [isLibrariesOpen, setIsLibrariesOpen] = useState(false);
   const [isPluginsOpen, setIsPluginsOpen] = useState(false);
   const [isBoardMenuOpen, setIsBoardMenuOpen] = useState(false);
   // The profile menu opens from the sidebar now, which a resizable panel
@@ -487,6 +490,8 @@ export default function App() {
   const [isEdgeImpulseModalOpen, setIsEdgeImpulseModalOpen] = useState(false);
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState(false);
   const [quotaBlockInfo, setQuotaBlockInfo] = useState<QuotaBlockedInfo | null>(null);
+  /** The last compile error in the code itself, for Ask AI's "Fix errors". */
+  const lastCompileErrorRef = useRef<string | null>(null);
   // While paused, tick so the countdown moves, and lift the pause the moment
   // its refill time comes: the agent is usable again without a reload.
   const [pauseNow, setPauseNow] = useState(() => Date.now());
@@ -635,6 +640,10 @@ export default function App() {
   // Shown once per sign-in: "start new" vs "continue previous". Keyed on uid in
   // a ref so a re-render never reopens it, but signing in as someone else does.
   const [showWelcome, setShowWelcome] = useState(false);
+  // The walk-through: automatic on a first-time account's first visit, and
+  // on request from the profile menu. Seen once per account on this device.
+  const [tourOpen, setTourOpen] = useState(false);
+  const tourKey = (uid: string) => `tourSeen:${uid}`;
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [githubOpen, setGithubOpen] = useState(false);
   const [webPreviewOpen, setWebPreviewOpen] = useState(false);
@@ -1371,7 +1380,7 @@ export default function App() {
   };
 
   // Compile microcontroller code simulation
-  const handleCompile = async (overrideCode?: string): Promise<{ success: boolean, data?: any, errorText?: string, compileSucceeded?: boolean }> => {
+  const handleCompile = async (overrideCode?: string): Promise<{ success: boolean, data?: any, errorText?: string, compileSucceeded?: boolean, limited?: { reason: "window" | "day"; resetAt: number | null }, missingLibrary?: string }> => {
     setIsCompiling(true);
     const codeToCompile = overrideCode || code;
     logToTerminal(`[COMPILER] Sending code to cloud build server for ${mcu.toUpperCase()}...`, "info");
@@ -1390,6 +1399,7 @@ export default function App() {
         logToTerminal(`[COMPILER] Free plan: ${freeLeft} compile${freeLeft === "1" ? "" : "s"} left for now. Failed builds don't count.`, "info");
       }
       if (data.success) {
+        lastCompileErrorRef.current = null;
         logToTerminal(`[COMPILER] Build succeeded! Binary size: ${Math.round(data.binary.length * 0.75)} bytes.`, "success");
         setIsCompiling(false);
         return { success: true, data };
@@ -1401,8 +1411,17 @@ export default function App() {
         // build looked like a code bug.
         if (data.detail) logToTerminal(data.detail, "error");
         else if (data.stderr) logToTerminal(data.stderr, "error");
+        // The build stopped for want of a library: say where to add it.
+        const missingLibrary = typeof data.hint === "string" && data.hint ? data.hint : undefined;
+        if (missingLibrary) logToTerminal(`[COMPILER] ${missingLibrary}`, "warning");
         setIsCompiling(false);
-        return { success: false, errorText, compileSucceeded: data.compileSucceeded === true };
+        // Refused by the Free plan's compile limit: the code was never built.
+        const limited = data.code === "FREE_COMPILE_LIMIT"
+          ? { reason: data.reason === "day" ? "day" as const : "window" as const, resetAt: typeof data.resetAt === "number" ? data.resetAt : null }
+          : undefined;
+        // Only a real error in the code is worth handing to Ask AI.
+        if (!limited && data.compileSucceeded !== true) lastCompileErrorRef.current = errorText;
+        return { success: false, errorText, compileSucceeded: data.compileSucceeded === true, limited, missingLibrary };
       }
     } catch (err: any) {
       logToTerminal(`[COMPILER] Build failed: ${err.message}`, "error");
@@ -2064,7 +2083,7 @@ export default function App() {
       if (result.blocked) {
         setQuotaBlockInfo(result.info);
         setIsUpgradeModalOpen(true);
-        logToTerminal("[DEBUGGER] AI tokens used for now. They refill soon — see the countdown in the chat.", "error");
+        logToTerminal("[DEBUGGER] AI tokens used for now. They refill soon; see the countdown in the chat.", "error");
         setIsDebugging(false);
         return;
       }
@@ -2111,11 +2130,111 @@ export default function App() {
     }
   };
 
-  const handleDebugCode = async (actualError?: string, overrideCode?: string): Promise<{ success: boolean, code?: string, blocked?: boolean }> => {
+  const closeTour = (completed: boolean) => {
+    setTourOpen(false);
+    if (user) {
+      try { localStorage.setItem(tourKey(user.uid), completed ? "done" : "skipped"); } catch { /* storage off */ }
+    }
+    // Back to where building starts.
+    if (isNarrowRef.current && appMode === "agentic") setMobilePane("agent");
+  };
+
+  const toPane = (pane: MobilePane) => () => { if (isNarrowRef.current) setMobilePane(pane); };
+  const tourSteps: TourStep[] = [
+    {
+      title: "Welcome to Joint-Agent",
+      body: <>Describe a project, and the agent writes the firmware, compiles it and flashes it to your board. Here's a quick look around.</>,
+    },
+    ...(isNarrow ? [{
+      target: '[data-tour="mobile-nav"]',
+      title: "Three sections",
+      body: <>Workspace, Agent and Code. Tap them here, or swipe left and right, to move between them.</>,
+    }] : []),
+    {
+      target: '[data-tour="mode"]',
+      title: "Agent-Mode or Manual-Mode",
+      body: <><b>Agent-Mode</b>: tell the AI what to build. <b>Manual-Mode</b>: write the code yourself, with Ask AI to help.</>,
+    },
+    {
+      target: '[data-tour="agent-input"]',
+      before: toPane("agent"),
+      title: "Describe what you want",
+      body: <>Type it, or tap the mic and say it (up to 2 minutes). Use <b>+</b> to add a photo of your wiring.</>,
+    },
+    {
+      target: '[data-tour="connect"]',
+      title: "Connect your board",
+      body: isNarrow
+        ? <>Plug your Arduino or ESP32 into your phone with a USB OTG cable, then tap here to connect it.</>
+        : <>Plug your Arduino or ESP32 in over USB, then click <b>Detect Board</b> to connect it.</>,
+    },
+    {
+      target: '[data-tour="smart-flash"]',
+      before: toPane("agent"),
+      title: "Smart Flash",
+      body: <>Compiles your code and flashes it to the board in one tap. On PRO it also fixes compile errors for you.</>,
+    },
+    {
+      target: "#code-editor-panel",
+      before: toPane("editor"),
+      title: "Your code",
+      body: <>The agent's code lands here, ready to edit. Tap <b>Ask AI</b> to fix it, explain it or add comments.</>,
+    },
+    {
+      target: '[data-tour="dock"]',
+      before: toPane("editor"),
+      title: "Terminal and serial monitor",
+      body: <>Build and flash progress shows in the terminal. Open the Serial Monitor or Plotter to see what your board prints.</>,
+    },
+    {
+      target: '[data-tour="sidebar"]',
+      before: toPane("files"),
+      title: "Projects, plugins and your plan",
+      body: <>Save and open projects, add plugins, and tap your name for your usage and plan. You can replay this tour from there.</>,
+    },
+    {
+      title: "You're ready",
+      body: appMode === "agentic"
+        ? <>Try a first project, or describe your own in the Agent chat.</>
+        : <>Write your sketch in the editor, or switch to Agent-Mode and let the AI write it.</>,
+    },
+  ];
+
+  /**
+   * Agent-Mode's Ask AI on the code: turns a quick choice into a request to
+   * the agent, which already sees the whole sketch. "Fix errors" carries the
+   * last compile error. Always built, never planned: these are quick edits.
+   * On a phone the agent's reply is on the Agent tab, so that is where it goes.
+   */
+  const handleAskAi = ({ action, question, selection }: AskAiRequest) => {
+    const lines = selection ? `\n\n\`\`\`cpp\n${selection.slice(0, 4000)}\n\`\`\`` : "";
+    let request: string;
+    if (action === "fix") {
+      const err = lastCompileErrorRef.current;
+      request = err
+        ? `Fix the compile errors in the sketch${selection ? ", starting with these lines" : ""}. The compiler said:\n\n\`\`\`\n${err.slice(-1500)}\n\`\`\`${lines}`
+        : `Check the sketch${selection ? ", especially these lines," : ""} for errors and fix any you find.${lines}`;
+    } else if (action === "explain") {
+      request = selection
+        ? `Explain what these lines do, step by step, in plain words.${lines}`
+        : "Explain what this sketch does, step by step, in plain words.";
+    } else if (action === "comment") {
+      request = selection
+        ? `Add clear comments to these lines explaining what they do and why. Don't change what the code does.${lines}`
+        : "Add clear comments to the sketch explaining what each part does and why. Don't change what the code does.";
+    } else {
+      request = `${question}${lines}`;
+    }
+    if (isNarrowRef.current) setMobilePane("agent");
+    handleSendMessage(request, "implement");
+  };
+
+  const handleDebugCode = async (actualError?: string, overrideCode?: string, autoDebugRun?: string): Promise<{ success: boolean, code?: string, blocked?: boolean, info?: QuotaBlockedInfo }> => {
     const requestProjectId = currentProjectIdRef.current;
     let resultCode = overrideCode || code;
     let resultSuccess = false;
     let resultBlocked = false;
+    let resultInfo: QuotaBlockedInfo | undefined;
     setIsDebugging(true);
     logToTerminal("[AI AGENT] Analysing code structure and syntax rules...", "info");
 
@@ -2124,15 +2243,18 @@ export default function App() {
         code: overrideCode || code,
         error: actualError || "Compilation check request. Scan for syntax risks and optimize memory allocation.",
         mcu,
-        boardId
+        boardId,
+        // A PRO Smart Flash run that started inside the allowance may finish.
+        ...(autoDebugRun ? { autoDebugRun } : {}),
       });
 
       if (!result.ok) {
         if (result.blocked) {
           resultBlocked = true;
+          resultInfo = result.info;
           setQuotaBlockInfo(result.info);
           setIsUpgradeModalOpen(true);
-          logToTerminal("[AI AGENT] AI tokens used for now. They refill soon — see the countdown in the chat.", "error");
+          logToTerminal("[AI AGENT] AI tokens used for now. They refill soon; see the countdown in the chat.", "error");
         } else {
           throw new Error(result.error);
         }
@@ -2153,7 +2275,7 @@ export default function App() {
     } finally {
       setIsDebugging(false);
     }
-    return { success: resultSuccess, code: resultBlocked ? undefined : resultCode, blocked: resultBlocked };
+    return { success: resultSuccess, code: resultBlocked ? undefined : resultCode, blocked: resultBlocked, info: resultInfo };
   };
 
   // Smart Flash: autonomously compile -> AI-debug -> recompile (looped) -> flash.
@@ -2187,6 +2309,9 @@ export default function App() {
 
     const MAX_ATTEMPTS = 5;
     let attempt = 0;
+    // Names this run's auto-debug rounds, so once one is under way it can
+    // finish even if the PRO allowance runs out partway.
+    const autoDebugRun = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     let compileResult = await handleCompile(currentCode);
 
     // A build that compiled but produced no artifact is an infrastructure
@@ -2199,10 +2324,20 @@ export default function App() {
       return;
     }
 
+    // Refused by the Free compile limit: nothing was built, so there is no
+    // error in the code to fix, and saying "fix the error above" would send
+    // the user hunting for a bug that does not exist.
+    if (!compileResult.success && compileResult.limited) {
+      const { reason, resetAt } = compileResult.limited;
+      logToTerminal(`[SMART FLASH] Stopped: you've used ${reason === "day" ? "today's" : "this window's"} free compiles.${resetAt ? ` More in ${formatWait(resetAt)}.` : ""} Your code wasn't checked, so there's nothing to fix. Get PRO for unlimited compiles.`, "error");
+      setIsSmartFlashing(false);
+      return;
+    }
+
     // Auto-debug is a PRO feature. The Free plan stops at the compile error;
-    // the Debug button and the agent can still be asked to fix it.
+    // Ask AI on the code and the agent can still be asked to fix it.
     if (!compileResult.success && tierRef.current === "free") {
-      logToTerminal("[SMART FLASH] Compile failed. Auto-debug is part of PRO — fix the error above, press Debug, or ask the agent. Get PRO to have Smart Flash fix and retry automatically.", "error");
+      logToTerminal("[SMART FLASH] Compile failed. Auto-debug is part of PRO: tap Ask AI on the code, or ask the agent, to fix the error above. Get PRO to have Smart Flash fix and retry automatically.", "error");
       setIsSmartFlashing(false);
       return;
     }
@@ -2210,10 +2345,13 @@ export default function App() {
     while (!compileResult.success && attempt < MAX_ATTEMPTS) {
       attempt++;
       logToTerminal(`[SMART FLASH] Compile error detected. AI auto-debug attempt ${attempt}/${MAX_ATTEMPTS}...`, "error");
-      const debugResult = await handleDebugCode(compileResult.errorText, currentCode);
+      const debugResult = await handleDebugCode(compileResult.errorText, currentCode, autoDebugRun);
       if (!debugResult.code) {
         if (debugResult.blocked) {
-          logToTerminal("[SMART FLASH] Stopped — free AI tokens used up. Upgrade to keep auto-debugging.", "error");
+          const pause = debugResult.info;
+          logToTerminal(pause?.reason === "cycle"
+            ? `[SMART FLASH] Stopped: this month's PRO allowance is used. Auto-debug picks up again ${pause.resetAt ? `in ${formatWait(pause.resetAt)}` : "on your next billing date"}.`
+            : `[SMART FLASH] Stopped: this ${WINDOW_HOURS}-hour window's AI allowance is used. Auto-debug picks up again ${pause?.resetAt ? `in ${formatWait(pause.resetAt)}` : "when it refills"}.`, "error");
         } else {
           logToTerminal("[SMART FLASH] AI debugger returned no fix. Aborting.", "error");
         }
@@ -2221,7 +2359,15 @@ export default function App() {
         return;
       }
       currentCode = debugResult.code;
+      const missingBefore = compileResult.missingLibrary;
       compileResult = await handleCompile(currentCode);
+      // Still missing the same library: it has to be added, and more AI
+      // rounds would only spend the user's allowance rewriting nothing.
+      if (!compileResult.success && compileResult.missingLibrary && compileResult.missingLibrary === missingBefore) {
+        logToTerminal("[SMART FLASH] Stopped: this project needs a library that isn't added yet. Open Libraries above main.cpp to add it, then Smart Flash again.", "error");
+        setIsSmartFlashing(false);
+        return;
+      }
     }
 
     if (!compileResult.success) {
@@ -2593,6 +2739,14 @@ export default function App() {
     }
     if (!recentFetched || welcomeShownForRef.current === user.uid) return;
     welcomeShownForRef.current = user.uid;
+    // Someone with no projects yet, who has not had the tour here, is new:
+    // show them around instead of asking what to open.
+    let seen = true;
+    try { seen = !!localStorage.getItem(tourKey(user.uid)); } catch { /* storage off: skip the tour */ }
+    if (recentProjects.length === 0 && !seen) {
+      setTourOpen(true);
+      return;
+    }
     setShowWelcome(true);
   }, [user, recentFetched]);
 
@@ -2755,7 +2909,7 @@ export default function App() {
 
   /** Agent-Mode / Manual-Mode. Full width on a phone, where it has its own row. */
   const modeSwitcher = (fullWidth: boolean) => (
-    <div className={`flex bg-[var(--bg-root)] p-[3px] rounded-lg border border-[var(--border-main)] ${fullWidth ? "w-full" : "shrink-0"}`}>
+    <div data-tour="mode" className={`flex bg-[var(--bg-root)] p-[3px] rounded-lg border border-[var(--border-main)] ${fullWidth ? "w-full" : "shrink-0"}`}>
       {([
         { mode: "agentic" as const, label: "Agent-Mode", Icon: Bot, on: "bg-[var(--accent-primary-soft)] text-[var(--accent-primary)]" },
         { mode: "manual" as const, label: "Manual-Mode", Icon: PenTool, on: "bg-[var(--accent-secondary-soft)] text-[var(--accent-secondary)]" },
@@ -2853,7 +3007,7 @@ export default function App() {
             // A square that never grows: the project name keeps its room.
             // Connected, it turns green and pulses; a tap shows which board
             // and offers to disconnect it.
-            <div className="relative shrink-0">
+            <div data-tour="connect" className="relative shrink-0">
               {(detectedBoard && mcuPluggedIn) ? (
                 <button
                   onClick={() => setIsBoardMenuOpen((open) => !open)}
@@ -2898,7 +3052,7 @@ export default function App() {
             // shows which board, with a small × that disconnects it. The
             // details float below rather than widening the header, so nothing
             // beside it moves.
-            <div className="group relative shrink-0">
+            <div data-tour="connect" className="group relative shrink-0">
               <button
                 className="status-online w-8 h-8 flex items-center justify-center rounded-lg border border-green-500/50 bg-green-500/15 text-green-400 transition"
                 aria-label={`Board connected: ${detectedBoard}`}
@@ -2922,6 +3076,7 @@ export default function App() {
             </div>
           ) : (
             <button
+              data-tour="connect"
               onClick={handleAutoDetect}
               className="btn-lift flex items-center gap-1.5 bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] px-2.5 py-1 rounded-lg border border-[var(--border-main)] text-[10px] font-medium text-[var(--text-muted)] hover:text-[var(--text-main)] transition shrink-0"
             >
@@ -2951,7 +3106,7 @@ export default function App() {
           {/* Left Sidebar: File Explorer */}
           {(!isNarrow || mobilePane === "files") && (
           <Panel defaultSize={15} minSize={1}>
-            <aside className={`w-full h-full bg-[var(--bg-panel)] border-r border-[var(--border-main)] flex flex-col shrink-0 ${paneEnterClass}`}>
+            <aside data-tour="sidebar" className={`w-full h-full bg-[var(--bg-panel)] border-r border-[var(--border-main)] flex flex-col shrink-0 ${paneEnterClass}`}>
               {/* The account, above the projects: who is signed in, and the
                   menu with usage, the plan and sign-out. */}
               {user && (
@@ -3278,6 +3433,9 @@ export default function App() {
                         autoDetectedMcu={(detectedBoard && mcuPluggedIn) ? detectedBoard : null}
                         onAutoDetect={handleAutoDetect}
                         appMode={appMode}
+                        onAskAi={handleAskAi}
+                        askAiBusy={isLoading}
+                        onOpenLibraries={() => setIsLibrariesOpen(true)}
                       />
                     </div>
                     <div className={`absolute inset-0 ${activeTab === "schematic" ? "z-10" : "z-0 opacity-0 pointer-events-none"}`}>
@@ -3301,7 +3459,7 @@ export default function App() {
                 <>
                   <PanelResizeHandle className="panel-separator h-[3px] bg-[var(--border-main)] hover:bg-[var(--accent-primary)] transition-all duration-200 cursor-row-resize z-10" />
                   <Panel defaultSize={isNarrow ? (compactDock ? "22%" : 42) : 30} minSize={1}>
-                    <div className="w-full h-full bg-[var(--bg-panel)] flex flex-col min-h-0 min-w-0">
+                    <div data-tour="dock" className="w-full h-full bg-[var(--bg-panel)] flex flex-col min-h-0 min-w-0">
                       {isNarrow && openDocks.length > 1 && (
                         <div className="flex shrink-0 border-b border-[var(--border-main)] bg-[var(--bg-panel)]">
                           {openDocks.map((id) => (
@@ -3443,7 +3601,7 @@ export default function App() {
       {/* Narrow-screen pane switcher — replaces the side-by-side split, which
           has no usable width on a phone. Hidden entirely on desktop. */}
       {isNarrow && (
-        <nav className="app-bottom-nav shrink-0 flex border-t border-[var(--border-main)] bg-[var(--bg-panel)]">
+        <nav data-tour="mobile-nav" className="app-bottom-nav shrink-0 flex border-t border-[var(--border-main)] bg-[var(--bg-panel)]">
           {([
             { id: "files" as const, label: "Workspace", icon: FolderOpen },
             ...(appMode === "agentic" ? [{ id: "agent" as const, label: "Agent", icon: Bot }] : []),
@@ -3487,7 +3645,7 @@ export default function App() {
                     <div className="flex items-center gap-1.5 text-[10px] text-[var(--text-muted)] mb-1">
                       <Activity size={11} />
                       <span>This {WINDOW_HOURS}-hour window</span>
-                      <span className="ml-auto text-[var(--text-main)] font-medium">{usageInfo.tokensUsed.toLocaleString()} / {usageInfo.tokenCap.toLocaleString()}</span>
+                      <span className="ml-auto text-[var(--text-main)] font-medium">{percentUsed(usageInfo.tokensUsed, usageInfo.tokenCap)}% used</span>
                     </div>
                     <div className="h-1 rounded-full bg-[var(--bg-hover)] overflow-hidden">
                       <div
@@ -3496,12 +3654,12 @@ export default function App() {
                       />
                     </div>
                     <p className="mt-1 text-[10px] text-[var(--text-subtle)]">
-                      {usageInfo.windowResetAt ? `Refills at ${formatClock(usageInfo.windowResetAt)}` : "Your next message starts a window"}
+                      {usageInfo.windowResetAt ? `Refills ${formatWhen(usageInfo.windowResetAt)}` : "Your next message starts a window"}
                     </p>
                     {usageInfo.cycleCap !== null && usageInfo.cycleUsed !== null && (
                       <p className="mt-0.5 flex text-[10px] text-[var(--text-muted)]">
-                        <span>This cycle</span>
-                        <span className="ml-auto text-[var(--text-main)] font-medium">{usageInfo.cycleUsed.toLocaleString()} / {usageInfo.cycleCap.toLocaleString()}</span>
+                        <span>This month</span>
+                        <span className="ml-auto text-[var(--text-main)] font-medium">{percentUsed(usageInfo.cycleUsed, usageInfo.cycleCap)}% used</span>
                       </p>
                     )}
                   </>
@@ -3537,6 +3695,13 @@ export default function App() {
               </button>
             )}
             <button
+              onClick={() => { setIsMenuOpen(false); setShowWelcome(false); setTourOpen(true); }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition rounded-md mx-1"
+            >
+              <Compass size={14} className="text-[var(--text-muted)]" />
+              Take the tour
+            </button>
+            <button
               onClick={() => { setIsMenuOpen(false); setFeedbackOpen(true); }}
               className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition rounded-md mx-1 sm:hidden"
             >
@@ -3553,6 +3718,22 @@ export default function App() {
           </div>
         </>
       )}
+
+      {tourOpen && (
+        <OnboardingTour
+          steps={tourSteps}
+          onClose={closeTour}
+          finishAction={appMode === "agentic" ? {
+            label: "Try it: blink an LED on pin 4",
+            onClick: () => {
+              if (isNarrowRef.current) setMobilePane("agent");
+              handleSendMessage("Blink an LED connected to pin 4 of my board: on for half a second, off for half a second.");
+            },
+          } : undefined}
+        />
+      )}
+
+      {isLibrariesOpen && <LibrariesModal onClose={() => setIsLibrariesOpen(false)} />}
 
       {isPlansOpen && !isPro && (
         <PlansModal
@@ -3639,14 +3820,14 @@ export default function App() {
                 {pauseWait ? `Back in ${pauseWait}` : "Back on your next billing date"}
               </h3>
               {quotaBlockInfo?.resetAt ? (
-                <p className="-mt-2 text-[11px] text-[var(--text-subtle)]">at {formatClock(quotaBlockInfo.resetAt)}</p>
+                <p className="-mt-2 text-[11px] text-[var(--text-subtle)]">{formatWhen(quotaBlockInfo.resetAt)}</p>
               ) : null}
               <p className="text-xs text-[var(--text-muted)] leading-relaxed max-w-xs">
                 {quotaBlockInfo?.tier === "free"
-                  ? <>Free gives you {FREE_WINDOW_TOKENS.toLocaleString()} AI tokens every {WINDOW_HOURS} hours, up to {FREE_DAILY_TOKENS.toLocaleString()} a day. PRO gives you {PRO_WINDOW_TOKENS.toLocaleString()} every {WINDOW_HOURS} hours: 10× more, with auto-debug and Plan Mode.</>
+                  ? <>PRO gives you {PRO_WINDOW_TOKENS / FREE_WINDOW_TOKENS}× more every {WINDOW_HOURS} hours, with auto-debug and Plan Mode.</>
                   : quotaBlockInfo?.reason === "cycle"
-                    ? <>PRO includes up to {PAID_TOKEN_CAP.toLocaleString()} AI tokens every billing cycle. You've used this cycle's; they refresh on your next billing date.</>
-                    : <>PRO gives you {PRO_WINDOW_TOKENS.toLocaleString()} AI tokens every {WINDOW_HOURS} hours. This window's are used; the agent picks up again when it refills.</>}
+                    ? <>You've used this month's PRO allowance; it refreshes on your next billing date.</>
+                    : <>This {WINDOW_HOURS}-hour window's allowance is used; the agent picks up again when it refills.</>}
               </p>
               {quotaBlockInfo?.tier === "free" && !isPro && (
                 <button

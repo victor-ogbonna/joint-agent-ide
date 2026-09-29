@@ -200,6 +200,14 @@ select:focus-visible,
   letter-spacing: 0.06em;
 }
 
+/* The walk-through's light glides from one part of the screen to the next. */
+.tour-spotlight {
+  transition: top 0.25s ease, left 0.25s ease, width 0.25s ease, height 0.25s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tour-spotlight { transition: none; }
+}
+
 /* A phone section sliding in from the side it was swiped from. */
 @keyframes paneInFromRight {
   from { opacity: 0.4; transform: translateX(28px); }

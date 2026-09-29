@@ -1,22 +1,23 @@
 import React from "react";
 import { X, Check, Minus, Rocket, Loader2 } from "lucide-react";
 import {
-  WINDOW_HOURS, FREE_WINDOW_TOKENS, FREE_DAILY_TOKENS, PRO_WINDOW_TOKENS, PAID_TOKEN_CAP,
-  FREE_MAX_REPLY_TOKENS, PRO_MAX_REPLY_TOKENS, FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES, PRO_PRICE,
+  WINDOW_HOURS, FREE_WINDOW_TOKENS, PRO_WINDOW_TOKENS, FREE_MAX_REPLY_TOKENS, PRO_MAX_REPLY_TOKENS,
+  FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES, PRO_PRICE,
 } from "../lib/plans";
 
 /**
  * Free vs PRO, side by side. Every row is something the server actually
- * enforces (server/quota.ts, server/deepseek.ts), with the figures taken from
- * src/lib/plans.ts, which a test keeps equal to the server's. Both plans run
- * on the same model with the same context window, so neither "a better
- * model" nor "more memory" is claimed.
+ * enforces (server/quota.ts, server/deepseek.ts). Like ChatGPT, Claude and
+ * Gemini, AI usage is shown as a multiple, never as token counts: the counts
+ * are how the server meters, not something to compare. Compiles keep their
+ * number, because a compile is something people count. Both plans run on the
+ * same model with the same context window, so neither "a better model" nor
+ * "more memory" is claimed.
  */
-const k = (n: number) => `${n / 1000}K`;
 const ROWS: Array<{ feature: string; free: boolean | string; pro: boolean | string }> = [
   { feature: "Access to Joint-Agent", free: true, pro: true },
-  { feature: `AI tokens every ${WINDOW_HOURS} hours`, free: k(FREE_WINDOW_TOKENS), pro: k(PRO_WINDOW_TOKENS) },
-  { feature: "Longest reply", free: k(FREE_MAX_REPLY_TOKENS), pro: k(PRO_MAX_REPLY_TOKENS) },
+  { feature: `AI usage every ${WINDOW_HOURS} hours`, free: "Standard", pro: `${PRO_WINDOW_TOKENS / FREE_WINDOW_TOKENS}× more` },
+  { feature: "Replies", free: "Short", pro: PRO_MAX_REPLY_TOKENS > FREE_MAX_REPLY_TOKENS ? "Full-size" : "Short" },
   { feature: `Compiles every ${WINDOW_HOURS} hours`, free: String(FREE_WINDOW_COMPILES), pro: "Unlimited" },
   { feature: "Smart Flash auto-debug", free: false, pro: true },
   { feature: "Plan Mode", free: false, pro: true },
@@ -90,9 +91,8 @@ export default function PlansModal({ onClose, onUpgrade, upgrading }: {
           </div>
 
           <p className="mt-3 text-[11px] text-[var(--text-subtle)] leading-relaxed">
-            Both plans use the same AI model. Free refills every {WINDOW_HOURS} hours, up to{" "}
-            {FREE_DAILY_TOKENS.toLocaleString()} tokens and {FREE_DAILY_COMPILES} successful compiles a day. PRO includes up to{" "}
-            {PAID_TOKEN_CAP.toLocaleString()} tokens a month.
+            Both plans use the same AI model and refill every {WINDOW_HOURS} hours. Free includes up to{" "}
+            {FREE_DAILY_COMPILES} successful compiles a day. Usage limits apply to both plans.
           </p>
 
           <button

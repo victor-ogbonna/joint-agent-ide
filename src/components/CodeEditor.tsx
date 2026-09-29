@@ -1,6 +1,6 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { Cpu, Play, Zap, Bug, Copy, Check, Download, Sparkles } from "lucide-react";
+import { Cpu, Play, Zap, Bug, Copy, Check, Download, Sparkles, Wrench, BookOpen, MessageSquareText, Send, X, Library } from "lucide-react";
 import Editor from "react-simple-code-editor";
 import Prism from "prismjs";
 import "prismjs/components/prism-clike";
@@ -21,6 +21,20 @@ interface CodeEditorProps {
   appMode: "agentic" | "manual";
   fontSize?: number;
   wordWrap?: boolean;
+  /** Agent-Mode's Ask AI: sends a request about the code to the agent chat. */
+  onAskAi?: (request: AskAiRequest) => void;
+  /** The agent is answering; Ask AI waits for it. */
+  askAiBusy?: boolean;
+  /** Opens the Libraries panel (both modes). */
+  onOpenLibraries?: () => void;
+}
+
+export interface AskAiRequest {
+  action: "fix" | "explain" | "comment" | "custom";
+  /** The user's own question, for "custom". */
+  question?: string;
+  /** Lines selected in the editor, when there were any. */
+  selection?: string;
 }
 
 export default function CodeEditor({
@@ -36,9 +50,49 @@ export default function CodeEditor({
   onAutoDetect,
   appMode,
   fontSize = 14,
-  wordWrap = true
+  wordWrap = true,
+  onAskAi,
+  askAiBusy = false,
+  onOpenLibraries
 }: CodeEditorProps) {
   const [copied, setCopied] = useState(false);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const askRef = useRef<HTMLDivElement>(null);
+  const [askOpen, setAskOpen] = useState(false);
+  const [askQuestion, setAskQuestion] = useState("");
+  const [askSelection, setAskSelection] = useState("");
+
+  /** What is selected in the editor. Read as the button is pressed, before
+   *  focus leaves the code and a phone drops the selection. */
+  const captureSelection = () => {
+    const ta = canvasRef.current?.querySelector("textarea");
+    if (!ta) return;
+    const { selectionStart: start, selectionEnd: end } = ta;
+    setAskSelection(end > start ? ta.value.slice(start, end).trim() : "");
+  };
+
+  useEffect(() => {
+    if (!askOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (!askRef.current?.contains(e.target as Node)) setAskOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setAskOpen(false); };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [askOpen]);
+
+  const ask = (action: AskAiRequest["action"]) => {
+    if (!onAskAi || askAiBusy) return;
+    const question = askQuestion.trim();
+    if (action === "custom" && !question) return;
+    onAskAi({ action, question: action === "custom" ? question : undefined, selection: askSelection || undefined });
+    setAskQuestion("");
+    setAskOpen(false);
+  };
 
   // Line numbers array
   const lineCount = code.split("\n").length;
@@ -113,6 +167,17 @@ export default function CodeEditor({
         </div>
 
         <div className="flex items-center gap-2">
+          {onOpenLibraries && (
+            <button
+              id="btn-libraries"
+              onClick={onOpenLibraries}
+              className="flex items-center gap-1.5 px-2 py-1.5 hover:bg-[var(--bg-surface)] text-[var(--text-muted)] hover:text-[var(--text-main)] rounded-md transition text-xs font-semibold"
+              title="Libraries: search, add or import"
+            >
+              <Library size={14} />
+              <span>Libraries</span>
+            </button>
+          )}
            <button
             id="btn-copy-code"
             onClick={handleCopy}
@@ -133,7 +198,7 @@ export default function CodeEditor({
       </div>
 
       {/* Editor Main Canvas */}
-      <div className="flex-1 overflow-y-auto bg-[var(--bg-root)] relative">
+      <div ref={canvasRef} className="flex-1 overflow-y-auto bg-[var(--bg-root)] relative">
         <div className="min-w-max flex min-h-full">
           {/* Editor Line Gutter */}
           <div className="bg-[var(--bg-root)] border-r border-[var(--border-main)] select-none text-right py-4 px-3 flex flex-col font-mono text-[11px] text-[var(--text-muted)] min-w-[3rem] shrink-0 sticky left-0 z-10">
@@ -179,6 +244,82 @@ export default function CodeEditor({
           </button>
         )}
       </div>
+
+      {/* Agent-Mode's Ask AI: pinned to the panel, not the scrolling code, so
+          it stays in reach however far down the sketch goes. */}
+      {appMode === "agentic" && onAskAi && (
+        <div ref={askRef} className="absolute bottom-3 right-3 z-30 flex flex-col items-end gap-2">
+          {askOpen && (
+            <div
+              role="dialog"
+              aria-label="Ask AI about this code"
+              className="w-[min(18rem,calc(100vw-2rem))] rounded-xl border border-[var(--border-main)] bg-[var(--bg-panel)] p-3 shadow-2xl animate-slide-up"
+            >
+              <div className="flex items-start justify-between gap-2 mb-2">
+                <div>
+                  <p className="text-xs font-bold text-[var(--text-main)]">Ask AI about this code</p>
+                  <p className="text-[10px] text-[var(--text-muted)]">
+                    {askSelection
+                      ? `About the ${askSelection.split("\n").length} selected line${askSelection.split("\n").length === 1 ? "" : "s"}`
+                      : "About the whole sketch. Select lines first to ask about just those."}
+                  </p>
+                </div>
+                <button type="button" onClick={() => setAskOpen(false)} aria-label="Close" className="text-[var(--text-muted)] hover:text-[var(--text-main)] shrink-0">
+                  <X size={14} />
+                </button>
+              </div>
+              <div className="grid gap-1.5">
+                {([
+                  ["fix", Wrench, "Fix errors"],
+                  ["explain", BookOpen, askSelection ? "Explain these lines" : "Explain this code"],
+                  ["comment", MessageSquareText, "Add comments"],
+                ] as const).map(([action, Icon, label]) => (
+                  <button
+                    key={action}
+                    type="button"
+                    disabled={askAiBusy}
+                    onClick={() => ask(action)}
+                    className="flex items-center gap-2 rounded-lg border border-[var(--border-main)] bg-[var(--bg-surface)] px-2.5 py-2 text-left text-xs font-medium text-[var(--text-main)] hover:border-orange-500/50 hover:bg-[var(--bg-hover)] transition disabled:opacity-50"
+                  >
+                    <Icon size={13} className="text-orange-500 shrink-0" /> {label}
+                  </button>
+                ))}
+              </div>
+              <form
+                className="mt-2 flex items-center gap-1.5"
+                onSubmit={(e) => { e.preventDefault(); ask("custom"); }}
+              >
+                <input
+                  value={askQuestion}
+                  onChange={(e) => setAskQuestion(e.target.value)}
+                  placeholder="Or ask anything about it…"
+                  className="flex-1 min-w-0 rounded-lg border border-[var(--border-main)] bg-[var(--bg-root)] px-2.5 py-2 text-xs text-[var(--text-main)] placeholder:text-[var(--text-subtle)] focus:outline-none focus:border-orange-500/60"
+                />
+                <button
+                  type="submit"
+                  disabled={askAiBusy || !askQuestion.trim()}
+                  aria-label="Ask"
+                  className="p-2 rounded-lg text-white disabled:opacity-40"
+                  style={{ background: "var(--gradient-hero)" }}
+                >
+                  <Send size={13} />
+                </button>
+              </form>
+              {askAiBusy && <p className="mt-1.5 text-[10px] text-[var(--text-muted)]">The agent is still answering. Ask again when it's done.</p>}
+            </div>
+          )}
+          <button
+            id="btn-ask-ai"
+            type="button"
+            onPointerDown={captureSelection}
+            onClick={() => setAskOpen((o) => !o)}
+            aria-expanded={askOpen}
+            className="flex items-center gap-1.5 bg-[var(--bg-surface)]/90 backdrop-blur border border-[var(--border-light)] hover:bg-[var(--bg-hover)] text-orange-500 transition py-1.5 px-3 rounded-full text-xs font-semibold shadow-lg"
+          >
+            <Sparkles size={13} /> Ask AI
+          </button>
+        </div>
+      )}
     </div>
   );
 }

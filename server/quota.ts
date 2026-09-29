@@ -291,13 +291,16 @@ export function allowanceFor(doc: UserQuotaDoc, tier: Tier, now = Date.now()): A
   };
 }
 
-/** "2 h 13 min", "13 min", "less than a minute". */
+/** "3 days 4 h", "2 h 13 min", "13 min", "less than a minute". */
 export function formatWait(resetAt: number | null, now = Date.now()): string {
   if (resetAt === null) return "your next billing date";
   const minutes = Math.ceil((resetAt - now) / 60000);
   if (minutes <= 1) return "less than a minute";
-  const h = Math.floor(minutes / 60);
+  const d = Math.floor(minutes / 1440);
+  const h = Math.floor((minutes % 1440) / 60);
   const m = minutes % 60;
+  // Past a day, minutes are noise: "3 days 4 h" reads better than "76 h 12 min".
+  if (d) return `${d} day${d === 1 ? "" : "s"}${h ? ` ${h} h` : ""}`;
   if (!h) return `${m} min`;
   return m ? `${h} h ${m} min` : `${h} h`;
 }
@@ -315,6 +318,42 @@ function pauseMessage(tier: Tier, a: Allowance, now = Date.now()): string {
       : `You've used your free AI tokens for now. They refill in ${when}. Get PRO for 10x more every 5 hours.`;
   }
   return `You've used this 5-hour window's AI tokens. They refill in ${when}.`;
+}
+
+/**
+ * A PRO Smart Flash auto-debug run that began inside the allowance finishes
+ * its rounds even if the allowance runs out partway: stopping between an AI
+ * fix and its recompile leaves the user with neither. The app names the run
+ * on each /api/ai/debug call; its first round must be admitted normally, and
+ * one run per account is remembered, so the overshoot is bounded to the
+ * rounds left in that one run. In-memory, like the rate limiter above.
+ */
+export const AUTO_DEBUG_ROUNDS = 5;
+const AUTO_DEBUG_RUN_MS = 15 * 60 * 1000;
+const autoDebugRuns = new Map<string, { runId: string; left: number; expires: number }>();
+
+function autoDebugRunOf(req: Request): string | null {
+  if (!(req.originalUrl || "").split("?")[0].endsWith("/api/ai/debug")) return null;
+  const id = req.body?.autoDebugRun;
+  return typeof id === "string" && id.length > 0 && id.length <= 64 ? id : null;
+}
+
+/** An admitted round: starts the run, or counts a round of the one in progress. */
+export function noteAutoDebugRound(uid: string, runId: string, now = Date.now()): void {
+  const run = autoDebugRuns.get(uid);
+  if (run && run.runId === runId && now < run.expires) {
+    run.left = Math.max(0, run.left - 1);
+    return;
+  }
+  autoDebugRuns.set(uid, { runId, left: AUTO_DEBUG_ROUNDS - 1, expires: now + AUTO_DEBUG_RUN_MS });
+}
+
+/** Whether a paused account's round belongs to a run that started in time, and has rounds left. */
+export function continueAutoDebugRun(uid: string, runId: string, now = Date.now()): boolean {
+  const run = autoDebugRuns.get(uid);
+  if (!run || run.runId !== runId || now >= run.expires || run.left <= 0) return false;
+  run.left -= 1;
+  return true;
 }
 
 // Auth + token-allowance enforcement — for every route that calls a model.
@@ -352,10 +391,12 @@ export async function requireAuthAndQuota(req: Request, res: Response, next: Nex
   const tier = tierOf(doc, level);
   const now = Date.now();
   const a = allowanceFor(doc, tier, now);
+  // Auto-debug is PRO's; a free account naming a run is ignored.
+  const autoDebugRun = tier === "pro" ? autoDebugRunOf(req) : null;
 
   // Paused, not refused for good: the response says when it lifts, so the
   // app can count down to it.
-  if (a.blocked) {
+  if (a.blocked && !(autoDebugRun && continueAutoDebugRun(uid, autoDebugRun, now))) {
     const used = a.reason === "cycle" ? a.cycleUsed : a.reason === "day" ? a.dayUsed : a.windowUsed;
     const cap = a.reason === "cycle" ? a.cycleCap : a.reason === "day" ? a.dayCap : a.windowCap;
     return res.status(402).json({
@@ -368,6 +409,8 @@ export async function requireAuthAndQuota(req: Request, res: Response, next: Nex
       tokenCap: cap ?? 0,
     });
   }
+
+  if (autoDebugRun && !a.blocked) noteAutoDebugRound(uid, autoDebugRun, now);
 
   req.uid = uid;
   req.email = who.email;
@@ -415,6 +458,8 @@ export async function incrementTokenUsage(uid: string, quota: QuotaContext | und
 
 export interface CompileAllowance {
   blocked: boolean;
+  /** Which limit is holding: this window's compiles, or today's. */
+  reason: "window" | "day" | null;
   /** Compiles left before the next pause. */
   left: number;
   resetAt: number | null;
@@ -430,6 +475,7 @@ export function compileAllowance(doc: UserQuotaDoc, now = Date.now()): CompileAl
   const governing = blockers.length ? latest(blockers) : null;
   return {
     blocked: governing !== null,
+    reason: governing ? (governing.reason as "window" | "day") : null,
     left: Math.max(0, Math.min(FREE_WINDOW_COMPILES - win.used, FREE_DAILY_COMPILES - dayCount)),
     resetAt: governing ? governing.at : null,
   };
@@ -443,6 +489,8 @@ export interface CompileReceipt {
 
 export interface CompileSpend {
   allowed: boolean;
+  /** When refused, which limit is holding. */
+  reason: "window" | "day" | null;
   /** Compiles left after this one; null when the plan has no limit. */
   left: number | null;
   resetAt: number | null;
@@ -453,12 +501,13 @@ export interface CompileSpend {
 /** Take one free compile, if one is left. */
 export function spendCompile(doc: UserQuotaDoc, now: number): CompileSpend {
   const allowance = compileAllowance(doc, now);
-  if (allowance.blocked) return { allowed: false, left: 0, resetAt: allowance.resetAt, patch: null, receipt: null };
+  if (allowance.blocked) return { allowed: false, reason: allowance.reason, left: 0, resetAt: allowance.resetAt, patch: null, receipt: null };
   const win = liveWindow(doc.compileWindowStart, doc.compileWindowCount, now);
   const today = utcDay(now);
   const start = win.start ?? now;
   return {
     allowed: true,
+    reason: null,
     left: allowance.left - 1,
     resetAt: null,
     patch: {
@@ -489,12 +538,12 @@ export function refundPatch(doc: UserQuotaDoc, receipt: CompileReceipt): Partial
  */
 export async function consumeCompile(uid: string, email: string | null, emailVerified: boolean): Promise<Omit<CompileSpend, "patch">> {
   const level = accessLevelFor(email, emailVerified);
-  if (level === "unmetered") return { allowed: true, left: null, resetAt: null, receipt: null };
+  if (level === "unmetered") return { allowed: true, reason: null, left: null, resetAt: null, receipt: null };
   const ref = adminDb.collection("users").doc(uid);
   return adminDb.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     const doc = readUserDoc(snap.exists ? snap.data() : {});
-    if (tierOf(doc, level) !== "free") return { allowed: true, left: null, resetAt: null, receipt: null };
+    if (tierOf(doc, level) !== "free") return { allowed: true, reason: null, left: null, resetAt: null, receipt: null };
     const { patch, ...spend } = spendCompile(doc, Date.now());
     if (patch) tx.set(ref, { ...patch, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
     return spend;
