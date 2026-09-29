@@ -82,6 +82,8 @@ export interface UserQuotaDoc {
   paystackCustomerCode: string | null;
   paystackSubscriptionCode: string | null;
   paystackEmailToken: string | null;
+  /** The plan this account's PRO was paid on, so its renewals are recognised. */
+  paystackPlanCode: string | null;
   currentPeriodEnd: Timestamp | null;
   /** When the last successful payment was made (ms since epoch). */
   lastPaymentAt: number | null;
@@ -107,6 +109,7 @@ const DEFAULT_USER_DOC: UserQuotaDoc = {
   paystackCustomerCode: null,
   paystackSubscriptionCode: null,
   paystackEmailToken: null,
+  paystackPlanCode: null,
   currentPeriodEnd: null,
   lastPaymentAt: null,
   pastDueAt: null,
@@ -131,6 +134,7 @@ function readUserDoc(data: any): UserQuotaDoc {
     paystackCustomerCode: data.paystackCustomerCode ?? null,
     paystackSubscriptionCode: data.paystackSubscriptionCode ?? null,
     paystackEmailToken: data.paystackEmailToken ?? null,
+    paystackPlanCode: typeof data.paystackPlanCode === "string" ? data.paystackPlanCode : null,
     currentPeriodEnd: data.currentPeriodEnd ?? null,
     lastPaymentAt: time(data.lastPaymentAt),
     pastDueAt: time(data.pastDueAt),
@@ -173,6 +177,16 @@ async function verifyBearerToken(req: Request): Promise<Identity | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether a request carries a valid sign-in, without answering it. Used to
+ * decide whether a large request body is worth reading at all; the route's
+ * own middleware still does the real check.
+ */
+export async function hasValidSignIn(req: Request): Promise<boolean> {
+  if (!isFirebaseAdminConfigured()) return false;
+  return (await verifyBearerToken(req)) !== null;
 }
 
 /** Refuses everyone without a grant while the launch lock is on. */

@@ -4,7 +4,7 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { adminAuth, adminDb, isFirebaseAdminConfigured } from "./firebaseAdmin";
 import { requireFirebaseAuth } from "./quota";
 import { loadAdminConfig, saveAdminConfig, maskSecret } from "./adminConfig";
-import { periodEndFrom, paymentTime, isCurrentSubscription, eventSubscriptionCode } from "./billing";
+import { periodEndFrom, paymentTime, isCurrentSubscription, eventSubscriptionCode, paymentPlanCode, paysForPro } from "./billing";
 import { subscriptionStanding, getOrCreateUserDoc } from "./quota";
 import { count as countStat } from "./stats";
 
@@ -50,11 +50,12 @@ async function resolveUidForEvent(data: any): Promise<string | null> {
  * the payment itself (server/billing.ts), so it is never left blank, which
  * would leave a later cancellation nothing to keep PRO until.
  */
-async function activateSubscription(uid: string, data: any) {
+async function activateSubscription(uid: string, data: any, planCode: string) {
   const now = Date.now();
   await adminDb.collection("users").doc(uid).set(
     {
       subscriptionStatus: "active",
+      paystackPlanCode: planCode,
       cycleTokensUsed: 0,
       lastPaymentAt: paymentTime(data, now),
       currentPeriodEnd: Timestamp.fromMillis(periodEndFrom(data, now)),
@@ -158,12 +159,15 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
       if (data.metadata?.uid !== req.uid) {
         return res.status(403).json({ error: "This transaction does not belong to the signed-in account." });
       }
-      const planCode = data.plan || data.plan_object?.plan_code;
-      if (cfg.planCode && planCode && planCode !== cfg.planCode) {
+      // Only a payment for the PRO plan counts (server/billing.ts): a
+      // checkout opened for any other amount, with no plan, never does.
+      const planCode = paymentPlanCode(data);
+      const account = await getOrCreateUserDoc(req.uid!);
+      if (!planCode || !paysForPro(planCode, cfg.planCode, account.paystackPlanCode)) {
         return res.status(402).json({ error: "Payment was not for the expected plan." });
       }
 
-      await activateSubscription(req.uid!, data);
+      await activateSubscription(req.uid!, data, planCode);
 
       res.json({ success: true });
     } catch (err: any) {
@@ -236,7 +240,14 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
       if (uid) {
         switch (event?.event) {
           case "charge.success": {
-            await activateSubscription(uid, data);
+            // Only a payment for the PRO plan counts (see /verify above).
+            const planCode = paymentPlanCode(data);
+            const account = await getOrCreateUserDoc(uid);
+            if (!planCode || !paysForPro(planCode, cfg.planCode, account.paystackPlanCode)) {
+              console.warn(`[Paystack webhook] charge.success for uid=${uid} ignored: not a payment for the PRO plan (${planCode ?? "no plan"}).`);
+              break;
+            }
+            await activateSubscription(uid, data, planCode);
             break;
           }
           case "subscription.create": {
@@ -244,6 +255,14 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
             // Paystack's disable-subscription API later — it's only ever sent on
             // this event, so it has to be captured here or self-serve cancel can't work.
             const before = await getOrCreateUserDoc(uid);
+            // Only a PRO subscription is recorded. Any other one (an old plan,
+            // started with someone else's email address) must not replace, and
+            // so stop, the account's real subscription below.
+            const subscriptionPlan = paymentPlanCode(data);
+            if (!paysForPro(subscriptionPlan, cfg.planCode, before.paystackPlanCode)) {
+              console.warn(`[Paystack webhook] subscription.create for uid=${uid} ignored: not the PRO plan (${subscriptionPlan ?? "no plan"}).`);
+              break;
+            }
             await adminDb.collection("users").doc(uid).set(
               {
                 paystackSubscriptionCode: data.subscription_code,
@@ -271,8 +290,9 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
           }
           case "invoice.payment_failed": {
             // A renewal didn't go through: PRO ends with the period already
-            // paid for (server/billing.ts). Counted from the first failure, so
-            // a repeat failure doesn't move it.
+            // paid for (server/billing.ts), and the subscription is stopped,
+            // so Paystack doesn't try the card again next month. Getting PRO
+            // back is a new payment from the Plans page.
             const doc = await getOrCreateUserDoc(uid);
             if (!isCurrentSubscription(doc.paystackSubscriptionCode, data)) break;
             if (doc.subscriptionStatus !== "active") break;
@@ -281,6 +301,15 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
               { merge: true }
             );
             countStat("payments_failed");
+            if (doc.paystackSubscriptionCode && doc.paystackEmailToken) {
+              try {
+                if (!(await disableSubscription(cfg.secretKey, doc.paystackSubscriptionCode, doc.paystackEmailToken))) {
+                  console.error(`[Paystack webhook] Could not stop subscription ${doc.paystackSubscriptionCode} after a failed payment (uid=${uid}).`);
+                }
+              } catch (err: any) {
+                console.error(`[Paystack webhook] Could not stop subscription ${doc.paystackSubscriptionCode} after a failed payment (uid=${uid}):`, err?.message || err);
+              }
+            }
             break;
           }
           case "subscription.not_renew":
@@ -294,6 +323,9 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
               break;
             }
             if (doc.subscriptionStatus === "none") break;
+            // Stopped by us after a failed payment (above): it stays a failed
+            // payment, not a cancellation.
+            if (doc.subscriptionStatus === "past_due") break;
             await adminDb.collection("users").doc(uid).set(
               { subscriptionStatus: "canceled", updatedAt: FieldValue.serverTimestamp() },
               { merge: true }

@@ -94,17 +94,22 @@ async function userDocs(fresh: boolean): Promise<Map<string, UserDocSummary>> {
 /** Every saved project's owner and creation date: one read per project, so cached for five minutes. */
 async function projectIndex(fresh: boolean): Promise<{ counts: Map<string, number>; created: number[]; total: number }> {
   return cached("projects", 5 * 60_000, fresh, async () => {
-    const snap = await adminDb.collectionGroup("projects").select("createdAt").get();
+    const snap = await adminDb.collectionGroup("projects").select("createdAt", "deletedAt").get();
     const counts = new Map<string, number>();
     const created: number[] = [];
+    let total = 0;
     for (const d of snap.docs) {
       const owner = d.ref.parent.parent?.id;
       if (!owner) continue;
-      counts.set(owner, (counts.get(owner) ?? 0) + 1);
+      // Every project counts as created that day; only those not in Trash
+      // count towards what an account holds now.
       const t = ms(d.get("createdAt"));
       if (t !== null) created.push(t);
+      if (d.get("deletedAt")) continue;
+      counts.set(owner, (counts.get(owner) ?? 0) + 1);
+      total += 1;
     }
-    return { counts, created, total: snap.size };
+    return { counts, created, total };
   });
 }
 

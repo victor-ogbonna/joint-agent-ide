@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass} from "lucide-react";
+import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass, Share2} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip } from "recharts";
@@ -19,6 +19,7 @@ import Terminal from "./components/Terminal";
 import AgentChat from "./components/AgentChat";
 import Web3Panel from "./components/Web3Panel";
 import ProjectsBrowser from "./components/ProjectsBrowser";
+import ShareDialog from "./components/ShareDialog";
 import NewProjectModal from "./components/NewProjectModal";
 import WelcomeModal from "./components/WelcomeModal";
 import FeedbackWidget from "./components/FeedbackWidget";
@@ -32,7 +33,7 @@ import { WINDOW_HOURS, FREE_WINDOW_TOKENS, PRO_WINDOW_TOKENS, FREE_PROJECT_LIMIT
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
 import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts, describeVisibleUsbDevices } from "./lib/webusbSerial";
-import { createProject, getProject, updateProject, renameProject, listProjects, deleteProject, ProjectSummary, trimMessagesForStorage } from "./lib/projects";
+import { createProject, getProject, updateProject, renameProject, listProjects, trashProject, purgeExpiredTrash, ProjectSummary, trimMessagesForStorage, TRASH_DAYS } from "./lib/projects";
 import { sketchBaudRate, sketchOpensSerial, sketchSerial } from "./lib/sketchBaud";
 import { usbChipName } from "./lib/usbChips";
 import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlock, primeLastKnownBlock, QuotaBlockedInfo } from "./lib/aiClient";
@@ -634,6 +635,7 @@ export default function App() {
   const [currentProjectName, setCurrentProjectName] = useState<string>("");
   const [isProjectNameEditing, setIsProjectNameEditing] = useState(false);
   const [showProjectsBrowser, setShowProjectsBrowser] = useState(false);
+  const [showShareDialog, setShowShareDialog] = useState(false);
   // Recent projects shown inline in the sidebar. Kept separate from the Browse
   // modal's own fetch so the list is visible without opening anything, but it
   // reuses handleOpenProject so there is only one code path for loading.
@@ -2730,31 +2732,42 @@ export default function App() {
 
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
 
-  /** Delete from the sidebar. Deleting the OPEN project has to clear the
-   *  workspace too, or the editor keeps showing a project that no longer
-   *  exists and the next autosave silently recreates it. */
+  /** A project left the workspace (moved to Trash). If it's the OPEN one, the
+   *  workspace has to be cleared too, or the editor keeps showing it and its
+   *  next autosave writes to a project in Trash. */
+  const clearIfOpen = (projectId: string) => {
+    if (projectId !== currentProjectId) return;
+    skipNextAutosaveRef.current = true;
+    setCurrentProjectId(null);
+    setCurrentProjectName("");
+    setChatMessages([]);
+    setContextUsage(null);
+    setTerminalLines([]);
+  };
+
+  /** Delete from the sidebar: the project moves to Trash for TRASH_DAYS days. */
   const handleDeleteProject = async (projectId: string, name: string) => {
     if (!user) return;
-    if (!window.confirm(`Delete "${name}"? This can't be undone.`)) return;
+    if (!window.confirm(`Move "${name}" to Trash? You can restore it for ${TRASH_DAYS} days from Browse projects.`)) return;
     setDeletingProjectId(projectId);
     try {
-      await deleteProject(user.uid, projectId);
-      if (projectId === currentProjectId) {
-        skipNextAutosaveRef.current = true;
-        setCurrentProjectId(null);
-        setCurrentProjectName("");
-        setChatMessages([]);
-        setContextUsage(null);
-        setTerminalLines([]);
-      }
-      logToTerminal(`[PROJECT] Deleted "${name}".`, "info");
+      await trashProject(user.uid, projectId);
+      clearIfOpen(projectId);
+      logToTerminal(`[PROJECT] Moved "${name}" to Trash. Restore it from Browse projects → Trash within ${TRASH_DAYS} days.`, "info");
       await refreshRecentProjects();
     } catch (err: any) {
-      logToTerminal(`[PROJECT] Could not delete "${name}": ${err.message}`, "error");
+      logToTerminal(`[PROJECT] Could not move "${name}" to Trash: ${err.message}`, "error");
     } finally {
       setDeletingProjectId(null);
     }
   };
+
+  // Projects in Trash longer than TRASH_DAYS days are deleted for good, once
+  // per sign-in. Best effort: anything left is tried again next time.
+  useEffect(() => {
+    if (!user) return;
+    purgeExpiredTrash(user.uid).catch(() => { /* retried next sign-in */ });
+  }, [user]);
 
   const refreshRecentProjects = React.useCallback(async () => {
     if (!user) { setRecentProjects([]); return; }
@@ -3053,6 +3066,17 @@ export default function App() {
                 {saveStatus === "saving" ? "Saving…" : saveStatus === "saved" ? "Saved" : ""}
               </span>
             </div>
+          )}
+
+          {currentProjectId && (
+            <button
+              onClick={() => setShowShareDialog(true)}
+              className="toolbar-btn p-2.5 sm:p-1.5 rounded-lg text-[var(--text-muted)] shrink-0"
+              title="Share a read-only link to this project"
+              aria-label="Share project"
+            >
+              <Share2 size={14} />
+            </button>
           )}
 
           <button
@@ -3379,7 +3403,7 @@ export default function App() {
                       <button
                         onClick={(e) => { e.stopPropagation(); handleDeleteProject(p.id, p.name); }}
                         disabled={deletingProjectId === p.id}
-                        title={`Delete ${p.name}`}
+                        title={`Move ${p.name} to Trash`}
                         className="absolute right-2.5 p-1 rounded text-[var(--text-subtle)] hover:text-red-400 hover:bg-red-500/10 transition opacity-100 sm:opacity-0 sm:group-hover:opacity-100 disabled:opacity-50"
                       >
                         {deletingProjectId === p.id
@@ -3747,7 +3771,7 @@ export default function App() {
                   // A renewal failed and PRO has ended: say why, and offer it again.
                   <>
                     <p className="mt-2 text-[10px] leading-snug text-red-400">
-                      Your last PRO payment didn't go through, so you're on the Free plan.
+                      Your last PRO payment didn't go through, so you're on the Free plan. Your subscription was stopped, so you won't be charged again.
                     </p>
                     <button
                       onClick={() => { setIsMenuOpen(false); setIsPlansOpen(true); }}
@@ -3761,7 +3785,7 @@ export default function App() {
                   // A renewal failed within the period already paid for.
                   <>
                     <p className="mt-2 text-[10px] leading-snug text-red-400">
-                      Your PRO payment didn't go through. PRO continues{usageInfo.proUntil ? ` until ${formatDay(usageInfo.proUntil)}` : " for a few days"}.
+                      Your PRO payment didn't go through, so your subscription was stopped. PRO continues{usageInfo.proUntil ? ` until ${formatDay(usageInfo.proUntil)}` : " for a few days"}.
                     </p>
                     <button
                       onClick={() => { setIsMenuOpen(false); void handleSubscribe(); }}
@@ -3995,6 +4019,14 @@ export default function App() {
         </div>
       )}
 
+      {showShareDialog && currentProjectId && (
+        <ShareDialog
+          projectId={currentProjectId}
+          projectName={currentProjectName}
+          onClose={() => setShowShareDialog(false)}
+        />
+      )}
+
       {showProjectsBrowser && (
         <ProjectsBrowser
           currentProjectId={currentProjectId}
@@ -4002,6 +4034,12 @@ export default function App() {
           onOpenProject={handleOpenProject}
           onNewProject={() => { setShowProjectsBrowser(false); void openNewProject(); }}
           projectLimit={accountTier === "free" ? FREE_PROJECT_LIMIT : undefined}
+          onProjectTrashed={(projectId, name) => {
+            clearIfOpen(projectId);
+            logToTerminal(`[PROJECT] Moved "${name}" to Trash. Restore it from Browse projects → Trash within ${TRASH_DAYS} days.`, "info");
+            void refreshRecentProjects();
+          }}
+          onProjectsChanged={() => { void refreshRecentProjects(); }}
         />
       )}
 

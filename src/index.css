@@ -12,18 +12,20 @@
    Dark Theme (Default) — Deep Space Palette
    ============================================ */
 :root {
-  --bg-root: #08090d;
-  --bg-panel: #111318;
-  --bg-surface: #1a1d25;
-  --bg-hover: #252830;
-  --border-main: #1e2230;
-  --border-light: #2a2f3d;
-  --text-main: #e2e4ea;
-  --text-muted: #6b7394;
-  --text-subtle: #4a5070;
+  /* Brighter, so secondary text is readable at small sizes: every text
+     colour here is at least 4.5:1 on every panel (WCAG AA). */
+  --bg-root: #0b0d12;
+  --bg-panel: #14171e;
+  --bg-surface: #1d212b;
+  --bg-hover: #282c38;
+  --border-main: #343b50;
+  --border-light: #434b63;
+  --text-main: #f1f3f8;
+  --text-muted: #a3abc6;
+  --text-subtle: #8a93b2;
   --accent-primary: #f97316;
   --accent-primary-soft: rgba(249, 115, 22, 0.12);
-  --accent-secondary: #3b82f6;
+  --accent-secondary: #5b9bff;
   --accent-secondary-soft: rgba(59, 130, 246, 0.12);
   --term-success: #34d399;
   --term-error: #f87171;
@@ -42,15 +44,15 @@
    Light Theme — Clean & Luminous
    ============================================ */
 :root[data-theme="light"] {
-  --bg-root: #f8f9fc;
+  --bg-root: #f6f7fb;
   --bg-panel: #ffffff;
-  --bg-surface: #eef0f5;
-  --bg-hover: #e2e5ec;
-  --border-main: #dde0e8;
-  --border-light: #c8ccd8;
-  --text-main: #1a1d2e;
-  --text-muted: #6b728e;
-  --text-subtle: #9ba2b8;
+  --bg-surface: #edf0f6;
+  --bg-hover: #e1e5ee;
+  --border-main: #c9cfdc;
+  --border-light: #b3bacb;
+  --text-main: #0f1222;
+  --text-muted: #4d5470;
+  --text-subtle: #5f6784;
   --accent-primary: #ea580c;
   --accent-primary-soft: rgba(234, 88, 12, 0.08);
   --accent-secondary: #2563eb;

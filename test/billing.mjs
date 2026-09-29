@@ -7,6 +7,7 @@
 import {
   GRACE_DAYS, GRACE_MS, addInterval, paidThrough, graceEndsAt, paidProUntil, hasPaidPro, standing,
   periodEndFrom, paymentTime, isCurrentSubscription, eventSubscriptionCode,
+  paymentPlanCode, paysForPro,
 } from "../server/billing.ts";
 import { tierOf, allowanceFor, tokenUsagePatch, subscriptionStanding, PAID_TOKEN_CAP } from "../server/quota.ts";
 import { Timestamp } from "firebase-admin/firestore";
@@ -92,6 +93,21 @@ check(isCurrentSubscription("SUB_new", {}) && isCurrentSubscription(null, { subs
 console.log("Projects");
 check(shown.FREE_PROJECT_LIMIT === 5, "Free holds 5 projects at once");
 check(typeof shown.formatDay(NOW) === "string" && shown.formatDay(NOW).length > 0, "dates read as a day");
+
+console.log("Only a payment for the PRO plan buys PRO");
+{
+  const PRO = "PLN_pro7usd";
+  check(paymentPlanCode({ plan: PRO }) === PRO, "verify gives the plan as a code");
+  check(paymentPlanCode({ plan: { plan_code: PRO, amount: 1120000 } }) === PRO, "a webhook gives it as an object");
+  check(paymentPlanCode({ plan: null, plan_object: { plan_code: PRO } }) === PRO, "or only in plan_object");
+  check(paymentPlanCode({ plan: {}, plan_object: {} }) === null && paymentPlanCode({ amount: 5000 }) === null && paymentPlanCode(null) === null, "a payment for no plan has none");
+  check(paysForPro(PRO, PRO, null), "the PRO plan: yes");
+  check(!paysForPro(null, PRO, null), "a checkout for any amount, with no plan: no");
+  check(!paysForPro("PLN_old3usd", PRO, null), "another plan in the same Paystack account: no");
+  check(paysForPro("PLN_old3usd", PRO, "PLN_old3usd"), "but a renewal of the plan this account subscribed on: yes, after the plan changed");
+  check(!paysForPro("PLN_other", PRO, "PLN_old3usd"), "not some third plan");
+  check(!paysForPro(PRO, null, null), "no plan set up at all: nothing counts");
+}
 
 console.log(bad ? `\n${bad} FAILED` : "\nall ok");
 process.exit(bad ? 1 : 0);

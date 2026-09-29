@@ -5,28 +5,29 @@ import http from "http";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 import dotenv from "dotenv";
-import { exec, execFile } from 'child_process';
+import { exec } from 'child_process';
 import util from 'util';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { WebSocketServer, WebSocket } from 'ws';
-import { SerialPort } from 'serialport';
-import { ReadlineParser } from '@serialport/parser-readline';
 import { loadAdminConfig, saveAdminConfig } from './server/adminConfig';
 import { readAccessLists, sanitiseEmailList } from './server/access';
-import { requireAuthAndQuota, requireFirebaseAuth, incrementTokenUsage, getOrCreateUserDoc, consumeCompile, refundCompile, CompileReceipt, tierOf, allowanceFor, compileAllowance, formatWait, subscriptionStanding, FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES } from './server/quota';
+import { requireAuthAndQuota, requireFirebaseAuth, hasValidSignIn, incrementTokenUsage, getOrCreateUserDoc, consumeCompile, refundCompile, CompileReceipt, tierOf, allowanceFor, compileAllowance, formatWait, subscriptionStanding, FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES } from './server/quota';
 import { accessLevelFor } from './server/access';
 import { voiceNoteTooLong, MAX_VOICE_NOTE_SECONDS } from './server/voiceNote';
 import { registerPaystackRoutes, paystackSecretKey } from './server/paystack';
 import { registerAdminStatsRoutes } from './server/adminStats';
 import { useBuildCache, readyBuildCache, startBuildCachePruning } from './server/buildCache';
+import { catchAsyncErrors, jsonErrorHandler } from './server/asyncErrors';
+import { runBuild, COMPILE_TIMEOUT_MS, fileSystemInclude } from './server/buildRun';
+import { readJsonBodies } from './server/bodyLimits';
+import { registerShareRoutes } from './server/share';
 import { isFirebaseAdminConfigured } from './server/firebaseAdmin';
 import { registerWaitlistRoutes } from './server/waitlist';
 import { registerFeedbackRoutes } from './server/feedback';
 import { registerGithubRoutes } from './server/github';
 import { registerFirebaseAuthProxy } from './server/firebaseAuthProxy';
-import { detectLibDeps } from './server/libraryDeps';
+import { detectLibDeps, isSafeLibDep } from './server/libraryDeps';
 import { registerLibraryRoutes, prepareLibraries, mergeLibDeps, missingLibraryHint, libraryNoteFor, NO_LIBRARIES } from './server/libraries';
 import { loadBoardCatalog, getBoardCatalog, getBoardById, boardFamily, resolveBoard, describeBoardForPrompt, describeFamilyForPrompt, BoardInfo } from './server/boards';
 import { getCachedContentName } from './server/geminiCache';
@@ -106,7 +107,6 @@ const DEEPSEEK_IMPLEMENT_TOOLS: ToolSpec[] = [
 ];
 
 const execPromise = util.promisify(exec);
-const execFilePromise = util.promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Gemini overload retry
@@ -145,13 +145,16 @@ async function withGeminiRetry<T>(label: string, fn: () => Promise<T>): Promise<
   throw lastErr;
 }
 
-// Active serial port connections for WebSocket serial monitor
-let activeSerialPort: SerialPort | null = null;
-let serialWsClients: Set<WebSocket> = new Set();
-
 dotenv.config();
 
 const app = express();
+// Before any route: an error in an async handler answers that one request
+// instead of stopping the server (server/asyncErrors.ts).
+catchAsyncErrors(app);
+// Anything that still slips out is logged, not fatal.
+process.on("unhandledRejection", (reason: any) => {
+  console.error("[Server] Unhandled rejection (server kept running):", reason?.stack || reason);
+});
 
 // Caddy terminates TLS and proxies inward, so without this every request
 // arrives from Caddy's container address and req.ip is identical for every
@@ -170,8 +173,10 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 // The `verify` callback stashes the exact raw request bytes onto req.rawBody —
 // needed by the Paystack webhook handler to HMAC-verify signatures, since a
 // re-serialized/parsed JSON body can differ byte-for-byte from what was signed.
-app.use(express.json({ limit: '50mb', verify: (req: any, _res, buf) => { req.rawBody = buf; } }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+// At most 1 MB per request, more only on a few routes and only when signed
+// in (server/bodyLimits.ts).
+app.use(readJsonBodies(hasValidSignIn));
+app.use(express.urlencoded({ limit: "1mb", extended: true }));
 
 // Traffic for the admin dashboard (server/stats.ts): the app's API calls and
 // page loads. The health check, and the admin pages themselves, don't count.
@@ -373,6 +378,8 @@ registerWaitlistRoutes(app, requireAdmin);
 registerFeedbackRoutes(app, requireFirebaseAuth, requireAdmin);
 registerGithubRoutes(app, requireFirebaseAuth);
 registerLibraryRoutes(app, requireFirebaseAuth);
+// Read-only links to a project's code and circuit, secrets hidden.
+registerShareRoutes(app, requireFirebaseAuth);
 // The admin dashboard: users, activity, payments and server health.
 registerAdminStatsRoutes(app, requireAdmin, {
   isolation: () => buildIsolation(),
@@ -614,14 +621,14 @@ Do NOT tell the user to switch modes or click any button. Just state the plan an
 
 // Chat endpoint with function calling
 app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
-  const { messages, mcu, boardId } = req.body;
+  const { messages, mcu, boardId } = req.body || {};
   // Plan Mode is a PRO feature: a free account's request is always built.
   const free = req.quota!.tier === "free";
-  const chatMode = free ? "implement" : req.body.chatMode;
+  const chatMode = free ? "implement" : req.body?.chatMode;
   // The sketch in the user's editor. The agent used to see only the chat,
   // so every change was written blind: asked to adjust one thing, it had no
   // way to know the pins and logic already there.
-  const currentCode = typeof req.body.currentCode === "string" ? req.body.currentCode.slice(0, 60000).trim() : "";
+  const currentCode = typeof req.body?.currentCode === "string" ? req.body.currentCode.slice(0, 60000).trim() : "";
   if (!messages) return res.status(400).json({ error: "Messages required." });
 
   // Reject an empty submit before it reaches the model. Without this, pressing
@@ -895,10 +902,13 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
 });
 
 app.post("/api/ai/generate", requireAuthAndQuota, async (req, res) => {
-  const { prompt, mcu, boardId } = req.body;
+  const { prompt, mcu, boardId } = req.body || {};
 
-  if (!prompt) {
+  if (typeof prompt !== "string" || !prompt.trim()) {
     return res.status(400).json({ error: "Prompt is required." });
+  }
+  if (typeof mcu !== "string" || !mcu) {
+    return res.status(400).json({ error: "Pick a board first." });
   }
 
   const { description: mcuDescription } = describeBoardForPrompt(boardId, mcu);
@@ -937,7 +947,7 @@ Return your response in strict JSON matching the requested schema.`;
   if (!isDeepSeekConfigured()) {
     // Return a rich mock template so the app remains fully functional and elegant
     console.log("Using mock response because DEEPSEEK_API_KEY is not set.");
-    const mockData = getMockProject(prompt, mcu);
+    const mockData = getMockProject(prompt, mcu === "esp32" ? "esp32" : "arduino");
     return res.json(mockData);
   }
 
@@ -984,7 +994,7 @@ All four top-level keys are required. Do not wrap the JSON in markdown fences.`,
   } catch (error: any) {
     console.error("Generation Error: ", error.message);
     // Return mock fallback as recovery so user gets a seamless experience
-    const mockData = getMockProject(prompt, mcu);
+    const mockData = getMockProject(prompt, mcu === "esp32" ? "esp32" : "arduino");
     return res.json({
       ...mockData,
       description: `[Gemini API Error, using beautiful offline fallback] ${error.message || ""}\n\n${mockData.description}`
@@ -994,10 +1004,13 @@ All four top-level keys are required. Do not wrap the JSON in markdown fences.`,
 
 // Debug code
 app.post("/api/ai/debug", requireAuthAndQuota, async (req, res) => {
-  const { code, error, mcu } = req.body;
+  const { code, error, mcu } = req.body || {};
 
-  if (!code || !error) {
+  if (typeof code !== "string" || !code || typeof error !== "string" || !error) {
     return res.status(400).json({ error: "Code and Error message are required for debugging." });
+  }
+  if (typeof mcu !== "string" || !mcu) {
+    return res.status(400).json({ error: "Pick a board first." });
   }
 
   const systemPrompt = `You are an expert compiler and debugger for microcontrollers (${mcu.toUpperCase()}).
@@ -1308,7 +1321,7 @@ const TRANSCRIBE_ATTEMPTS: Array<{ model: string; thinkingLow: boolean }> = [
 
 app.post("/api/ai/transcribe", requireAuthAndQuota, async (req, res) => {
   try {
-    const { audioData, mimeType } = req.body;
+    const { audioData, mimeType } = req.body || {};
     if (!audioData) return res.status(400).json({ error: "No audio data provided." });
     if (typeof audioData !== "string" || voiceNoteTooLong(audioData, mimeType)) {
       return res.status(413).json({ error: `Voice notes can be up to ${MAX_VOICE_NOTE_SECONDS / 60} minutes.`, code: "VOICE_TOO_LONG" });
@@ -1364,8 +1377,19 @@ app.post("/api/ai/transcribe", requireAuthAndQuota, async (req, res) => {
 // Compilation Endpoint
 // ----------------------------------------------------
 app.post("/api/compile", requireFirebaseAuth, async (req, res) => {
-  const { code, mcu, boardId } = req.body;
-  if (!code || !mcu) return res.status(400).json({ error: "Code and MCU are required." });
+  const { code, mcu, boardId } = req.body || {};
+  if (typeof code !== "string" || !code || typeof mcu !== "string" || !mcu) {
+    return res.status(400).json({ error: "Code and MCU are required." });
+  }
+  // A file on the server, not a library header: refused before anything is
+  // counted or built (server/buildRun.ts).
+  const badInclude = fileSystemInclude(code);
+  if (badInclude !== null) {
+    return res.status(400).json({
+      error: `#include "${badInclude.slice(0, 80)}" names a file path. Include a library header instead, like #include <Wire.h>.`,
+      code: "BAD_INCLUDE",
+    });
+  }
 
   // Free accounts compile FREE_WINDOW_COMPILES times every 5 hours, at most
   // FREE_DAILY_COMPILES a day; every other plan without limit. Counted before
@@ -1432,7 +1456,14 @@ lib_deps =
     console.error("[Compile] user libraries skipped:", err?.message || err);
     fs.rmSync(path.join(tempDir, "lib"), { recursive: true, force: true });
   }
-  const detectedLibDeps = mergeLibDeps(userLibraries.libDeps, detectLibDeps(finalCode + userLibraries.extraIncludes, userLibraries.skipHeaders));
+  // Only "owner/name@version" lines reach platformio.ini (isSafeLibDep):
+  // nothing written there can add a setting of its own.
+  const detectedLibDeps = mergeLibDeps(userLibraries.libDeps, detectLibDeps(finalCode + userLibraries.extraIncludes, userLibraries.skipHeaders))
+    .filter((lib) => {
+      if (isSafeLibDep(lib)) return true;
+      console.warn(`[Compile] library line refused: ${JSON.stringify(lib).slice(0, 120)}`);
+      return false;
+    });
   if (detectedLibDeps.length > 0) {
     platformioIni += detectedLibDeps.map(lib => `  ${lib}`).join("\n") + "\n";
   }
@@ -1458,10 +1489,12 @@ lib_deps =
       try {
         const options = await compilerOptions(path.join(process.cwd(), ".platformio"));
         readyBuildCache(path.join(process.cwd(), ".platformio"), options.uid, options.gid);
-        return await execFilePromise(pioPath, ['run'], {
+        // Stopped, compiler and all, if it runs too long (server/buildRun.ts).
+        return await runBuild(pioPath, ['run'], {
           cwd: tempDir,
           ...options,
-          maxBuffer: 1024 * 1024 * 50
+          maxBuffer: 1024 * 1024 * 50,
+          timeoutMs: COMPILE_TIMEOUT_MS,
         });
       } finally {
         const ms = Date.now() - startedAt;
@@ -1567,6 +1600,14 @@ lib_deps =
       return res.status(503).json({ error: err.message, code: "SERVER_BUSY" });
     }
     countStat("compiles_failed");
+    if (err?.timedOut) {
+      return res.status(500).json({
+        error: `${err.message} Very large sketches can take long; if this keeps happening, try again in a few minutes.`,
+        code: "COMPILE_TIMEOUT",
+        stdout: scrubToolchainNames(err.stdout || ""),
+        stderr: scrubToolchainNames(err.stderr || ""),
+      });
+    }
     res.status(500).json({
       error: "Compilation failed.",
       stdout: scrubToolchainNames(err.stdout || ""),
@@ -1581,232 +1622,12 @@ lib_deps =
 });
 
 // ----------------------------------------------------
-// Flash Endpoint — Uses PlatformIO CLI for all MCUs
-// Supports ESP32, Arduino Uno, Mega, Nano, etc.
-// Works from ANY browser since it's server-side!
+// Flashing and the serial monitor run in the user's browser, over USB
+// (src/lib). The server once had its own flash and serial routes for boards
+// plugged into the server itself; a datacentre server has none, the app
+// stopped calling them, and one of them let any account change the build
+// settings. They are gone.
 // ----------------------------------------------------
-app.post("/api/flash", requireFirebaseAuth, async (req, res) => {
-  const { code, mcu, port: userPort, boardId } = req.body;
-  if (!code || !mcu) return res.status(400).json({ error: "Code and MCU are required." });
-
-  const board = resolveBoard(boardId, mcu);
-
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pio_flash_"));
-  const srcDir = path.join(tempDir, "src");
-  fs.mkdirSync(srcDir);
-  const codePath = path.join(srcDir, "main.cpp");
-
-  let finalCode = code;
-  if (!finalCode.includes("#include <Arduino.h>")) {
-    finalCode = "#include <Arduino.h>\n" + finalCode;
-  }
-  fs.writeFileSync(codePath, finalCode);
-
-  // Build platformio.ini with upload settings
-  let platformioIni = `[env:${board.id}]
-platform = ${board.platform}
-board = ${board.id}
-framework = arduino
-monitor_speed = 115200
-${userPort ? `upload_port = ${userPort}` : ''}
-lib_deps =
-`;
-
-  // Shared with /api/compile — see server/libraryDeps.ts and server/libraries.ts
-  let userLibraries = NO_LIBRARIES;
-  try {
-    userLibraries = prepareLibraries(req.uid, finalCode, tempDir);
-  } catch (err: any) {
-    console.error("[Flash] user libraries skipped:", err?.message || err);
-    fs.rmSync(path.join(tempDir, "lib"), { recursive: true, force: true });
-  }
-  const detectedLibDeps = mergeLibDeps(userLibraries.libDeps, detectLibDeps(finalCode + userLibraries.extraIncludes, userLibraries.skipHeaders));
-  if (detectedLibDeps.length > 0) {
-    platformioIni += detectedLibDeps.map(lib => `  ${lib}`).join("\n") + "\n";
-  }
-
-  fs.writeFileSync(path.join(tempDir, "platformio.ini"), platformioIni);
-  console.log(`[Flash] platformio.ini generated with libs: ${detectedLibDeps.join(', ') || 'none'}`);
-
-  try {
-    let pioPath = path.join(process.cwd(), ".platformio", "penv", "bin", "pio");
-    if (!fs.existsSync(pioPath)) {
-      pioPath = "pio";
-    }
-
-    // Close any active serial port before flashing
-    if (activeSerialPort && activeSerialPort.isOpen) {
-      try { activeSerialPort.close(); } catch(e) {}
-      activeSerialPort = null;
-    }
-
-    console.log(`[Flash] Compiling and uploading to ${mcu}...`);
-    handOver(tempDir);
-    const { stdout, stderr } = await buildQueue.run(async () => execFilePromise(pioPath, ['run', '-t', 'upload'], {
-      cwd: tempDir,
-      ...(await compilerOptions(path.join(process.cwd(), ".platformio"))),
-      maxBuffer: 1024 * 1024 * 50,
-      timeout: 120000
-    }));
-
-    console.log(`[Flash] Upload complete for ${mcu}`);
-    res.json({ success: true, stdout, stderr });
-  } catch (err: any) {
-    console.error(`[Flash] Upload failed:`, err.message);
-    res.status(500).json({
-      error: "Flash failed.",
-      stdout: err.stdout || "",
-      stderr: err.stderr || err.message || ""
-    });
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
-// ----------------------------------------------------
-// Serial Port Listing — Works in any browser
-// ----------------------------------------------------
-app.get("/api/serial/ports", requireFirebaseAuth, async (_req, res) => {
-  try {
-    const ports = await SerialPort.list();
-    // Filter out internal/system ports
-    const filtered = ports.filter(p => {
-      if (!p.path) return false;
-      // Skip common non-MCU ports
-      if (p.path.includes('Bluetooth') || p.path.includes('bluetooth')) return false;
-      return true;
-    }).map(p => ({
-      path: p.path,
-      manufacturer: p.manufacturer || 'Unknown',
-      vendorId: p.vendorId,
-      productId: p.productId,
-      serialNumber: p.serialNumber,
-      // Detect board type
-      board: detectBoardFromPort(p)
-    }));
-    res.json({ ports: filtered });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message, ports: [] });
-  }
-});
-
-function detectBoardFromPort(portInfo: any): { name: string, type: string } {
-  const vid = portInfo.vendorId?.toLowerCase();
-  const pid = portInfo.productId?.toLowerCase();
-  
-  if (vid === '2341') {
-    if (pid === '0010' || pid === '0042') return { name: 'Arduino Mega 2560', type: 'arduino' };
-    if (pid === '0043' || pid === '0001') return { name: 'Arduino Uno', type: 'arduino' };
-    if (pid === '003b') return { name: 'Arduino Nano Every', type: 'arduino' };
-    return { name: 'Arduino', type: 'arduino' };
-  }
-  if (vid === '1b4f') return { name: 'Arduino (SparkFun)', type: 'arduino' };
-  if (vid === '239a') return { name: 'Arduino (Adafruit)', type: 'arduino' };
-  if (vid === '2a03') return { name: 'Arduino', type: 'arduino' };
-  
-  // ESP32 common USB-to-Serial chips
-  if (vid === '10c4') return { name: 'ESP32 (CP2102)', type: 'esp32' };
-  if (vid === '1a86') return { name: 'ESP32 (CH340)', type: 'esp32' };
-  if (vid === '0403') return { name: 'ESP32 (FTDI)', type: 'esp32' };
-  if (vid === '303a') return { name: 'ESP32-S2/S3 (Native USB)', type: 'esp32' };
-  
-  return { name: 'Unknown Device', type: 'esp32' };
-}
-
-// ----------------------------------------------------
-// Backend Serial Monitor — connect/disconnect/send
-// Works via WebSocket for cross-browser support
-// ----------------------------------------------------
-app.post("/api/serial/connect", requireFirebaseAuth, async (req, res) => {
-  const { path: portPath, baudRate } = req.body;
-  if (!portPath) return res.status(400).json({ error: "Port path required." });
-
-  // Close existing connection
-  if (activeSerialPort && activeSerialPort.isOpen) {
-    try { activeSerialPort.close(); } catch(e) {}
-    activeSerialPort = null;
-  }
-
-  try {
-    const port = new SerialPort({
-      path: portPath,
-      baudRate: baudRate || 115200,
-      autoOpen: false
-    });
-
-    await new Promise<void>((resolve, reject) => {
-      port.open((err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
-
-    activeSerialPort = port;
-
-    // Parse line-by-line and broadcast to WebSocket clients
-    const parser = port.pipe(new ReadlineParser({ delimiter: '\n' }));
-    parser.on('data', (line: string) => {
-      const msg = JSON.stringify({ type: 'serial_data', data: line });
-      serialWsClients.forEach(ws => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
-      });
-    });
-
-    // Also handle raw data for non-line-based output
-    port.on('data', (chunk: Buffer) => {
-      const msg = JSON.stringify({ type: 'serial_raw', data: chunk.toString() });
-      serialWsClients.forEach(ws => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
-      });
-    });
-
-    port.on('close', () => {
-      const msg = JSON.stringify({ type: 'serial_disconnected' });
-      serialWsClients.forEach(ws => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
-      });
-      activeSerialPort = null;
-    });
-
-    port.on('error', (err) => {
-      const msg = JSON.stringify({ type: 'serial_error', data: err.message });
-      serialWsClients.forEach(ws => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
-      });
-    });
-
-    res.json({ success: true, message: `Connected to ${portPath} at ${baudRate || 115200} baud` });
-  } catch (err: any) {
-    res.status(500).json({ error: `Failed to open ${portPath}: ${err.message}` });
-  }
-});
-
-app.post("/api/serial/disconnect", requireFirebaseAuth, async (_req, res) => {
-  if (activeSerialPort && activeSerialPort.isOpen) {
-    try {
-      activeSerialPort.close();
-      activeSerialPort = null;
-      res.json({ success: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  } else {
-    res.json({ success: true, message: "No active connection." });
-  }
-});
-
-app.post("/api/serial/send", requireFirebaseAuth, async (req, res) => {
-  const { data } = req.body;
-  if (!activeSerialPort || !activeSerialPort.isOpen) {
-    return res.status(400).json({ error: "No serial port connected." });
-  }
-  try {
-    activeSerialPort.write(data);
-    res.json({ success: true });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 // Check Gemini API key status
 app.get("/api/status", (_req, res) => {
@@ -1820,8 +1641,6 @@ app.get("/api/status", (_req, res) => {
     platformioInstalled: fs.existsSync(path.join(process.cwd(), ".platformio", "penv", "bin", "pio")),
     // Builds run under their own account, away from the server's keys.
     buildsIsolated: buildIsolation().isolated,
-    webSerialSupport: 'server-side',
-    serialPortAvailable: true
   });
 });
 
@@ -1858,28 +1677,6 @@ async function setupPlatformIO() {
 async function startServer() {
   const httpServer = http.createServer(app);
 
-  // WebSocket server for serial monitor (cross-browser support)
-  const wss = new WebSocketServer({ server: httpServer, path: '/ws/serial' });
-  wss.on('connection', (ws) => {
-    console.log('[WS] Serial monitor client connected');
-    serialWsClients.add(ws);
-    
-    ws.on('message', (message) => {
-      // Client can send data to serial port via WebSocket too
-      try {
-        const msg = JSON.parse(message.toString());
-        if (msg.type === 'serial_send' && activeSerialPort && activeSerialPort.isOpen) {
-          activeSerialPort.write(msg.data);
-        }
-      } catch(e) {}
-    });
-    
-    ws.on('close', () => {
-      serialWsClients.delete(ws);
-      console.log('[WS] Serial monitor client disconnected');
-    });
-  });
-
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -1890,14 +1687,20 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
+    // A shared project's page: the app itself, kept out of search results.
+    app.get("/share/:id", (_req, res) => {
+      res.setHeader("X-Robots-Tag", "noindex");
+      res.sendFile(path.join(distPath, "index.html"));
+    });
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
+  // Last: turns an error from any route into one JSON answer.
+  app.use(jsonErrorHandler);
 
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`AI Microcontroller Web3 IDE Server running on http://0.0.0.0:${PORT}`);
-    console.log(`WebSocket Serial Monitor available at ws://0.0.0.0:${PORT}/ws/serial`);
   });
 
   // Dashboard counts are saved once a minute (server/stats.ts).

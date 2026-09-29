@@ -86,8 +86,8 @@ function Subscribers({ get }: { get: AdminGet }) {
       </div>
       {groups.failed.length > 0 && (
         <p className="mt-3 text-[11px] text-[var(--text-muted)]">
-          People whose payment failed are on the Free plan straight away. Paystack tries the card again on the next
-          payment date; if it goes through, their PRO comes back by itself.
+          When a payment fails, the person is on the Free plan straight away and their subscription is stopped, so
+          they aren't charged again. They can get PRO again from the Plans page.
         </p>
       )}
     </Card>

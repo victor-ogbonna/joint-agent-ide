@@ -3,8 +3,9 @@
  *   - active: renewing; Paystack charges the saved card every period.
  *   - canceled: no further charges, but PRO lasts until the paid period ends.
  *   - past_due: a renewal charge failed; PRO ends with the period already
- *     paid for. Claude publishes no grace period, so there is none here
- *     (GRACE_DAYS); set it to a number of days to allow one.
+ *     paid for, and the subscription is stopped so the card isn't tried
+ *     again (server/paystack.ts). Claude publishes no grace period, so there
+ *     is none here (GRACE_DAYS); set it to a number of days to allow one.
  * Kept free of Firebase so every rule here can be tested on its own.
  */
 
@@ -112,4 +113,26 @@ export function eventSubscriptionCode(data: any): string | null {
 export function isCurrentSubscription(storedCode: string | null, data: any): boolean {
   const code = eventSubscriptionCode(data);
   return !code || !storedCode || code === storedCode;
+}
+
+/** The plan a Paystack payment was for, in whichever shape the event gives it. */
+export function paymentPlanCode(data: any): string | null {
+  const plan = data?.plan;
+  if (typeof plan === "string" && plan) return plan;
+  if (plan && typeof plan === "object" && typeof plan.plan_code === "string" && plan.plan_code) return plan.plan_code;
+  const object = data?.plan_object;
+  if (object && typeof object === "object" && typeof object.plan_code === "string" && object.plan_code) return object.plan_code;
+  return null;
+}
+
+/**
+ * Whether a successful payment pays for PRO. It must be for the PRO plan as
+ * set now, or for the plan this account already subscribed on, so renewals
+ * still count after the plan is changed. Paystack charges a plan's own
+ * amount whatever the checkout asked for, so the plan is what fixes the
+ * price: a payment for no plan (any amount someone chose) never counts.
+ */
+export function paysForPro(planCode: string | null, configuredPlan: string | null, accountPlan: string | null): boolean {
+  if (!planCode) return false;
+  return planCode === configuredPlan || (!!accountPlan && planCode === accountPlan);
 }
