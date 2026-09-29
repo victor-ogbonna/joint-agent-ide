@@ -1,7 +1,8 @@
 /**
  * Like Claude's plans: PRO renews by charging the saved card each period; a
  * cancelled subscription keeps PRO until the paid period ends; a failed
- * renewal keeps PRO for a short grace period. Free holds 5 projects at once.
+ * renewal ends PRO with the period paid for (no grace period, as Claude
+ * publishes none). Free holds 5 projects at once.
  */
 import {
   GRACE_DAYS, GRACE_MS, addInterval, paidThrough, graceEndsAt, paidProUntil, hasPaidPro, standing,
@@ -43,14 +44,15 @@ const cancelled = standing(state({ subscriptionStatus: "canceled" }), NOW);
 check(cancelled.renewsAt === null && cancelled.proUntil === END, "shows when PRO ends, and no renewal");
 check(!hasPaidPro(state({ subscriptionStatus: "canceled", currentPeriodEnd: null, lastPaymentAt: null }), NOW), "no known paid period: Free");
 
-console.log(`A failed renewal: PRO for ${GRACE_DAYS} more days`);
+console.log("A failed renewal: no grace period");
+check(GRACE_DAYS === 0 && GRACE_MS === 0, "no grace period, as Claude publishes none");
 const failedAt = END;
 const pastDue = state({ subscriptionStatus: "past_due", pastDueAt: failedAt });
-check(graceEndsAt(pastDue) === failedAt + GRACE_MS, `grace ends ${GRACE_DAYS} days after the failure`);
-check(hasPaidPro(pastDue, failedAt + GRACE_MS - 1), "PRO through the grace period");
-check(!hasPaidPro(pastDue, failedAt + GRACE_MS + 1), "Free after it");
+check(graceEndsAt(pastDue) === END, "PRO ends when the paid period ends");
+check(!hasPaidPro(pastDue, failedAt + 1), "Free as soon as the renewal fails");
 check(graceEndsAt(state({ subscriptionStatus: "past_due", pastDueAt: END - 5 * DAY })) === END, "never less than the period already paid for");
-check(graceEndsAt(state({ subscriptionStatus: "past_due", pastDueAt: null })) === END + GRACE_MS, "an older unpaid account: grace from its period end");
+check(hasPaidPro(state({ subscriptionStatus: "past_due", pastDueAt: END - 5 * DAY }), END - DAY), "so an early failure keeps the days already paid for");
+check(graceEndsAt(state({ subscriptionStatus: "past_due", pastDueAt: null })) === END, "an older unpaid account: PRO ends with its period");
 
 console.log("The account's plan");
 const doc = (o = {}) => ({
@@ -63,8 +65,8 @@ const doc = (o = {}) => ({
 check(tierOf(doc({ subscriptionStatus: "active" }), "normal", NOW) === "pro", "active subscription: PRO");
 check(tierOf(doc({ subscriptionStatus: "canceled" }), "normal", NOW) === "pro", "cancelled, within the paid month: PRO");
 check(tierOf(doc({ subscriptionStatus: "canceled" }), "normal", END + 1) === "free", "cancelled, after it: Free");
-check(tierOf(doc({ subscriptionStatus: "past_due", pastDueAt: END }), "normal", END + DAY) === "pro", "renewal failed yesterday: PRO");
-check(tierOf(doc({ subscriptionStatus: "past_due", pastDueAt: END }), "normal", END + GRACE_MS + 1) === "free", "grace over: Free");
+check(tierOf(doc({ subscriptionStatus: "past_due", pastDueAt: END }), "normal", END + 1) === "free", "renewal failed: Free");
+check(tierOf(doc({ subscriptionStatus: "past_due", pastDueAt: END - DAY }), "normal", END - 1) === "pro", "but not before the paid month ends");
 check(tierOf(doc({ subscriptionStatus: "none" }), "pro", NOW) === "pro" && tierOf(doc(), "unmetered", NOW) === "unmetered", "granted PRO and the owner are unchanged");
 check(tierOf(doc(), "normal", NOW) === "free", "no subscription: Free");
 const cancelledDoc = doc({ subscriptionStatus: "canceled", cycleTokensUsed: PAID_TOKEN_CAP });

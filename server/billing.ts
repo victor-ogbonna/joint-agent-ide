@@ -2,16 +2,16 @@
  * How long a paying account keeps PRO, like Claude's plans:
  *   - active: renewing; Paystack charges the saved card every period.
  *   - canceled: no further charges, but PRO lasts until the paid period ends.
- *   - past_due: a renewal charge failed; PRO carries on for GRACE_DAYS after
- *     the failure (never less than the period already paid for), so there
- *     is time to pay again before dropping to Free.
+ *   - past_due: a renewal charge failed; PRO ends with the period already
+ *     paid for. Claude publishes no grace period, so there is none here
+ *     (GRACE_DAYS); set it to a number of days to allow one.
  * Kept free of Firebase so every rule here can be tested on its own.
  */
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 
-export const GRACE_DAYS = 3;
+export const GRACE_DAYS = 0;
 export const GRACE_MS = GRACE_DAYS * DAY;
 
 export interface BillingState {
@@ -45,7 +45,7 @@ export function paidThrough(s: BillingState): number | null {
   return null;
 }
 
-/** The end of the grace period after a failed renewal. */
+/** When PRO ends after a failed renewal: the paid period's end, plus any grace. */
 export function graceEndsAt(s: BillingState): number | null {
   const paid = paidThrough(s);
   const start = s.pastDueAt ?? paid;

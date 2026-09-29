@@ -9,6 +9,7 @@ import {
   HEADER_FILE, type SanitizedLibrary, type DependencySpec,
 } from "./libraryManifest";
 import { isBuiltinHeader, knownLibraryHeader } from "./libraryDeps";
+import { count as countStat } from "./stats";
 
 /**
  * Libraries a user adds themselves, on top of the ones found automatically
@@ -107,6 +108,10 @@ let rootOverride: string | null = null;
 export function setLibrariesRoot(dir: string | null) {
   rootOverride = dir;
   checks = null;
+}
+/** Where users' libraries are kept, for the admin dashboard's disk figures. */
+export function librariesDirectory(): string {
+  return librariesRoot();
 }
 function librariesRoot(): string {
   return rootOverride || process.env.LIBRARIES_DIR || path.join(process.env.ADMIN_CONFIG_DIR || path.join(process.cwd(), "data"), "libraries");
@@ -768,6 +773,7 @@ export function registerLibraryRoutes(app: express.Express, requireAuth: express
     if (!allow(req.uid, "add", 40)) return res.status(429).json({ error: "That's a lot of libraries at once. Wait a few minutes." });
     try {
       const library = await addCatalogueLibrary(req.uid, owner, name, version || undefined);
+      countStat("library_adds");
       res.json({ library: libraryView(library), ...listing(req.uid) });
     } catch (err) { sendError(res, err); }
   });
@@ -785,6 +791,7 @@ export function registerLibraryRoutes(app: express.Express, requireAuth: express
     try {
       const lib = unpackZipLibrary(req.body, null, fileName);
       const library = await saveImported(req.uid, lib, "zip");
+      countStat("library_imports");
       res.json({ library: libraryView(library), ...listing(req.uid) });
     } catch (err) { sendError(res, err); }
   });
@@ -795,6 +802,7 @@ export function registerLibraryRoutes(app: express.Express, requireAuth: express
     if (!allow(req.uid, "import", 30)) return res.status(429).json({ error: "That's a lot of imports at once. Wait a few minutes." });
     try {
       const library = await importFromGithub(req.uid, url);
+      countStat("library_imports");
       res.json({ library: libraryView(library), ...listing(req.uid) });
     } catch (err) { sendError(res, err); }
   });

@@ -856,3 +856,33 @@ pre[class*="language-"] {
 .app-bottom-nav {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
+
+/* ---------------------------------------------------------------------------
+   Admin dashboard charts. Two series colours (validated for colour-blind
+   separation and contrast against the panel in both themes), status colours
+   reserved for state and always shown with an icon and a word, and recessive
+   grid and axes. Text never takes a series colour: labels stay in the text
+   tokens, and a coloured key beside them carries identity.
+--------------------------------------------------------------------------- */
+.viz-root {
+  --viz-series-1: #3987e5;
+  --viz-series-2: #d95926;
+  --viz-grid: #1b1e28;
+  --viz-axis: #2a2f3d;
+  --viz-hover: rgba(255, 255, 255, 0.05);
+  --viz-track: rgba(57, 135, 229, 0.16);
+  --viz-good: #0ca30c;
+  --viz-warning: #fab219;
+  --viz-critical: #d03b3b;
+  /* Text that flags a problem, readable on the panels of each theme. */
+  --viz-alert-text: #f87171;
+}
+:root[data-theme="light"] .viz-root {
+  --viz-alert-text: #c42b2b;
+  --viz-series-1: #2a78d6;
+  --viz-series-2: #eb6834;
+  --viz-grid: #eceef3;
+  --viz-axis: #c9cdd8;
+  --viz-hover: rgba(11, 11, 11, 0.04);
+  --viz-track: #cde2fb;
+}

@@ -6,6 +6,7 @@ import { requireFirebaseAuth } from "./quota";
 import { loadAdminConfig, saveAdminConfig, maskSecret } from "./adminConfig";
 import { periodEndFrom, paymentTime, isCurrentSubscription, eventSubscriptionCode } from "./billing";
 import { subscriptionStanding, getOrCreateUserDoc } from "./quota";
+import { count as countStat } from "./stats";
 
 declare global {
   namespace Express {
@@ -13,6 +14,11 @@ declare global {
       rawBody?: Buffer;
     }
   }
+}
+
+/** The Paystack secret key, for the admin dashboard's payment history. */
+export function paystackSecretKey(): string | null {
+  return getPaystackConfig().secretKey;
 }
 
 function getPaystackConfig() {
@@ -192,6 +198,7 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
         { subscriptionStatus: "canceled", updatedAt: FieldValue.serverTimestamp() },
         { merge: true }
       );
+      countStat("cancellations");
       const doc = await getOrCreateUserDoc(req.uid!);
       res.json({ success: true, ...subscriptionStanding(doc) });
     } catch (err: any) {
@@ -263,9 +270,9 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
             break;
           }
           case "invoice.payment_failed": {
-            // A renewal didn't go through. PRO carries on through the grace
-            // period (server/billing.ts), counted from the first failure: a
-            // repeat failure doesn't extend it.
+            // A renewal didn't go through: PRO ends with the period already
+            // paid for (server/billing.ts). Counted from the first failure, so
+            // a repeat failure doesn't move it.
             const doc = await getOrCreateUserDoc(uid);
             if (!isCurrentSubscription(doc.paystackSubscriptionCode, data)) break;
             if (doc.subscriptionStatus !== "active") break;
@@ -273,6 +280,7 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
               { subscriptionStatus: "past_due", pastDueAt: Date.now(), updatedAt: FieldValue.serverTimestamp() },
               { merge: true }
             );
+            countStat("payments_failed");
             break;
           }
           case "subscription.not_renew":
@@ -290,6 +298,8 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
               { subscriptionStatus: "canceled", updatedAt: FieldValue.serverTimestamp() },
               { merge: true }
             );
+            // Cancelled from the app, it was counted there already.
+            if (doc.subscriptionStatus !== "canceled") countStat("cancellations");
             break;
           }
           default:

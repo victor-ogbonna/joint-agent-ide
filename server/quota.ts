@@ -4,6 +4,7 @@ import { adminAuth, adminDb, isFirebaseAdminConfigured } from "./firebaseAdmin";
 import { loadAdminConfig } from "./adminConfig";
 import { accessLevelFor, bypassesLaunchLock, LAUNCH_LOCKED_CODE, LAUNCH_LOCKED_MESSAGE } from "./access";
 import { hasPaidPro, standing, type BillingState } from "./billing";
+import { noteActive } from "./stats";
 
 /** Sentinel subscription status for accounts whose usage is never counted. */
 export const UNMETERED_STATUS = "unmetered";
@@ -196,6 +197,7 @@ export async function requireFirebaseAuth(req: Request, res: Response, next: Nex
   req.uid = who.uid;
   req.email = who.email;
   req.emailVerified = who.emailVerified;
+  noteActive(who.uid);
   next();
 }
 
@@ -401,6 +403,7 @@ export async function requireAuthAndQuota(req: Request, res: Response, next: Nex
   }
 
   const level = accessLevelFor(who.email, who.emailVerified);
+  noteActive(uid);
 
   // The owner is never metered. The unmetered tier flows through to
   // incrementTokenUsage via req.quota, which short-circuits on it, so no call

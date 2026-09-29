@@ -18,7 +18,10 @@ import { readAccessLists, sanitiseEmailList } from './server/access';
 import { requireAuthAndQuota, requireFirebaseAuth, incrementTokenUsage, getOrCreateUserDoc, consumeCompile, refundCompile, CompileReceipt, tierOf, allowanceFor, compileAllowance, formatWait, subscriptionStanding, FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES } from './server/quota';
 import { accessLevelFor } from './server/access';
 import { voiceNoteTooLong, MAX_VOICE_NOTE_SECONDS } from './server/voiceNote';
-import { registerPaystackRoutes } from './server/paystack';
+import { registerPaystackRoutes, paystackSecretKey } from './server/paystack';
+import { registerAdminStatsRoutes } from './server/adminStats';
+import { useBuildCache, readyBuildCache, startBuildCachePruning } from './server/buildCache';
+import { isFirebaseAdminConfigured } from './server/firebaseAdmin';
 import { registerWaitlistRoutes } from './server/waitlist';
 import { registerFeedbackRoutes } from './server/feedback';
 import { registerGithubRoutes } from './server/github';
@@ -169,6 +172,18 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 // re-serialized/parsed JSON body can differ byte-for-byte from what was signed.
 app.use(express.json({ limit: '50mb', verify: (req: any, _res, buf) => { req.rawBody = buf; } }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// Traffic for the admin dashboard (server/stats.ts): the app's API calls and
+// page loads. The health check, and the admin pages themselves, don't count.
+app.use((req, _res, next) => {
+  if (req.path.startsWith("/api/")) {
+    if (!req.path.startsWith("/api/admin") && req.path !== "/api/status") countStat("api_requests");
+  } else if (req.method === "GET" && !req.path.startsWith("/admin") &&
+    (req.headers["sec-fetch-dest"] === "document" || /text\/html/.test(String(req.headers.accept || "")))) {
+    countStat("page_views");
+  }
+  next();
+});
 
 // Mounted early so it wins over the SPA catch-all further down, which would
 // otherwise answer /__/auth/* with index.html and break sign-in.
@@ -358,6 +373,17 @@ registerWaitlistRoutes(app, requireAdmin);
 registerFeedbackRoutes(app, requireFirebaseAuth, requireAdmin);
 registerGithubRoutes(app, requireFirebaseAuth);
 registerLibraryRoutes(app, requireFirebaseAuth);
+// The admin dashboard: users, activity, payments and server health.
+registerAdminStatsRoutes(app, requireAdmin, {
+  isolation: () => buildIsolation(),
+  services: () => ({
+    deepseek: isDeepSeekConfigured(),
+    gemini: !!ai,
+    firebase: isFirebaseAdminConfigured(),
+    paystack: !!paystackSecretKey(),
+    feedbackEmail: !!(process.env.RESEND_API_KEY && process.env.FEEDBACK_TO_EMAIL),
+  }),
+});
 
 // Lets the frontend check where a signed-in user stands in their 5-hour
 // allowance — used both to seed the UI on load and by a paused user's
@@ -402,6 +428,8 @@ import { WORKSPACE_COMMANDS, isWorkspaceCommand, toWorkspaceCommand } from "./se
 import { scrubToolchainNames } from "./server/scrub.js";
 import { buildEnv } from "./server/buildEnv.js";
 import { setUpBuildAccount, compilerOptions, handOver, buildIsolation } from "./server/buildUser.js";
+import { buildQueue, ServerBusyError } from "./server/buildQueue.js";
+import { count as countStat, countBoard, countForUser, recordMax, startStats } from "./server/stats.js";
 // Re-exported so the branding test can reach it from the server entrypoint too.
 export { scrubToolchainNames };
 
@@ -784,6 +812,10 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
       if (chatMode !== "plan" || opensMonitor) call = textToolCall;
     }
     await incrementTokenUsage(req.uid!, req.quota, outputTokens);
+    countStat("ai_chat");
+    countStat(free ? "ai_free" : "ai_pro");
+    countStat("ai_tokens", outputTokens);
+    countForUser(req.uid, "aiMessagesTotal");
 
     if (call?.name === "generate_project") {
       // Claims only what actually happened. Schematic rendering is not shipped
@@ -937,6 +969,10 @@ All four top-level keys are required. Do not wrap the JSON in markdown fences.`,
     ], { jsonMode: true }, modelFor(req.quota!.tier === "free"));
 
     await incrementTokenUsage(req.uid!, req.quota, response.outputTokens);
+    countStat("ai_generate");
+    countStat(req.quota?.tier === "free" ? "ai_free" : "ai_pro");
+    countStat("ai_tokens", response.outputTokens);
+    countForUser(req.uid, "aiMessagesTotal");
 
     const resultText = response.text;
     if (!resultText) {
@@ -1001,6 +1037,10 @@ Both keys are required. Do not wrap the JSON in markdown fences.`,
     ], { jsonMode: true }, modelFor(req.quota!.tier === "free"));
 
     await incrementTokenUsage(req.uid!, req.quota, response.outputTokens);
+    countStat("ai_debug");
+    countStat(req.quota?.tier === "free" ? "ai_free" : "ai_pro");
+    countStat("ai_tokens", response.outputTokens);
+    countForUser(req.uid, "aiMessagesTotal");
 
     const resultText = response.text;
     if (!resultText) {
@@ -1306,6 +1346,7 @@ app.post("/api/ai/transcribe", requireAuthAndQuota, async (req, res) => {
     }
     if (!response) throw lastError || new Error("No transcription model answered.");
     await incrementTokenUsage(req.uid!, req.quota, response.usageMetadata?.candidatesTokenCount || 0);
+    countStat("voice_notes");
     res.json({ text: response.text || "" });
   } catch (err: any) {
     // "Transcription failed." told the user nothing and told us nothing
@@ -1396,6 +1437,10 @@ lib_deps =
     platformioIni += detectedLibDeps.map(lib => `  ${lib}`).join("\n") + "\n";
   }
 
+  // Reuse files compiled by earlier compiles (server/buildCache.ts). Adds
+  // nothing while the cache is off.
+  platformioIni += useBuildCache(tempDir, path.join(process.cwd(), ".platformio"));
+
   fs.writeFileSync(path.join(tempDir, "platformio.ini"), platformioIni);
   console.log(`[Compile] platformio.ini generated with libs: ${detectedLibDeps.join(', ') || 'none'}`);
 
@@ -1404,12 +1449,30 @@ lib_deps =
     if (!fs.existsSync(pioPath)) {
       pioPath = "pio";
     }
-    // Run under the build account when there is one (server/buildUser.ts).
+    // Run under the build account when there is one (server/buildUser.ts),
+    // taking turns with other builds (server/buildQueue.ts).
     handOver(tempDir);
-    const { stdout, stderr } = await execFilePromise(pioPath, ['run'], {
-      cwd: tempDir,
-      ...(await compilerOptions(path.join(process.cwd(), ".platformio"))),
-      maxBuffer: 1024 * 1024 * 50
+    countBoard(board.id);
+    const { stdout, stderr } = await buildQueue.run(async () => {
+      const startedAt = Date.now();
+      try {
+        const options = await compilerOptions(path.join(process.cwd(), ".platformio"));
+        readyBuildCache(path.join(process.cwd(), ".platformio"), options.uid, options.gid);
+        return await execFilePromise(pioPath, ['run'], {
+          cwd: tempDir,
+          ...options,
+          maxBuffer: 1024 * 1024 * 50
+        });
+      } finally {
+        const ms = Date.now() - startedAt;
+        countStat("compile_ms_total", ms);
+        countStat("compile_ms_count");
+        recordMax("compile_ms_max", ms);
+      }
+    }, (waited) => {
+      countStat("compile_waits");
+      countStat("compile_wait_ms_total", waited);
+      recordMax("compile_wait_ms_max", waited);
     });
 
     // Derive the artifact from the RESOLVED BOARD, never from the `mcu` string
@@ -1468,6 +1531,8 @@ lib_deps =
       // flasher needs protocol and speed, and taking them from the same
       // resolution that produced this binary means they can never disagree
       // with what was actually built.
+      countStat("compiles_ok");
+      countForUser(req.uid, "compilesTotal");
       setCompilesLeft();
       res.json({
         success: true,
@@ -1483,6 +1548,7 @@ lib_deps =
       // compileSucceeded tells the client this is NOT a code problem, so it
       // must not burn five AI debug rounds trying to "fix" working code.
       const tail = scrubToolchainNames((stderr || stdout || "").trim()).split("\n").slice(-12).join("\n");
+      countStat("compiles_failed");
       await refundFailedCompile();
       setCompilesLeft();
       res.status(500).json({
@@ -1494,6 +1560,13 @@ lib_deps =
   } catch (err: any) {
     await refundFailedCompile();
     setCompilesLeft();
+    // Too many builds waiting: nothing is wrong with the code, so say so
+    // plainly, and never let it reach auto-debug as a code error.
+    if (err instanceof ServerBusyError) {
+      countStat("compiles_busy");
+      return res.status(503).json({ error: err.message, code: "SERVER_BUSY" });
+    }
+    countStat("compiles_failed");
     res.status(500).json({
       error: "Compilation failed.",
       stdout: scrubToolchainNames(err.stdout || ""),
@@ -1569,12 +1642,12 @@ lib_deps =
 
     console.log(`[Flash] Compiling and uploading to ${mcu}...`);
     handOver(tempDir);
-    const { stdout, stderr } = await execFilePromise(pioPath, ['run', '-t', 'upload'], {
+    const { stdout, stderr } = await buildQueue.run(async () => execFilePromise(pioPath, ['run', '-t', 'upload'], {
       cwd: tempDir,
       ...(await compilerOptions(path.join(process.cwd(), ".platformio"))),
       maxBuffer: 1024 * 1024 * 50,
       timeout: 120000
-    });
+    }));
 
     console.log(`[Flash] Upload complete for ${mcu}`);
     res.json({ success: true, stdout, stderr });
@@ -1827,6 +1900,9 @@ async function startServer() {
     console.log(`WebSocket Serial Monitor available at ws://0.0.0.0:${PORT}/ws/serial`);
   });
 
+  // Dashboard counts are saved once a minute (server/stats.ts).
+  startStats();
+
   // Builds get their own account first: every later compiler launch waits
   // for this check (server/buildUser.ts).
   const coreDir = path.join(process.cwd(), ".platformio");
@@ -1842,6 +1918,9 @@ async function startServer() {
       ...(process.env.LIBRARIES_DIR ? [process.env.LIBRARIES_DIR] : []),
     ],
   }).catch(console.error);
+
+  // The build cache is trimmed only while no compile is running or waiting.
+  startBuildCachePruning(coreDir, () => buildQueue.runningNow === 0 && buildQueue.waitingNow === 0);
 
   // Install PIO asynchronously without blocking server start
   setupPlatformIO().catch(console.error);

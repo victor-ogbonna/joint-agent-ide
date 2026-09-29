@@ -1,8 +1,32 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { useDocumentScroll } from "./useDocumentScroll";
-import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw, UserPlus, Trash2, MessageSquarePlus, Mail, MailX, Paperclip } from "lucide-react";
+import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw, UserPlus, Trash2, MessageSquarePlus, Mail, MailX, Paperclip, LayoutDashboard, Activity, Server, Settings } from "lucide-react";
+import OverviewTab from "./admin/OverviewTab";
+import UsersTab from "./admin/UsersTab";
+import TrafficTab from "./admin/TrafficTab";
+import PaymentsTab from "./admin/PaymentsTab";
+import ServerTab from "./admin/ServerTab";
 
 const TOKEN_KEY = "jointagent_admin_token";
+const TAB_KEY = "jointagent_admin_tab";
+
+const TABS = [
+  { id: "overview", label: "Overview", Icon: LayoutDashboard },
+  { id: "users", label: "Users", Icon: Users },
+  { id: "traffic", label: "Traffic", Icon: Activity },
+  { id: "payments", label: "Payments", Icon: CreditCard },
+  { id: "server", label: "Server", Icon: Server },
+  { id: "settings", label: "Settings", Icon: Settings },
+] as const;
+type TabId = (typeof TABS)[number]["id"];
+
+function savedTab(): TabId {
+  try {
+    const t = sessionStorage.getItem(TAB_KEY);
+    if (TABS.some((x) => x.id === t)) return t as TabId;
+  } catch { /* storage blocked: start on Overview */ }
+  return "overview";
+}
 
 export default function AdminPage() {
   useDocumentScroll();
@@ -10,6 +34,15 @@ export default function AdminPage() {
   const [password, setPassword] = useState("");
   const [loginError, setLoginError] = useState<string | null>(null);
   const [loggingIn, setLoggingIn] = useState(false);
+  const [tab, setTab] = useState<TabId>(savedTab);
+  const chooseTab = (id: TabId) => {
+    setTab(id);
+    try { sessionStorage.setItem(TAB_KEY, id); } catch { /* remembered for this visit only */ }
+  };
+  // On a phone the tab bar scrolls sideways: keep the chosen tab in view.
+  useEffect(() => {
+    document.getElementById(`admin-tab-${tab}`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [tab, token]);
 
 
 
@@ -70,6 +103,8 @@ export default function AdminPage() {
     return res;
   };
 
+  // The dashboard tabs fetch through this; it only changes when the token does.
+  const adminGet = useCallback((path: string) => adminFetch(token ?? "", path), [token]);
 
   const loadPaystackConfig = async (t: string) => {
     setLoadingPaystackConfig(true);
@@ -382,7 +417,38 @@ export default function AdminPage() {
         </button>
       </header>
 
-      <main className="max-w-lg mx-auto p-6 pb-16">
+      <nav className="sticky top-0 z-20 border-b border-[var(--border-main)] bg-[var(--bg-root)]" aria-label="Admin sections">
+        <div className="mx-auto flex max-w-6xl gap-1 overflow-x-auto px-2 sm:px-4" role="tablist">
+          {TABS.map(({ id, label, Icon }) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              id={`admin-tab-${id}`}
+              aria-selected={tab === id}
+              aria-controls="admin-panel"
+              onClick={() => chooseTab(id)}
+              className={`flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2.5 text-[12px] font-medium transition ${tab === id ? "border-orange-500 text-[var(--text-main)]" : "border-transparent text-[var(--text-muted)] hover:text-[var(--text-main)]"}`}
+            >
+              <Icon size={14} aria-hidden="true" />
+              {label}
+            </button>
+          ))}
+        </div>
+      </nav>
+
+      {tab !== "settings" && (
+        <main id="admin-panel" role="tabpanel" aria-labelledby={`admin-tab-${tab}`} className="viz-root max-w-6xl mx-auto px-4 pt-5 pb-16 sm:px-6">
+          {tab === "overview" && <OverviewTab get={adminGet} />}
+          {tab === "users" && <UsersTab get={adminGet} />}
+          {tab === "traffic" && <TrafficTab get={adminGet} />}
+          {tab === "payments" && <PaymentsTab get={adminGet} />}
+          {tab === "server" && <ServerTab get={adminGet} />}
+        </main>
+      )}
+
+      {tab === "settings" && (
+      <main id="admin-panel" role="tabpanel" aria-labelledby="admin-tab-settings" className="max-w-lg mx-auto p-6 pb-16">
         <div className="bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl p-5 space-y-4 mb-4">
           <div className="flex items-center gap-2">
             <div className="p-1.5 bg-orange-500/10 rounded-md text-orange-600">
@@ -737,6 +803,7 @@ export default function AdminPage() {
           </p>
         </div>
       </main>
+      )}
     </div>
   );
 }

@@ -1387,7 +1387,7 @@ export default function App() {
   };
 
   // Compile microcontroller code simulation
-  const handleCompile = async (overrideCode?: string): Promise<{ success: boolean, data?: any, errorText?: string, compileSucceeded?: boolean, limited?: { reason: "window" | "day"; resetAt: number | null }, missingLibrary?: string }> => {
+  const handleCompile = async (overrideCode?: string): Promise<{ success: boolean, data?: any, errorText?: string, compileSucceeded?: boolean, limited?: { reason: "window" | "day"; resetAt: number | null }, missingLibrary?: string, busy?: boolean }> => {
     setIsCompiling(true);
     const codeToCompile = overrideCode || code;
     logToTerminal(`[COMPILER] Sending code to cloud build server for ${mcu.toUpperCase()}...`, "info");
@@ -1426,9 +1426,11 @@ export default function App() {
         const limited = data.code === "FREE_COMPILE_LIMIT"
           ? { reason: data.reason === "day" ? "day" as const : "window" as const, resetAt: typeof data.resetAt === "number" ? data.resetAt : null }
           : undefined;
+        // Too many builds waiting on the server: nothing to fix in the code.
+        const busy = data.code === "SERVER_BUSY";
         // Only a real error in the code is worth handing to Ask AI.
-        if (!limited && data.compileSucceeded !== true) lastCompileErrorRef.current = errorText;
-        return { success: false, errorText, compileSucceeded: data.compileSucceeded === true, limited, missingLibrary };
+        if (!limited && !busy && data.compileSucceeded !== true) lastCompileErrorRef.current = errorText;
+        return { success: false, errorText, compileSucceeded: data.compileSucceeded === true, limited, missingLibrary, busy };
       }
     } catch (err: any) {
       logToTerminal(`[COMPILER] Build failed: ${err.message}`, "error");
@@ -2341,6 +2343,14 @@ export default function App() {
       return;
     }
 
+    // The build server was too busy to take it: the code is fine, so there
+    // is nothing for auto-debug to fix.
+    if (!compileResult.success && compileResult.busy) {
+      logToTerminal("[SMART FLASH] Stopped: the build server is very busy right now. Your code wasn't changed. Try Smart Flash again in a minute.", "error");
+      setIsSmartFlashing(false);
+      return;
+    }
+
     // Auto-debug is a PRO feature. The Free plan stops at the compile error;
     // Ask AI on the code and the agent can still be asked to fix it.
     if (!compileResult.success && tierRef.current === "free") {
@@ -2368,6 +2378,11 @@ export default function App() {
       currentCode = debugResult.code;
       const missingBefore = compileResult.missingLibrary;
       compileResult = await handleCompile(currentCode);
+      if (!compileResult.success && compileResult.busy) {
+        logToTerminal("[SMART FLASH] Stopped: the build server is very busy right now. Try Smart Flash again in a minute.", "error");
+        setIsSmartFlashing(false);
+        return;
+      }
       // Still missing the same library: it has to be added, and more AI
       // rounds would only spend the user's allowance rewriting nothing.
       if (!compileResult.success && compileResult.missingLibrary && compileResult.missingLibrary === missingBefore) {
@@ -3728,8 +3743,22 @@ export default function App() {
                       {isCancelingSubscription ? "Canceling…" : "Cancel Subscription"}
                     </button>
                   </>
+                ) : usageInfo.subscriptionStatus === "past_due" && !isPro && accountTier !== null ? (
+                  // A renewal failed and PRO has ended: say why, and offer it again.
+                  <>
+                    <p className="mt-2 text-[10px] leading-snug text-red-400">
+                      Your last PRO payment didn't go through, so you're on the Free plan.
+                    </p>
+                    <button
+                      onClick={() => { setIsMenuOpen(false); setIsPlansOpen(true); }}
+                      className="w-full flex items-center gap-1.5 mt-2 text-[10px] font-medium gradient-text hover:opacity-80 transition"
+                    >
+                      <Rocket size={12} className="text-orange-500 rocket-blaze" />
+                      Get PRO again — $7/mo
+                    </button>
+                  </>
                 ) : usageInfo.subscriptionStatus === "past_due" && isPro ? (
-                  // A renewal failed: PRO carries on for the grace period.
+                  // A renewal failed within the period already paid for.
                   <>
                     <p className="mt-2 text-[10px] leading-snug text-red-400">
                       Your PRO payment didn't go through. PRO continues{usageInfo.proUntil ? ` until ${formatDay(usageInfo.proUntil)}` : " for a few days"}.
