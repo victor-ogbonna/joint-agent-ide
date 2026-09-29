@@ -5,6 +5,7 @@ import AdminPage from './AdminPage.tsx';
 import HomePage from './HomePage.tsx';
 import PrivacyPage from './PrivacyPage.tsx';
 import ThanksPage from './ThanksPage.tsx';
+import SharePage from './SharePage.tsx';
 import { AuthProvider, useAuth } from './contexts/AuthContext.tsx';
 import './index.css';
 import { startInstallSupport } from './lib/installApp.ts';
@@ -25,6 +26,9 @@ const isWaitlistRoute = currentPath === '/waitlist';
 // Where a successful waitlist signup lands. Public and auth-free like
 // /waitlist — the people seeing it do not have accounts yet.
 const isThanksRoute = currentPath === '/thanks';
+// A shared project's read-only page (server/share.ts). Public like /privacy:
+// people opening a link someone sent them mostly have no account.
+const shareId = /^\/share\/([A-Za-z0-9_-]{22})$/.exec(currentPath)?.[1] ?? null;
 
 // Auth usually resolves in a few hundred ms — too fast for the power-on to
 // register as intentional rather than as a flicker. Long enough to land, short
@@ -132,6 +136,8 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     {isAdminRoute ? (
       <AdminPage />
+    ) : shareId ? (
+      <SharePage shareId={shareId} />
     ) : isPrivacyRoute ? (
       <PrivacyPage />
     ) : isThanksRoute ? (

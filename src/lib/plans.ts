@@ -11,6 +11,8 @@ export const PRO_MAX_REPLY_TOKENS = 40000;
 export const FREE_WINDOW_COMPILES = 8;
 export const FREE_DAILY_COMPILES = 25;
 export const PRO_PRICE = "$7/month";
+/** Projects a Free account can have at once. Nothing is ever deleted to fit: past it, a new one waits for a free slot. */
+export const FREE_PROJECT_LIMIT = 5;
 
 /** How much of an allowance is used, as a whole percentage: never shown as token counts. */
 export function percentUsed(used: number, cap: number): number {
@@ -31,6 +33,11 @@ export function formatWait(resetAt: number, now = Date.now()): string {
   if (d) return `${d} day${d === 1 ? "" : "s"}${h ? ` ${h} h` : ""}`;
   if (!h) return `${m} min`;
   return m ? `${h} h ${m} min` : `${h} h`;
+}
+
+/** A day on the user's own calendar: "Wed 28 Oct". */
+export function formatDay(at: number): string {
+  return new Date(at).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
 }
 
 /** The refill time on the user's own clock: "at 9:40 PM" today, "on Fri 3 Oct, 9:40 PM" on another day. */

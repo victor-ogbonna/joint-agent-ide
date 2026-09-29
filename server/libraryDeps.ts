@@ -77,25 +77,34 @@ const LIBRARY_MAP: Record<string, string> = {
 
 const KNOWN_STDLIB_HEADERS = ['Arduino', 'Wire', 'SPI', 'EEPROM', 'math', 'string', 'stdio', 'stdlib', 'stdint', 'avr/io', 'avr/interrupt'];
 
+/** A header as a sketch may name it: "DHT.h", "avr/io.h", "Adafruit_GFX.h". */
+const HEADER_PATH = /^[A-Za-z0-9_][A-Za-z0-9_.+\-]*(?:\/[A-Za-z0-9_][A-Za-z0-9_.+\-]*)*$/;
+
 // Parses #include directives (both <lib.h> and <lib/sub.h> forms) and
 // returns the PlatformIO lib_deps entries to write into platformio.ini.
 // Headers in `skipHeaders` come from a library the user added themselves
 // (server/libraries.ts), which is used in their place.
+//
+// Only the well-known libraries in LIBRARY_MAP are fetched. Nothing from
+// the code itself is ever written into platformio.ini: a header name is
+// the user's text, and a line of it in the settings file could change the
+// build (one kind of setting runs a command). An unknown library isn't
+// fetched from the catalogue by name either, since anyone can publish a
+// package there, build scripts included; the user adds it under Libraries,
+// where it is checked first.
 export function detectLibDeps(code: string, skipHeaders?: ReadonlySet<string>): string[] {
-  const includeMatches = [...code.matchAll(/#include\s*[<"]([^>"]+)[>"]/g)];
+  const includeMatches = [...code.matchAll(/#include\s*[<"]([^>"\r\n]+)[>"]/g)];
   const detected = new Set<string>();
 
   for (const match of includeMatches) {
-    const headerPath = match[1];
+    const headerPath = match[1].trim();
+    if (!HEADER_PATH.test(headerPath)) continue;
     const headerName = headerPath.replace(/\.h$/, '').split('/').pop() || '';
     if (skipHeaders?.has(headerName)) continue;
 
     if (LIBRARY_MAP.hasOwnProperty(headerName)) {
       const libDep = LIBRARY_MAP[headerName];
       if (libDep) detected.add(libDep); // skip empty strings (built-ins)
-    } else if (headerName && !KNOWN_STDLIB_HEADERS.includes(headerName)) {
-      // Unknown library — best-guess by passing the bare name to PlatformIO's registry search
-      detected.add(headerName);
     }
   }
 
@@ -104,6 +113,21 @@ export function detectLibDeps(code: string, skipHeaders?: ReadonlySet<string>): 
   }
 
   return Array.from(detected);
+}
+
+/**
+ * The last check before a library line is written into platformio.ini:
+ * "owner/name@version", in characters that can't start a new setting or run
+ * anything. Anything else is dropped.
+ */
+const LIB_DEP = /^[A-Za-z0-9_\-][A-Za-z0-9_.\-]{0,63}\/[A-Za-z0-9][A-Za-z0-9 _.+\-]{0,99}@[\^~]?[A-Za-z0-9][A-Za-z0-9_.+\-]{0,39}$/;
+export function isSafeLibDep(spec: string): boolean {
+  return typeof spec === "string" && LIB_DEP.test(spec);
+}
+
+/** Every catalogue library detectLibDeps can add, for tests. */
+export function knownLibDeps(): string[] {
+  return [...new Set(Object.values(LIBRARY_MAP).filter(Boolean)), 'adafruit/Adafruit Unified Sensor@^1.1.14'];
 }
 
 /** A header the framework itself provides, such as Wire or WiFi. */

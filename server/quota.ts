@@ -3,6 +3,8 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { adminAuth, adminDb, isFirebaseAdminConfigured } from "./firebaseAdmin";
 import { loadAdminConfig } from "./adminConfig";
 import { accessLevelFor, bypassesLaunchLock, LAUNCH_LOCKED_CODE, LAUNCH_LOCKED_MESSAGE } from "./access";
+import { hasPaidPro, standing, type BillingState } from "./billing";
+import { noteActive } from "./stats";
 
 /** Sentinel subscription status for accounts whose usage is never counted. */
 export const UNMETERED_STATUS = "unmetered";
@@ -80,7 +82,13 @@ export interface UserQuotaDoc {
   paystackCustomerCode: string | null;
   paystackSubscriptionCode: string | null;
   paystackEmailToken: string | null;
+  /** The plan this account's PRO was paid on, so its renewals are recognised. */
+  paystackPlanCode: string | null;
   currentPeriodEnd: Timestamp | null;
+  /** When the last successful payment was made (ms since epoch). */
+  lastPaymentAt: number | null;
+  /** When a renewal charge failed (ms since epoch), while past due. */
+  pastDueAt: number | null;
   /** When the current token window opened (ms since epoch). */
   windowStart: number | null;
   windowTokens: number;
@@ -101,7 +109,10 @@ const DEFAULT_USER_DOC: UserQuotaDoc = {
   paystackCustomerCode: null,
   paystackSubscriptionCode: null,
   paystackEmailToken: null,
+  paystackPlanCode: null,
   currentPeriodEnd: null,
+  lastPaymentAt: null,
+  pastDueAt: null,
   windowStart: null,
   windowTokens: 0,
   tokenDay: null,
@@ -123,7 +134,10 @@ function readUserDoc(data: any): UserQuotaDoc {
     paystackCustomerCode: data.paystackCustomerCode ?? null,
     paystackSubscriptionCode: data.paystackSubscriptionCode ?? null,
     paystackEmailToken: data.paystackEmailToken ?? null,
+    paystackPlanCode: typeof data.paystackPlanCode === "string" ? data.paystackPlanCode : null,
     currentPeriodEnd: data.currentPeriodEnd ?? null,
+    lastPaymentAt: time(data.lastPaymentAt),
+    pastDueAt: time(data.pastDueAt),
     windowStart: time(data.windowStart),
     windowTokens: num(data.windowTokens),
     tokenDay: typeof data.tokenDay === "string" ? data.tokenDay : null,
@@ -165,6 +179,16 @@ async function verifyBearerToken(req: Request): Promise<Identity | null> {
   }
 }
 
+/**
+ * Whether a request carries a valid sign-in, without answering it. Used to
+ * decide whether a large request body is worth reading at all; the route's
+ * own middleware still does the real check.
+ */
+export async function hasValidSignIn(req: Request): Promise<boolean> {
+  if (!isFirebaseAdminConfigured()) return false;
+  return (await verifyBearerToken(req)) !== null;
+}
+
 /** Refuses everyone without a grant while the launch lock is on. */
 function launchLockCheck(who: Identity, res: Response): boolean {
   if (!loadAdminConfig().launchLocked) return true;
@@ -187,13 +211,31 @@ export async function requireFirebaseAuth(req: Request, res: Response, next: Nex
   req.uid = who.uid;
   req.email = who.email;
   req.emailVerified = who.emailVerified;
+  noteActive(who.uid);
   next();
 }
 
-/** Where an account stands: the owner, paid or granted PRO, or free. */
-export function tierOf(doc: UserQuotaDoc, level: string): Tier {
+/** The subscription side of an account, for server/billing.ts. */
+export function billingOf(doc: UserQuotaDoc): BillingState {
+  const end = doc.currentPeriodEnd && typeof (doc.currentPeriodEnd as any).toMillis === "function"
+    ? (doc.currentPeriodEnd as any).toMillis() as number
+    : null;
+  return { subscriptionStatus: doc.subscriptionStatus, currentPeriodEnd: end, lastPaymentAt: doc.lastPaymentAt ?? null, pastDueAt: doc.pastDueAt ?? null };
+}
+
+/** When a subscription renews, or when a cancelled or unpaid one's PRO ends. */
+export function subscriptionStanding(doc: UserQuotaDoc, now = Date.now()) {
+  return standing(billingOf(doc), now);
+}
+
+/**
+ * Where an account stands: the owner, paid or granted PRO, or free. Paid PRO
+ * includes a cancelled subscription until its paid period ends, and a failed
+ * renewal until its grace period ends (server/billing.ts).
+ */
+export function tierOf(doc: UserQuotaDoc, level: string, now = Date.now()): Tier {
   if (level === "unmetered") return "unmetered";
-  if (doc.subscriptionStatus === "active" || level === "pro") return "pro";
+  if (hasPaidPro(billingOf(doc), now) || level === "pro") return "pro";
   return "free";
 }
 
@@ -263,7 +305,7 @@ export function allowanceFor(doc: UserQuotaDoc, tier: Tier, now = Date.now()): A
     dayUsed = doc.tokenDay === utcDay(now) ? doc.dayTokens : 0;
     dayCap = FREE_DAILY_TOKENS;
     if (dayUsed >= dayCap) blockers.push({ reason: "day", at: nextUtcMidnight(now) });
-  } else if (doc.subscriptionStatus === "active") {
+  } else if (hasPaidPro(billingOf(doc), now)) {
     cycleUsed = doc.cycleTokensUsed;
     cycleCap = PAID_TOKEN_CAP;
     if (cycleUsed >= cycleCap) {
@@ -375,6 +417,7 @@ export async function requireAuthAndQuota(req: Request, res: Response, next: Nex
   }
 
   const level = accessLevelFor(who.email, who.emailVerified);
+  noteActive(uid);
 
   // The owner is never metered. The unmetered tier flows through to
   // incrementTokenUsage via req.quota, which short-circuits on it, so no call
@@ -432,7 +475,7 @@ export function tokenUsagePatch(doc: UserQuotaDoc, quota: Pick<QuotaContext, "ti
     patch.tokenDay = today;
     patch.dayTokens = (doc.tokenDay === today ? doc.dayTokens : 0) + tokens;
     patch.lifetimeFreeTokensUsed = doc.lifetimeFreeTokensUsed + tokens;
-  } else if (quota.subscriptionStatus === "active") {
+  } else if (quota.subscriptionStatus === "active" || hasPaidPro(billingOf(doc), now)) {
     patch.cycleTokensUsed = doc.cycleTokensUsed + tokens;
   }
   return patch;

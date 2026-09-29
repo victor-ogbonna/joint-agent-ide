@@ -19,7 +19,7 @@ import {
   setLibrariesRoot, saveImported, listLibraries, removeLibrary, prepareLibraries, planLibraries, mergeLibDeps,
   unpackZipLibrary, missingLibraryHint, libraryNoteFor, registerLibraryRoutes, MAX_LIBRARIES, NO_LIBRARIES,
 } from "../server/libraries.ts";
-import { detectLibDeps, isBuiltinHeader, knownLibraryHeader } from "../server/libraryDeps.ts";
+import { detectLibDeps, isBuiltinHeader, knownLibraryHeader, isSafeLibDep, knownLibDeps } from "../server/libraryDeps.ts";
 import { buildEnv } from "../server/buildEnv.ts";
 
 let bad = 0;
@@ -369,7 +369,7 @@ console.log("Which libraries a build uses");
 
   const code = "#include <Arduino.h>\n#include <DHT.h>\n#include <ArduinoJson.h>\n#include <SomethingNew.h>\n";
   const deps = mergeLibDeps(plan.libDeps, detectLibDeps(code + plan.extraIncludes, plan.skipHeaders));
-  check(JSON.stringify(deps) === JSON.stringify(["bblanchon/ArduinoJson@7.0.0", "SomethingNew", "adafruit/Adafruit Unified Sensor@^1.1.14"]), "the build's library list", JSON.stringify(deps));
+  check(JSON.stringify(deps) === JSON.stringify(["bblanchon/ArduinoJson@7.0.0", "adafruit/Adafruit Unified Sensor@^1.1.14"]), "the build's library list: an unknown header isn't fetched by name", JSON.stringify(deps));
   const dup = mergeLibDeps(["adafruit/Adafruit Unified Sensor@1.1.4"], ["adafruit/DHT sensor library@^1.4.6", "adafruit/Adafruit Unified Sensor@^1.1.14"]);
   check(JSON.stringify(dup) === JSON.stringify(["adafruit/Adafruit Unified Sensor@1.1.4", "adafruit/DHT sensor library@^1.4.6"]), "a pinned version replaces the automatic one", JSON.stringify(dup));
 
@@ -385,6 +385,22 @@ console.log("Which libraries a build uses");
     check(JSON.stringify(mergeLibDeps(NO_LIBRARIES.libDeps, detectLibDeps(s + NO_LIBRARIES.extraIncludes, NO_LIBRARIES.skipHeaders))) === before, `unchanged without user libraries: ${s.split("\n")[0].slice(0, 40)}`);
   }
   check(isBuiltinHeader("Wire") && isBuiltinHeader("WiFi") && !isBuiltinHeader("DHT") && knownLibraryHeader("DHT") && !knownLibraryHeader("Wire"), "built-in and well-known headers");
+}
+
+console.log("Nothing from the code is written into the build settings");
+{
+  const lines = (code) => detectLibDeps(code);
+  const inject = "#include <Arduino.h>\n/* #include <Harmless\nbuild_flags = !echo -DX> */\n#include <DHT.h>\n";
+  check(JSON.stringify(lines(inject)) === JSON.stringify(["adafruit/DHT sensor library@^1.4.6", "adafruit/Adafruit Unified Sensor@^1.1.14"]), "an include written across lines is ignored", JSON.stringify(lines(inject)));
+  check(lines('#include "a\rb.h"\n#include <x = y.h>\n#include <!cmd.h>\n#include <${x}.h>\n#include <a;b.h>\n').length === 0, "odd characters in an include add nothing");
+  check(lines("#include <Bounce2.h>\n#include <MyThing.h>\n#include \"Custom.h\"\n").length === 0, "unknown libraries aren't fetched from the catalogue by name");
+  check(lines("#include <avr/pgmspace.h>\n#include <freertos/FreeRTOS.h>\n#include <esp_wifi.h>\n#include <util/delay.h>\n").length === 0, "the board's own headers pull nothing in");
+  check(JSON.stringify(lines("#include <Adafruit_SSD1306.h>\n#include   \"Servo.h\"\n")) === JSON.stringify(["adafruit/Adafruit SSD1306@^2.5.9", "arduino-libraries/Servo@^1.2.2"]), "well-known libraries still come in automatically");
+  check(knownLibDeps().length > 30 && knownLibDeps().every(isSafeLibDep), "every well-known library line passes the final check", knownLibDeps().filter((d) => !isSafeLibDep(d)).join(" | "));
+  check(isSafeLibDep("bblanchon/ArduinoJson@7.0.0") && isSafeLibDep("adafruit/DHT sensor library@^1.4.6") && isSafeLibDep("chris--a/Keypad@~3.1.1"), "catalogue lines pass");
+  for (const bad of ["Harmless\nbuild_flags = !echo", "x", "owner/name", "owner/name@1.0\nextra", "owner/na=me@1", "owner/name@!1", "owner/name@1 ;x", "../x@1", "owner/${X}@1", " owner/name@1"]) {
+    check(!isSafeLibDep(bad), `refused: ${JSON.stringify(bad)}`);
+  }
 }
 
 console.log("When a build is missing a library");

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass} from "lucide-react";
+import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass, Share2} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip } from "recharts";
@@ -19,6 +19,7 @@ import Terminal from "./components/Terminal";
 import AgentChat from "./components/AgentChat";
 import Web3Panel from "./components/Web3Panel";
 import ProjectsBrowser from "./components/ProjectsBrowser";
+import ShareDialog from "./components/ShareDialog";
 import NewProjectModal from "./components/NewProjectModal";
 import WelcomeModal from "./components/WelcomeModal";
 import FeedbackWidget from "./components/FeedbackWidget";
@@ -28,11 +29,11 @@ import PlansModal from "./components/PlansModal";
 import LibrariesModal from "./components/LibrariesModal";
 import OnboardingTour, { TourStep } from "./components/OnboardingTour";
 import { canInstallApp, installApp, isInstalledFullscreenApp, onInstallAvailabilityChange } from "./lib/installApp";
-import { WINDOW_HOURS, FREE_WINDOW_TOKENS, PRO_WINDOW_TOKENS, formatWait, formatWhen, percentUsed } from "./lib/plans";
+import { WINDOW_HOURS, FREE_WINDOW_TOKENS, PRO_WINDOW_TOKENS, FREE_PROJECT_LIMIT, formatWait, formatWhen, formatDay, percentUsed } from "./lib/plans";
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
 import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts, describeVisibleUsbDevices } from "./lib/webusbSerial";
-import { createProject, getProject, updateProject, renameProject, listProjects, deleteProject, ProjectSummary, trimMessagesForStorage } from "./lib/projects";
+import { createProject, getProject, updateProject, renameProject, listProjects, trashProject, purgeExpiredTrash, ProjectSummary, trimMessagesForStorage, TRASH_DAYS } from "./lib/projects";
 import { sketchBaudRate, sketchOpensSerial, sketchSerial } from "./lib/sketchBaud";
 import { usbChipName } from "./lib/usbChips";
 import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlock, primeLastKnownBlock, QuotaBlockedInfo } from "./lib/aiClient";
@@ -568,6 +569,10 @@ export default function App() {
     cycleUsed: number | null;
     cycleCap: number | null;
     subscriptionStatus: string;
+    /** When a renewing plan renews. */
+    renewsAt: number | null;
+    /** When a cancelled or unpaid plan's PRO ends. */
+    proUntil: number | null;
   } | null>(null);
   const [isCancelingSubscription, setIsCancelingSubscription] = useState(false);
 
@@ -630,6 +635,7 @@ export default function App() {
   const [currentProjectName, setCurrentProjectName] = useState<string>("");
   const [isProjectNameEditing, setIsProjectNameEditing] = useState(false);
   const [showProjectsBrowser, setShowProjectsBrowser] = useState(false);
+  const [showShareDialog, setShowShareDialog] = useState(false);
   // Recent projects shown inline in the sidebar. Kept separate from the Browse
   // modal's own fetch so the list is visible without opening anything, but it
   // reuses handleOpenProject so there is only one code path for loading.
@@ -737,6 +743,8 @@ export default function App() {
           cycleUsed: typeof status.cycleUsed === "number" ? status.cycleUsed : null,
           cycleCap: typeof status.cycleCap === "number" ? status.cycleCap : null,
           subscriptionStatus: status.subscriptionStatus,
+          renewsAt: typeof status.renewsAt === "number" ? status.renewsAt : null,
+          proUntil: typeof status.proUntil === "number" ? status.proUntil : null,
         });
         if (status.tier) setAccountTier(status.tier);
       } catch {
@@ -754,8 +762,9 @@ export default function App() {
       const res = await fetch("/api/paystack/cancel", { method: "POST", headers: { Authorization: `Bearer ${idToken}` } });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not cancel subscription.");
-      setUsageInfo((prev) => (prev ? { ...prev, subscriptionStatus: "canceled" } : prev));
-      logToTerminal("[BILLING] Subscription canceled.", "info");
+      const proUntil = typeof data.proUntil === "number" ? data.proUntil : null;
+      setUsageInfo((prev) => (prev ? { ...prev, subscriptionStatus: "canceled", renewsAt: null, proUntil } : prev));
+      logToTerminal(`[BILLING] Subscription canceled. You won't be charged again${proUntil ? `, and you keep PRO until ${formatDay(proUntil)}` : ""}.`, "info");
     } catch (err: any) {
       logToTerminal(`[BILLING] Cancel failed: ${err.message}`, "error");
     } finally {
@@ -1380,7 +1389,7 @@ export default function App() {
   };
 
   // Compile microcontroller code simulation
-  const handleCompile = async (overrideCode?: string): Promise<{ success: boolean, data?: any, errorText?: string, compileSucceeded?: boolean, limited?: { reason: "window" | "day"; resetAt: number | null }, missingLibrary?: string }> => {
+  const handleCompile = async (overrideCode?: string): Promise<{ success: boolean, data?: any, errorText?: string, compileSucceeded?: boolean, limited?: { reason: "window" | "day"; resetAt: number | null }, missingLibrary?: string, busy?: boolean }> => {
     setIsCompiling(true);
     const codeToCompile = overrideCode || code;
     logToTerminal(`[COMPILER] Sending code to cloud build server for ${mcu.toUpperCase()}...`, "info");
@@ -1419,9 +1428,11 @@ export default function App() {
         const limited = data.code === "FREE_COMPILE_LIMIT"
           ? { reason: data.reason === "day" ? "day" as const : "window" as const, resetAt: typeof data.resetAt === "number" ? data.resetAt : null }
           : undefined;
+        // Too many builds waiting on the server: nothing to fix in the code.
+        const busy = data.code === "SERVER_BUSY";
         // Only a real error in the code is worth handing to Ask AI.
-        if (!limited && data.compileSucceeded !== true) lastCompileErrorRef.current = errorText;
-        return { success: false, errorText, compileSucceeded: data.compileSucceeded === true, limited, missingLibrary };
+        if (!limited && !busy && data.compileSucceeded !== true) lastCompileErrorRef.current = errorText;
+        return { success: false, errorText, compileSucceeded: data.compileSucceeded === true, limited, missingLibrary, busy };
       }
     } catch (err: any) {
       logToTerminal(`[COMPILER] Build failed: ${err.message}`, "error");
@@ -2334,6 +2345,14 @@ export default function App() {
       return;
     }
 
+    // The build server was too busy to take it: the code is fine, so there
+    // is nothing for auto-debug to fix.
+    if (!compileResult.success && compileResult.busy) {
+      logToTerminal("[SMART FLASH] Stopped: the build server is very busy right now. Your code wasn't changed. Try Smart Flash again in a minute.", "error");
+      setIsSmartFlashing(false);
+      return;
+    }
+
     // Auto-debug is a PRO feature. The Free plan stops at the compile error;
     // Ask AI on the code and the agent can still be asked to fix it.
     if (!compileResult.success && tierRef.current === "free") {
@@ -2361,6 +2380,11 @@ export default function App() {
       currentCode = debugResult.code;
       const missingBefore = compileResult.missingLibrary;
       compileResult = await handleCompile(currentCode);
+      if (!compileResult.success && compileResult.busy) {
+        logToTerminal("[SMART FLASH] Stopped: the build server is very busy right now. Try Smart Flash again in a minute.", "error");
+        setIsSmartFlashing(false);
+        return;
+      }
       // Still missing the same library: it has to be added, and more AI
       // rounds would only spend the user's allowance rewriting nothing.
       if (!compileResult.success && compileResult.missingLibrary && compileResult.missingLibrary === missingBefore) {
@@ -2613,8 +2637,38 @@ export default function App() {
 
   const DEFAULT_DESCRIPTION = "A standard flashing LED circuit safely wired through a 220 Ohm current-limiting resistor. Ideal for validating MCU state loops.";
 
+  // Free accounts hold FREE_PROJECT_LIMIT projects at once. Nothing is
+  // deleted to fit: past it, a new project waits for a free slot. Only a
+  // known Free account is limited, so a slow or failed plan check never
+  // blocks a PRO user.
+  const [projectLimitOpen, setProjectLimitOpen] = useState(false);
+  const atProjectLimit = async (fresh = false): Promise<boolean> => {
+    if (!user || accountTier !== "free") return false;
+    if (!fresh && recentProjects.length < FREE_PROJECT_LIMIT) return false;
+    try {
+      const list = await listProjects(user.uid);
+      setRecentProjects(list);
+      return list.length >= FREE_PROJECT_LIMIT;
+    } catch {
+      return false;
+    }
+  };
+  const openNewProject = async () => {
+    if (await atProjectLimit()) { setProjectLimitOpen(true); return; }
+    setShowNewProjectModal(true);
+  };
+
   const handleCreateProject = async (name: string, board: BoardInfo, codeOverride?: string) => {
     if (!user) return;
+    // Counted again at the moment of creating: another tab or device may
+    // have added one since the form opened.
+    if (await atProjectLimit(true)) {
+      setShowNewProjectModal(false);
+      setImportedFileCode(null);
+      setImportedFileName("");
+      setProjectLimitOpen(true);
+      return;
+    }
     handleStopGeneration(); // cancel any in-flight agent request from the project being left
     const initialCode = codeOverride || INITIAL_CODE;
     try {
@@ -2660,7 +2714,15 @@ export default function App() {
     reader.onload = () => {
       setImportedFileCode(String(reader.result || ""));
       setImportedFileName(file.name.replace(/\.ino$/i, ""));
-      setShowNewProjectModal(true);
+      void (async () => {
+        if (await atProjectLimit()) {
+          setImportedFileCode(null);
+          setImportedFileName("");
+          setProjectLimitOpen(true);
+          return;
+        }
+        setShowNewProjectModal(true);
+      })();
     };
     reader.onerror = () => {
       logToTerminal("[PROJECT] Could not read the selected .ino file.", "error");
@@ -2670,31 +2732,42 @@ export default function App() {
 
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
 
-  /** Delete from the sidebar. Deleting the OPEN project has to clear the
-   *  workspace too, or the editor keeps showing a project that no longer
-   *  exists and the next autosave silently recreates it. */
+  /** A project left the workspace (moved to Trash). If it's the OPEN one, the
+   *  workspace has to be cleared too, or the editor keeps showing it and its
+   *  next autosave writes to a project in Trash. */
+  const clearIfOpen = (projectId: string) => {
+    if (projectId !== currentProjectId) return;
+    skipNextAutosaveRef.current = true;
+    setCurrentProjectId(null);
+    setCurrentProjectName("");
+    setChatMessages([]);
+    setContextUsage(null);
+    setTerminalLines([]);
+  };
+
+  /** Delete from the sidebar: the project moves to Trash for TRASH_DAYS days. */
   const handleDeleteProject = async (projectId: string, name: string) => {
     if (!user) return;
-    if (!window.confirm(`Delete "${name}"? This can't be undone.`)) return;
+    if (!window.confirm(`Move "${name}" to Trash? You can restore it for ${TRASH_DAYS} days from Browse projects.`)) return;
     setDeletingProjectId(projectId);
     try {
-      await deleteProject(user.uid, projectId);
-      if (projectId === currentProjectId) {
-        skipNextAutosaveRef.current = true;
-        setCurrentProjectId(null);
-        setCurrentProjectName("");
-        setChatMessages([]);
-        setContextUsage(null);
-        setTerminalLines([]);
-      }
-      logToTerminal(`[PROJECT] Deleted "${name}".`, "info");
+      await trashProject(user.uid, projectId);
+      clearIfOpen(projectId);
+      logToTerminal(`[PROJECT] Moved "${name}" to Trash. Restore it from Browse projects → Trash within ${TRASH_DAYS} days.`, "info");
       await refreshRecentProjects();
     } catch (err: any) {
-      logToTerminal(`[PROJECT] Could not delete "${name}": ${err.message}`, "error");
+      logToTerminal(`[PROJECT] Could not move "${name}" to Trash: ${err.message}`, "error");
     } finally {
       setDeletingProjectId(null);
     }
   };
+
+  // Projects in Trash longer than TRASH_DAYS days are deleted for good, once
+  // per sign-in. Best effort: anything left is tried again next time.
+  useEffect(() => {
+    if (!user) return;
+    purgeExpiredTrash(user.uid).catch(() => { /* retried next sign-in */ });
+  }, [user]);
 
   const refreshRecentProjects = React.useCallback(async () => {
     if (!user) { setRecentProjects([]); return; }
@@ -2995,6 +3068,17 @@ export default function App() {
             </div>
           )}
 
+          {currentProjectId && (
+            <button
+              onClick={() => setShowShareDialog(true)}
+              className="toolbar-btn p-2.5 sm:p-1.5 rounded-lg text-[var(--text-muted)] shrink-0"
+              title="Share a read-only link to this project"
+              aria-label="Share project"
+            >
+              <Share2 size={14} />
+            </button>
+          )}
+
           <button
             onClick={() => setTheme(theme === "light" ? "dark" : "light")}
             className="toolbar-btn p-2.5 sm:p-1.5 rounded-lg text-[var(--text-muted)] shrink-0"
@@ -3173,11 +3257,16 @@ export default function App() {
               </div>
               <div className="py-1.5 space-y-0.5">
                 <button
-                  onClick={() => setShowNewProjectModal(true)}
+                  onClick={() => void openNewProject()}
                   className="w-[calc(100%-0.75rem)] text-left mx-1.5 px-2 py-1.5 flex items-center gap-2 text-[11px] text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] cursor-pointer transition rounded-md"
                 >
                   <Plus size={13} className="text-[var(--accent-primary)]" />
                   <span>New project</span>
+                  {accountTier === "free" && recentFetched && (
+                    <span className="ml-auto text-[10px] text-[var(--text-subtle)] tabular-nums" title={`The Free plan holds ${FREE_PROJECT_LIMIT} projects`}>
+                      {Math.min(recentProjects.length, FREE_PROJECT_LIMIT)}/{FREE_PROJECT_LIMIT}
+                    </span>
+                  )}
                 </button>
                 <button
                   onClick={() => setShowProjectsBrowser(true)}
@@ -3314,7 +3403,7 @@ export default function App() {
                       <button
                         onClick={(e) => { e.stopPropagation(); handleDeleteProject(p.id, p.name); }}
                         disabled={deletingProjectId === p.id}
-                        title={`Delete ${p.name}`}
+                        title={`Move ${p.name} to Trash`}
                         className="absolute right-2.5 p-1 rounded text-[var(--text-subtle)] hover:text-red-400 hover:bg-red-500/10 transition opacity-100 sm:opacity-0 sm:group-hover:opacity-100 disabled:opacity-50"
                       >
                         {deletingProjectId === p.id
@@ -3665,14 +3754,50 @@ export default function App() {
                   </>
                 )}
                 {usageInfo.subscriptionStatus === "active" ? (
-                  <button
-                    onClick={handleCancelSubscription}
-                    disabled={isCancelingSubscription}
-                    className="w-full flex items-center gap-1.5 mt-2 text-[10px] text-[var(--text-muted)] hover:text-red-400 transition disabled:opacity-50"
-                  >
-                    <X size={11} />
-                    {isCancelingSubscription ? "Canceling…" : "Cancel Subscription"}
-                  </button>
+                  <>
+                    {usageInfo.renewsAt && (
+                      <p className="mt-2 text-[10px] text-[var(--text-subtle)]">Renews {formatDay(usageInfo.renewsAt)}</p>
+                    )}
+                    <button
+                      onClick={handleCancelSubscription}
+                      disabled={isCancelingSubscription}
+                      className="w-full flex items-center gap-1.5 mt-2 text-[10px] text-[var(--text-muted)] hover:text-red-400 transition disabled:opacity-50"
+                    >
+                      <X size={11} />
+                      {isCancelingSubscription ? "Canceling…" : "Cancel Subscription"}
+                    </button>
+                  </>
+                ) : usageInfo.subscriptionStatus === "past_due" && !isPro && accountTier !== null ? (
+                  // A renewal failed and PRO has ended: say why, and offer it again.
+                  <>
+                    <p className="mt-2 text-[10px] leading-snug text-red-400">
+                      Your last PRO payment didn't go through, so you're on the Free plan. Your subscription was stopped, so you won't be charged again.
+                    </p>
+                    <button
+                      onClick={() => { setIsMenuOpen(false); setIsPlansOpen(true); }}
+                      className="w-full flex items-center gap-1.5 mt-2 text-[10px] font-medium gradient-text hover:opacity-80 transition"
+                    >
+                      <Rocket size={12} className="text-orange-500 rocket-blaze" />
+                      Get PRO again — $7/mo
+                    </button>
+                  </>
+                ) : usageInfo.subscriptionStatus === "past_due" && isPro ? (
+                  // A renewal failed within the period already paid for.
+                  <>
+                    <p className="mt-2 text-[10px] leading-snug text-red-400">
+                      Your PRO payment didn't go through, so your subscription was stopped. PRO continues{usageInfo.proUntil ? ` until ${formatDay(usageInfo.proUntil)}` : " for a few days"}.
+                    </p>
+                    <button
+                      onClick={() => { setIsMenuOpen(false); void handleSubscribe(); }}
+                      disabled={isSubscribing}
+                      className="w-full flex items-center gap-1.5 mt-2 text-[10px] font-medium gradient-text hover:opacity-80 transition disabled:opacity-50"
+                    >
+                      <Rocket size={12} className="text-orange-500" />
+                      Pay now to keep PRO
+                    </button>
+                  </>
+                ) : usageInfo.subscriptionStatus === "canceled" && isPro && usageInfo.proUntil ? (
+                  <p className="mt-2 text-[10px] text-[var(--text-subtle)]">PRO until {formatDay(usageInfo.proUntil)} · won't renew</p>
                 ) : !isPro && accountTier !== null ? (
                   // PRO accounts, paid or granted, are never offered an upgrade.
                   <button
@@ -3734,6 +3859,51 @@ export default function App() {
       )}
 
       {isLibrariesOpen && <LibrariesModal onClose={() => setIsLibrariesOpen(false)} />}
+
+      {projectLimitOpen && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-black/70 backdrop-blur-sm" onClick={() => setProjectLimitOpen(false)}>
+          <div className="flex min-h-full items-end sm:items-center justify-center sm:p-4">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="project-limit-title"
+              onClick={(e) => e.stopPropagation()}
+              className="w-full sm:max-w-sm bg-[var(--bg-root)] border border-[var(--border-main)] sm:rounded-2xl rounded-t-2xl shadow-2xl px-5 pt-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] animate-slide-up"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <h2 id="project-limit-title" className="font-display font-bold text-base text-[var(--text-main)] leading-snug">
+                  All {FREE_PROJECT_LIMIT} free project slots are in use
+                </h2>
+                <button
+                  onClick={() => setProjectLimitOpen(false)}
+                  aria-label="Close"
+                  className="w-9 h-9 -mr-2 -mt-1 flex items-center justify-center rounded-lg text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition shrink-0"
+                >
+                  <X size={17} />
+                </button>
+              </div>
+              <p className="mt-2 text-[13px] leading-relaxed text-[var(--text-muted)]">
+                The Free plan holds {FREE_PROJECT_LIMIT} projects at a time. Delete one you no longer need to make room, or get PRO for unlimited projects.
+              </p>
+              <div className="mt-4 space-y-2">
+                <button
+                  onClick={() => { setProjectLimitOpen(false); setIsPlansOpen(true); }}
+                  className="w-full flex items-center justify-center gap-2 rounded-lg py-2.5 text-[13px] font-bold text-white shadow-md"
+                  style={{ background: "var(--gradient-hero)" }}
+                >
+                  <Rocket size={14} /> Get PRO — unlimited projects
+                </button>
+                <button
+                  onClick={() => { setProjectLimitOpen(false); setShowProjectsBrowser(true); }}
+                  className="w-full flex items-center justify-center gap-2 rounded-lg border border-[var(--border-main)] py-2.5 text-[13px] font-semibold text-[var(--text-main)] hover:bg-[var(--bg-hover)]"
+                >
+                  <FolderOpen size={14} /> Manage projects
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {isPlansOpen && !isPro && (
         <PlansModal
@@ -3849,12 +4019,27 @@ export default function App() {
         </div>
       )}
 
+      {showShareDialog && currentProjectId && (
+        <ShareDialog
+          projectId={currentProjectId}
+          projectName={currentProjectName}
+          onClose={() => setShowShareDialog(false)}
+        />
+      )}
+
       {showProjectsBrowser && (
         <ProjectsBrowser
           currentProjectId={currentProjectId}
           onClose={() => setShowProjectsBrowser(false)}
           onOpenProject={handleOpenProject}
-          onNewProject={() => { setShowProjectsBrowser(false); setShowNewProjectModal(true); }}
+          onNewProject={() => { setShowProjectsBrowser(false); void openNewProject(); }}
+          projectLimit={accountTier === "free" ? FREE_PROJECT_LIMIT : undefined}
+          onProjectTrashed={(projectId, name) => {
+            clearIfOpen(projectId);
+            logToTerminal(`[PROJECT] Moved "${name}" to Trash. Restore it from Browse projects → Trash within ${TRASH_DAYS} days.`, "info");
+            void refreshRecentProjects();
+          }}
+          onProjectsChanged={() => { void refreshRecentProjects(); }}
         />
       )}
 
@@ -3895,7 +4080,7 @@ export default function App() {
           displayName={user.displayName?.split(" ")[0] || ""}
           projects={recentProjects}
           loading={loadingRecent}
-          onNewProject={() => { setShowWelcome(false); setShowNewProjectModal(true); }}
+          onNewProject={() => { setShowWelcome(false); void openNewProject(); }}
           onOpenProject={(id) => { setShowWelcome(false); handleOpenProject(id); }}
           onBrowseAll={() => { setShowWelcome(false); setShowProjectsBrowser(true); }}
           onClose={() => setShowWelcome(false)}

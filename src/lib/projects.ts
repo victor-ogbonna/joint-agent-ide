@@ -1,5 +1,5 @@
 import {
-  collection, doc, addDoc, getDoc, getDocs, updateDoc, deleteDoc,
+  collection, doc, addDoc, getDoc, getDocs, updateDoc, deleteDoc, deleteField,
   query, orderBy, serverTimestamp, Timestamp
 } from "firebase/firestore";
 import { db } from "./firebase";
@@ -42,7 +42,13 @@ export interface ProjectSummary {
   boardId: string;
   updatedAt: Timestamp | null;
   createdAt: Timestamp | null;
+  /** When it was moved to Trash; null while it's a normal project. */
+  deletedAt: Timestamp | null;
 }
+
+/** How long a project stays in Trash before it is deleted for good. */
+export const TRASH_DAYS = 30;
+const TRASH_MS = TRASH_DAYS * 24 * 60 * 60 * 1000;
 
 const projectsCol = (uid: string) => collection(db, "users", uid, "projects");
 const projectDoc = (uid: string, projectId: string) => doc(db, "users", uid, "projects", projectId);
@@ -57,7 +63,7 @@ export async function createProject(uid: string, name: string, defaults: Pick<Pr
   return ref.id;
 }
 
-export async function listProjects(uid: string): Promise<ProjectSummary[]> {
+async function listAll(uid: string): Promise<ProjectSummary[]> {
   const q = query(projectsCol(uid), orderBy("updatedAt", "desc"));
   const snap = await getDocs(q);
   return snap.docs.map(d => {
@@ -70,8 +76,33 @@ export async function listProjects(uid: string): Promise<ProjectSummary[]> {
       boardId: data.boardId || DEFAULT_BOARD_ID[mcu],
       updatedAt: data.updatedAt ?? null,
       createdAt: data.createdAt ?? null,
+      deletedAt: data.deletedAt ?? null,
     };
   });
+}
+
+/** The account's projects, not counting the ones in Trash. */
+export async function listProjects(uid: string): Promise<ProjectSummary[]> {
+  return (await listAll(uid)).filter((p) => !p.deletedAt);
+}
+
+/** Projects in Trash, most recently deleted first. */
+export async function listTrashedProjects(uid: string): Promise<ProjectSummary[]> {
+  return (await listAll(uid))
+    .filter((p) => p.deletedAt)
+    .sort((a, b) => millis(b.deletedAt) - millis(a.deletedAt));
+}
+
+function millis(ts: any): number {
+  if (!ts) return 0;
+  if (typeof ts.toMillis === "function") return ts.toMillis();
+  const n = new Date(ts).getTime();
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** When a project in Trash will be deleted for good. */
+export function trashExpiresAt(deletedAt: any): number {
+  return millis(deletedAt) + TRASH_MS;
 }
 
 export async function getProject(uid: string, projectId: string): Promise<ProjectData | null> {
@@ -90,8 +121,29 @@ export async function renameProject(uid: string, projectId: string, name: string
   await updateDoc(projectDoc(uid, projectId), { name: name.trim() || "Untitled Project", updatedAt: serverTimestamp() });
 }
 
+/** Deletes a project for good. The app moves projects to Trash first. */
 export async function deleteProject(uid: string, projectId: string): Promise<void> {
   await deleteDoc(projectDoc(uid, projectId));
+}
+
+/** Moves a project to Trash, where it stays TRASH_DAYS days. */
+export async function trashProject(uid: string, projectId: string): Promise<void> {
+  await updateDoc(projectDoc(uid, projectId), { deletedAt: serverTimestamp() });
+}
+
+/** Brings a project back from Trash. */
+export async function restoreProject(uid: string, projectId: string): Promise<void> {
+  await updateDoc(projectDoc(uid, projectId), { deletedAt: deleteField(), updatedAt: serverTimestamp() });
+}
+
+/**
+ * Deletes for good the projects that have been in Trash longer than
+ * TRASH_DAYS days. Run when the app opens; returns how many went.
+ */
+export async function purgeExpiredTrash(uid: string, now = Date.now()): Promise<number> {
+  const expired = (await listAll(uid)).filter((p) => p.deletedAt && trashExpiresAt(p.deletedAt) <= now);
+  for (const p of expired) await deleteDoc(projectDoc(uid, p.id));
+  return expired.length;
 }
 
 /**
