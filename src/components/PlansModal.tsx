@@ -2,7 +2,7 @@ import React from "react";
 import { X, Check, Minus, Rocket, Loader2 } from "lucide-react";
 import {
   WINDOW_HOURS, FREE_WINDOW_TOKENS, PRO_WINDOW_TOKENS, FREE_MAX_REPLY_TOKENS, PRO_MAX_REPLY_TOKENS,
-  FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES, PRO_PRICE,
+  FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES, FREE_PROJECT_LIMIT, PRO_PRICE,
 } from "../lib/plans";
 
 /**
@@ -19,6 +19,7 @@ const ROWS: Array<{ feature: string; free: boolean | string; pro: boolean | stri
   { feature: `AI usage every ${WINDOW_HOURS} hours`, free: "Standard", pro: `${PRO_WINDOW_TOKENS / FREE_WINDOW_TOKENS}× more` },
   { feature: "Replies", free: "Short", pro: PRO_MAX_REPLY_TOKENS > FREE_MAX_REPLY_TOKENS ? "Full-size" : "Short" },
   { feature: `Compiles every ${WINDOW_HOURS} hours`, free: String(FREE_WINDOW_COMPILES), pro: "Unlimited" },
+  { feature: "Saved projects", free: String(FREE_PROJECT_LIMIT), pro: "Unlimited" },
   { feature: "Smart Flash auto-debug", free: false, pro: true },
   { feature: "Plan Mode", free: false, pro: true },
 ];
@@ -63,7 +64,7 @@ export default function PlansModal({ onClose, onUpgrade, upgrading }: {
                 Build more with the full agent
               </h2>
               <p className="text-xs text-[var(--text-muted)] mt-1">
-                10× more AI every {WINDOW_HOURS} hours, full-size replies, auto-debug, Plan Mode and unlimited compiles.
+                10× more AI every {WINDOW_HOURS} hours, full-size replies, auto-debug, Plan Mode, and unlimited compiles and projects.
               </p>
             </div>
             <button

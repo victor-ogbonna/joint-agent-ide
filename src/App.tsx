@@ -28,7 +28,7 @@ import PlansModal from "./components/PlansModal";
 import LibrariesModal from "./components/LibrariesModal";
 import OnboardingTour, { TourStep } from "./components/OnboardingTour";
 import { canInstallApp, installApp, isInstalledFullscreenApp, onInstallAvailabilityChange } from "./lib/installApp";
-import { WINDOW_HOURS, FREE_WINDOW_TOKENS, PRO_WINDOW_TOKENS, formatWait, formatWhen, percentUsed } from "./lib/plans";
+import { WINDOW_HOURS, FREE_WINDOW_TOKENS, PRO_WINDOW_TOKENS, FREE_PROJECT_LIMIT, formatWait, formatWhen, formatDay, percentUsed } from "./lib/plans";
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
 import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts, describeVisibleUsbDevices } from "./lib/webusbSerial";
@@ -568,6 +568,10 @@ export default function App() {
     cycleUsed: number | null;
     cycleCap: number | null;
     subscriptionStatus: string;
+    /** When a renewing plan renews. */
+    renewsAt: number | null;
+    /** When a cancelled or unpaid plan's PRO ends. */
+    proUntil: number | null;
   } | null>(null);
   const [isCancelingSubscription, setIsCancelingSubscription] = useState(false);
 
@@ -737,6 +741,8 @@ export default function App() {
           cycleUsed: typeof status.cycleUsed === "number" ? status.cycleUsed : null,
           cycleCap: typeof status.cycleCap === "number" ? status.cycleCap : null,
           subscriptionStatus: status.subscriptionStatus,
+          renewsAt: typeof status.renewsAt === "number" ? status.renewsAt : null,
+          proUntil: typeof status.proUntil === "number" ? status.proUntil : null,
         });
         if (status.tier) setAccountTier(status.tier);
       } catch {
@@ -754,8 +760,9 @@ export default function App() {
       const res = await fetch("/api/paystack/cancel", { method: "POST", headers: { Authorization: `Bearer ${idToken}` } });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not cancel subscription.");
-      setUsageInfo((prev) => (prev ? { ...prev, subscriptionStatus: "canceled" } : prev));
-      logToTerminal("[BILLING] Subscription canceled.", "info");
+      const proUntil = typeof data.proUntil === "number" ? data.proUntil : null;
+      setUsageInfo((prev) => (prev ? { ...prev, subscriptionStatus: "canceled", renewsAt: null, proUntil } : prev));
+      logToTerminal(`[BILLING] Subscription canceled. You won't be charged again${proUntil ? `, and you keep PRO until ${formatDay(proUntil)}` : ""}.`, "info");
     } catch (err: any) {
       logToTerminal(`[BILLING] Cancel failed: ${err.message}`, "error");
     } finally {
@@ -2613,8 +2620,38 @@ export default function App() {
 
   const DEFAULT_DESCRIPTION = "A standard flashing LED circuit safely wired through a 220 Ohm current-limiting resistor. Ideal for validating MCU state loops.";
 
+  // Free accounts hold FREE_PROJECT_LIMIT projects at once. Nothing is
+  // deleted to fit: past it, a new project waits for a free slot. Only a
+  // known Free account is limited, so a slow or failed plan check never
+  // blocks a PRO user.
+  const [projectLimitOpen, setProjectLimitOpen] = useState(false);
+  const atProjectLimit = async (fresh = false): Promise<boolean> => {
+    if (!user || accountTier !== "free") return false;
+    if (!fresh && recentProjects.length < FREE_PROJECT_LIMIT) return false;
+    try {
+      const list = await listProjects(user.uid);
+      setRecentProjects(list);
+      return list.length >= FREE_PROJECT_LIMIT;
+    } catch {
+      return false;
+    }
+  };
+  const openNewProject = async () => {
+    if (await atProjectLimit()) { setProjectLimitOpen(true); return; }
+    setShowNewProjectModal(true);
+  };
+
   const handleCreateProject = async (name: string, board: BoardInfo, codeOverride?: string) => {
     if (!user) return;
+    // Counted again at the moment of creating: another tab or device may
+    // have added one since the form opened.
+    if (await atProjectLimit(true)) {
+      setShowNewProjectModal(false);
+      setImportedFileCode(null);
+      setImportedFileName("");
+      setProjectLimitOpen(true);
+      return;
+    }
     handleStopGeneration(); // cancel any in-flight agent request from the project being left
     const initialCode = codeOverride || INITIAL_CODE;
     try {
@@ -2660,7 +2697,15 @@ export default function App() {
     reader.onload = () => {
       setImportedFileCode(String(reader.result || ""));
       setImportedFileName(file.name.replace(/\.ino$/i, ""));
-      setShowNewProjectModal(true);
+      void (async () => {
+        if (await atProjectLimit()) {
+          setImportedFileCode(null);
+          setImportedFileName("");
+          setProjectLimitOpen(true);
+          return;
+        }
+        setShowNewProjectModal(true);
+      })();
     };
     reader.onerror = () => {
       logToTerminal("[PROJECT] Could not read the selected .ino file.", "error");
@@ -3173,11 +3218,16 @@ export default function App() {
               </div>
               <div className="py-1.5 space-y-0.5">
                 <button
-                  onClick={() => setShowNewProjectModal(true)}
+                  onClick={() => void openNewProject()}
                   className="w-[calc(100%-0.75rem)] text-left mx-1.5 px-2 py-1.5 flex items-center gap-2 text-[11px] text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] cursor-pointer transition rounded-md"
                 >
                   <Plus size={13} className="text-[var(--accent-primary)]" />
                   <span>New project</span>
+                  {accountTier === "free" && recentFetched && (
+                    <span className="ml-auto text-[10px] text-[var(--text-subtle)] tabular-nums" title={`The Free plan holds ${FREE_PROJECT_LIMIT} projects`}>
+                      {Math.min(recentProjects.length, FREE_PROJECT_LIMIT)}/{FREE_PROJECT_LIMIT}
+                    </span>
+                  )}
                 </button>
                 <button
                   onClick={() => setShowProjectsBrowser(true)}
@@ -3665,14 +3715,36 @@ export default function App() {
                   </>
                 )}
                 {usageInfo.subscriptionStatus === "active" ? (
-                  <button
-                    onClick={handleCancelSubscription}
-                    disabled={isCancelingSubscription}
-                    className="w-full flex items-center gap-1.5 mt-2 text-[10px] text-[var(--text-muted)] hover:text-red-400 transition disabled:opacity-50"
-                  >
-                    <X size={11} />
-                    {isCancelingSubscription ? "Canceling…" : "Cancel Subscription"}
-                  </button>
+                  <>
+                    {usageInfo.renewsAt && (
+                      <p className="mt-2 text-[10px] text-[var(--text-subtle)]">Renews {formatDay(usageInfo.renewsAt)}</p>
+                    )}
+                    <button
+                      onClick={handleCancelSubscription}
+                      disabled={isCancelingSubscription}
+                      className="w-full flex items-center gap-1.5 mt-2 text-[10px] text-[var(--text-muted)] hover:text-red-400 transition disabled:opacity-50"
+                    >
+                      <X size={11} />
+                      {isCancelingSubscription ? "Canceling…" : "Cancel Subscription"}
+                    </button>
+                  </>
+                ) : usageInfo.subscriptionStatus === "past_due" && isPro ? (
+                  // A renewal failed: PRO carries on for the grace period.
+                  <>
+                    <p className="mt-2 text-[10px] leading-snug text-red-400">
+                      Your PRO payment didn't go through. PRO continues{usageInfo.proUntil ? ` until ${formatDay(usageInfo.proUntil)}` : " for a few days"}.
+                    </p>
+                    <button
+                      onClick={() => { setIsMenuOpen(false); void handleSubscribe(); }}
+                      disabled={isSubscribing}
+                      className="w-full flex items-center gap-1.5 mt-2 text-[10px] font-medium gradient-text hover:opacity-80 transition disabled:opacity-50"
+                    >
+                      <Rocket size={12} className="text-orange-500" />
+                      Pay now to keep PRO
+                    </button>
+                  </>
+                ) : usageInfo.subscriptionStatus === "canceled" && isPro && usageInfo.proUntil ? (
+                  <p className="mt-2 text-[10px] text-[var(--text-subtle)]">PRO until {formatDay(usageInfo.proUntil)} · won't renew</p>
                 ) : !isPro && accountTier !== null ? (
                   // PRO accounts, paid or granted, are never offered an upgrade.
                   <button
@@ -3734,6 +3806,51 @@ export default function App() {
       )}
 
       {isLibrariesOpen && <LibrariesModal onClose={() => setIsLibrariesOpen(false)} />}
+
+      {projectLimitOpen && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-black/70 backdrop-blur-sm" onClick={() => setProjectLimitOpen(false)}>
+          <div className="flex min-h-full items-end sm:items-center justify-center sm:p-4">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="project-limit-title"
+              onClick={(e) => e.stopPropagation()}
+              className="w-full sm:max-w-sm bg-[var(--bg-root)] border border-[var(--border-main)] sm:rounded-2xl rounded-t-2xl shadow-2xl px-5 pt-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] animate-slide-up"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <h2 id="project-limit-title" className="font-display font-bold text-base text-[var(--text-main)] leading-snug">
+                  All {FREE_PROJECT_LIMIT} free project slots are in use
+                </h2>
+                <button
+                  onClick={() => setProjectLimitOpen(false)}
+                  aria-label="Close"
+                  className="w-9 h-9 -mr-2 -mt-1 flex items-center justify-center rounded-lg text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition shrink-0"
+                >
+                  <X size={17} />
+                </button>
+              </div>
+              <p className="mt-2 text-[13px] leading-relaxed text-[var(--text-muted)]">
+                The Free plan holds {FREE_PROJECT_LIMIT} projects at a time. Delete one you no longer need to make room, or get PRO for unlimited projects.
+              </p>
+              <div className="mt-4 space-y-2">
+                <button
+                  onClick={() => { setProjectLimitOpen(false); setIsPlansOpen(true); }}
+                  className="w-full flex items-center justify-center gap-2 rounded-lg py-2.5 text-[13px] font-bold text-white shadow-md"
+                  style={{ background: "var(--gradient-hero)" }}
+                >
+                  <Rocket size={14} /> Get PRO — unlimited projects
+                </button>
+                <button
+                  onClick={() => { setProjectLimitOpen(false); setShowProjectsBrowser(true); }}
+                  className="w-full flex items-center justify-center gap-2 rounded-lg border border-[var(--border-main)] py-2.5 text-[13px] font-semibold text-[var(--text-main)] hover:bg-[var(--bg-hover)]"
+                >
+                  <FolderOpen size={14} /> Manage projects
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {isPlansOpen && !isPro && (
         <PlansModal
@@ -3854,7 +3971,8 @@ export default function App() {
           currentProjectId={currentProjectId}
           onClose={() => setShowProjectsBrowser(false)}
           onOpenProject={handleOpenProject}
-          onNewProject={() => { setShowProjectsBrowser(false); setShowNewProjectModal(true); }}
+          onNewProject={() => { setShowProjectsBrowser(false); void openNewProject(); }}
+          projectLimit={accountTier === "free" ? FREE_PROJECT_LIMIT : undefined}
         />
       )}
 
@@ -3895,7 +4013,7 @@ export default function App() {
           displayName={user.displayName?.split(" ")[0] || ""}
           projects={recentProjects}
           loading={loadingRecent}
-          onNewProject={() => { setShowWelcome(false); setShowNewProjectModal(true); }}
+          onNewProject={() => { setShowWelcome(false); void openNewProject(); }}
           onOpenProject={(id) => { setShowWelcome(false); handleOpenProject(id); }}
           onBrowseAll={() => { setShowWelcome(false); setShowProjectsBrowser(true); }}
           onClose={() => setShowWelcome(false)}

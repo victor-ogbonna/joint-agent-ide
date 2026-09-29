@@ -3,6 +3,7 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { adminAuth, adminDb, isFirebaseAdminConfigured } from "./firebaseAdmin";
 import { loadAdminConfig } from "./adminConfig";
 import { accessLevelFor, bypassesLaunchLock, LAUNCH_LOCKED_CODE, LAUNCH_LOCKED_MESSAGE } from "./access";
+import { hasPaidPro, standing, type BillingState } from "./billing";
 
 /** Sentinel subscription status for accounts whose usage is never counted. */
 export const UNMETERED_STATUS = "unmetered";
@@ -81,6 +82,10 @@ export interface UserQuotaDoc {
   paystackSubscriptionCode: string | null;
   paystackEmailToken: string | null;
   currentPeriodEnd: Timestamp | null;
+  /** When the last successful payment was made (ms since epoch). */
+  lastPaymentAt: number | null;
+  /** When a renewal charge failed (ms since epoch), while past due. */
+  pastDueAt: number | null;
   /** When the current token window opened (ms since epoch). */
   windowStart: number | null;
   windowTokens: number;
@@ -102,6 +107,8 @@ const DEFAULT_USER_DOC: UserQuotaDoc = {
   paystackSubscriptionCode: null,
   paystackEmailToken: null,
   currentPeriodEnd: null,
+  lastPaymentAt: null,
+  pastDueAt: null,
   windowStart: null,
   windowTokens: 0,
   tokenDay: null,
@@ -124,6 +131,8 @@ function readUserDoc(data: any): UserQuotaDoc {
     paystackSubscriptionCode: data.paystackSubscriptionCode ?? null,
     paystackEmailToken: data.paystackEmailToken ?? null,
     currentPeriodEnd: data.currentPeriodEnd ?? null,
+    lastPaymentAt: time(data.lastPaymentAt),
+    pastDueAt: time(data.pastDueAt),
     windowStart: time(data.windowStart),
     windowTokens: num(data.windowTokens),
     tokenDay: typeof data.tokenDay === "string" ? data.tokenDay : null,
@@ -190,10 +199,27 @@ export async function requireFirebaseAuth(req: Request, res: Response, next: Nex
   next();
 }
 
-/** Where an account stands: the owner, paid or granted PRO, or free. */
-export function tierOf(doc: UserQuotaDoc, level: string): Tier {
+/** The subscription side of an account, for server/billing.ts. */
+export function billingOf(doc: UserQuotaDoc): BillingState {
+  const end = doc.currentPeriodEnd && typeof (doc.currentPeriodEnd as any).toMillis === "function"
+    ? (doc.currentPeriodEnd as any).toMillis() as number
+    : null;
+  return { subscriptionStatus: doc.subscriptionStatus, currentPeriodEnd: end, lastPaymentAt: doc.lastPaymentAt ?? null, pastDueAt: doc.pastDueAt ?? null };
+}
+
+/** When a subscription renews, or when a cancelled or unpaid one's PRO ends. */
+export function subscriptionStanding(doc: UserQuotaDoc, now = Date.now()) {
+  return standing(billingOf(doc), now);
+}
+
+/**
+ * Where an account stands: the owner, paid or granted PRO, or free. Paid PRO
+ * includes a cancelled subscription until its paid period ends, and a failed
+ * renewal until its grace period ends (server/billing.ts).
+ */
+export function tierOf(doc: UserQuotaDoc, level: string, now = Date.now()): Tier {
   if (level === "unmetered") return "unmetered";
-  if (doc.subscriptionStatus === "active" || level === "pro") return "pro";
+  if (hasPaidPro(billingOf(doc), now) || level === "pro") return "pro";
   return "free";
 }
 
@@ -263,7 +289,7 @@ export function allowanceFor(doc: UserQuotaDoc, tier: Tier, now = Date.now()): A
     dayUsed = doc.tokenDay === utcDay(now) ? doc.dayTokens : 0;
     dayCap = FREE_DAILY_TOKENS;
     if (dayUsed >= dayCap) blockers.push({ reason: "day", at: nextUtcMidnight(now) });
-  } else if (doc.subscriptionStatus === "active") {
+  } else if (hasPaidPro(billingOf(doc), now)) {
     cycleUsed = doc.cycleTokensUsed;
     cycleCap = PAID_TOKEN_CAP;
     if (cycleUsed >= cycleCap) {
@@ -432,7 +458,7 @@ export function tokenUsagePatch(doc: UserQuotaDoc, quota: Pick<QuotaContext, "ti
     patch.tokenDay = today;
     patch.dayTokens = (doc.tokenDay === today ? doc.dayTokens : 0) + tokens;
     patch.lifetimeFreeTokensUsed = doc.lifetimeFreeTokensUsed + tokens;
-  } else if (quota.subscriptionStatus === "active") {
+  } else if (quota.subscriptionStatus === "active" || hasPaidPro(billingOf(doc), now)) {
     patch.cycleTokensUsed = doc.cycleTokensUsed + tokens;
   }
   return patch;

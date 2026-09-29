@@ -15,7 +15,7 @@ import { SerialPort } from 'serialport';
 import { ReadlineParser } from '@serialport/parser-readline';
 import { loadAdminConfig, saveAdminConfig } from './server/adminConfig';
 import { readAccessLists, sanitiseEmailList } from './server/access';
-import { requireAuthAndQuota, requireFirebaseAuth, incrementTokenUsage, getOrCreateUserDoc, consumeCompile, refundCompile, CompileReceipt, tierOf, allowanceFor, compileAllowance, formatWait, FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES } from './server/quota';
+import { requireAuthAndQuota, requireFirebaseAuth, incrementTokenUsage, getOrCreateUserDoc, consumeCompile, refundCompile, CompileReceipt, tierOf, allowanceFor, compileAllowance, formatWait, subscriptionStanding, FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES } from './server/quota';
 import { accessLevelFor } from './server/access';
 import { voiceNoteTooLong, MAX_VOICE_NOTE_SECONDS } from './server/voiceNote';
 import { registerPaystackRoutes } from './server/paystack';
@@ -368,6 +368,8 @@ app.get("/api/quota/status", requireFirebaseAuth, async (req, res) => {
   const a = allowanceFor(doc, tier);
   res.json({
     subscriptionStatus: doc.subscriptionStatus,
+    // When a renewing plan renews, or when a cancelled or unpaid one's PRO ends.
+    ...subscriptionStanding(doc),
     tier,
     // The current 5-hour window. Null cap: never metered.
     tokensUsed: a.windowUsed,

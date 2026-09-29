@@ -7,6 +7,8 @@ interface ProjectsBrowserProps {
   onClose: () => void;
   onOpenProject: (projectId: string) => void;
   onNewProject: () => void;
+  /** The Free plan's limit, shown as "3 of 5"; none for PRO. */
+  projectLimit?: number;
   currentProjectId: string | null;
 }
 
@@ -21,7 +23,7 @@ function formatDate(ts: any): string {
   }
 }
 
-export default function ProjectsBrowser({ onClose, onOpenProject, onNewProject, currentProjectId }: ProjectsBrowserProps) {
+export default function ProjectsBrowser({ onClose, onOpenProject, onNewProject, currentProjectId, projectLimit }: ProjectsBrowserProps) {
   const { user } = useAuth();
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -74,6 +76,11 @@ export default function ProjectsBrowser({ onClose, onOpenProject, onNewProject, 
         <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border-main)] bg-[var(--bg-root)] shrink-0">
           <h2 className="font-display font-bold text-sm text-[var(--text-main)] flex items-center gap-2">
             <FolderOpen size={15} className="text-[var(--accent-secondary)]" /> Your Projects
+            {projectLimit !== undefined && !loading && !error && (
+              <span className="text-[11px] font-normal text-[var(--text-muted)] tabular-nums">
+                {Math.min(projects.length, projectLimit)} of {projectLimit} · Free plan
+              </span>
+            )}
           </h2>
           <button onClick={onClose} className="text-[var(--text-muted)] hover:text-[var(--text-main)]">
             <X size={18} />

@@ -4,6 +4,8 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { adminAuth, adminDb, isFirebaseAdminConfigured } from "./firebaseAdmin";
 import { requireFirebaseAuth } from "./quota";
 import { loadAdminConfig, saveAdminConfig, maskSecret } from "./adminConfig";
+import { periodEndFrom, paymentTime, isCurrentSubscription, eventSubscriptionCode } from "./billing";
+import { subscriptionStanding, getOrCreateUserDoc } from "./quota";
 
 declare global {
   namespace Express {
@@ -36,24 +38,37 @@ async function resolveUidForEvent(data: any): Promise<string | null> {
   }
 }
 
-async function activateSubscription(uid: string, fields: { paystackCustomerCode?: string; currentPeriodEnd?: Timestamp | null } = {}) {
+/**
+ * A successful payment (the first, or a renewal): PRO, a fresh monthly
+ * allowance, and the date the paid period ends. The period end comes from
+ * the payment itself (server/billing.ts), so it is never left blank, which
+ * would leave a later cancellation nothing to keep PRO until.
+ */
+async function activateSubscription(uid: string, data: any) {
+  const now = Date.now();
   await adminDb.collection("users").doc(uid).set(
     {
       subscriptionStatus: "active",
       cycleTokensUsed: 0,
+      lastPaymentAt: paymentTime(data, now),
+      currentPeriodEnd: Timestamp.fromMillis(periodEndFrom(data, now)),
+      pastDueAt: null,
+      ...(data?.customer?.customer_code ? { paystackCustomerCode: data.customer.customer_code } : {}),
       updatedAt: FieldValue.serverTimestamp(),
-      ...fields,
     },
     { merge: true }
   );
 }
 
-function periodEndFromEventData(data: any): Timestamp | null {
-  const raw = data?.next_payment_date || data?.subscription?.next_payment_date;
-  if (!raw) return null;
-  const date = new Date(raw);
-  if (isNaN(date.getTime())) return null;
-  return Timestamp.fromDate(date);
+/** Stop a subscription's future charges. False when Paystack refused. */
+async function disableSubscription(secretKey: string, code: string, token: string): Promise<boolean> {
+  const res = await fetch("https://api.paystack.co/subscription/disable", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${secretKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ code, token }),
+  });
+  const body: any = await res.json().catch(() => ({}));
+  return res.ok && !!body?.status;
 }
 
 export function registerPaystackRoutes(app: express.Express, requireAdmin: express.RequestHandler) {
@@ -142,10 +157,7 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
         return res.status(402).json({ error: "Payment was not for the expected plan." });
       }
 
-      await activateSubscription(req.uid!, {
-        paystackCustomerCode: data.customer?.customer_code,
-        currentPeriodEnd: periodEndFromEventData(data),
-      });
+      await activateSubscription(req.uid!, data);
 
       res.json({ success: true });
     } catch (err: any) {
@@ -170,23 +182,18 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
     }
 
     try {
-      const disableRes = await fetch("https://api.paystack.co/subscription/disable", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${cfg.secretKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ code, token }),
-      });
-      const body: any = await disableRes.json();
-      if (!disableRes.ok || !body?.status) {
-        return res.status(502).json({ error: body?.message || "Paystack could not cancel the subscription." });
+      if (!(await disableSubscription(cfg.secretKey, code, token))) {
+        return res.status(502).json({ error: "Paystack could not cancel the subscription." });
       }
 
-      // Optimistic local update — the subscription.disable webhook will also
-      // confirm this shortly, but reflect it immediately for the UI.
+      // No further charges. PRO itself lasts until the paid period ends
+      // (tierOf in server/quota.ts), as the confirmation promised.
       await adminDb.collection("users").doc(req.uid!).set(
         { subscriptionStatus: "canceled", updatedAt: FieldValue.serverTimestamp() },
         { merge: true }
       );
-      res.json({ success: true });
+      const doc = await getOrCreateUserDoc(req.uid!);
+      res.json({ success: true, ...subscriptionStanding(doc) });
     } catch (err: any) {
       console.error("Paystack cancel error:", err.message);
       res.status(500).json({ error: "Could not cancel subscription." });
@@ -222,30 +229,63 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
       if (uid) {
         switch (event?.event) {
           case "charge.success": {
-            await activateSubscription(uid, {
-              paystackCustomerCode: data.customer?.customer_code,
-              currentPeriodEnd: periodEndFromEventData(data),
-            });
+            await activateSubscription(uid, data);
             break;
           }
           case "subscription.create": {
             // email_token is required (alongside the subscription code) to call
             // Paystack's disable-subscription API later — it's only ever sent on
             // this event, so it has to be captured here or self-serve cancel can't work.
+            const before = await getOrCreateUserDoc(uid);
             await adminDb.collection("users").doc(uid).set(
-              { paystackSubscriptionCode: data.subscription_code, paystackEmailToken: data.email_token, updatedAt: FieldValue.serverTimestamp() },
+              {
+                paystackSubscriptionCode: data.subscription_code,
+                paystackEmailToken: data.email_token,
+                ...(data.next_payment_date ? { currentPeriodEnd: Timestamp.fromMillis(periodEndFrom(data, Date.now())) } : {}),
+                updatedAt: FieldValue.serverTimestamp(),
+              },
               { merge: true }
             );
+            // One subscription per account. Paying again (say, after a failed
+            // renewal) starts a new one; the old one would otherwise try the
+            // card again next month and charge twice.
+            const oldCode = before.paystackSubscriptionCode;
+            const oldToken = before.paystackEmailToken;
+            if (oldCode && oldToken && oldCode !== data.subscription_code) {
+              try {
+                if (!(await disableSubscription(cfg.secretKey, oldCode, oldToken))) {
+                  console.error(`[Paystack webhook] Could not stop the old subscription ${oldCode} for uid=${uid}.`);
+                }
+              } catch (err: any) {
+                console.error(`[Paystack webhook] Could not stop the old subscription ${oldCode} for uid=${uid}:`, err?.message || err);
+              }
+            }
             break;
           }
           case "invoice.payment_failed": {
+            // A renewal didn't go through. PRO carries on through the grace
+            // period (server/billing.ts), counted from the first failure: a
+            // repeat failure doesn't extend it.
+            const doc = await getOrCreateUserDoc(uid);
+            if (!isCurrentSubscription(doc.paystackSubscriptionCode, data)) break;
+            if (doc.subscriptionStatus !== "active") break;
             await adminDb.collection("users").doc(uid).set(
-              { subscriptionStatus: "past_due", updatedAt: FieldValue.serverTimestamp() },
+              { subscriptionStatus: "past_due", pastDueAt: Date.now(), updatedAt: FieldValue.serverTimestamp() },
               { merge: true }
             );
             break;
           }
+          case "subscription.not_renew":
           case "subscription.disable": {
+            // No further charges; PRO lasts until the paid period ends. An
+            // older subscription being stopped (see subscription.create) says
+            // nothing about the current one.
+            const doc = await getOrCreateUserDoc(uid);
+            if (!isCurrentSubscription(doc.paystackSubscriptionCode, data)) {
+              console.log(`[Paystack webhook] ${event.event} for an older subscription (${eventSubscriptionCode(data)}); account unchanged.`);
+              break;
+            }
+            if (doc.subscriptionStatus === "none") break;
             await adminDb.collection("users").doc(uid).set(
               { subscriptionStatus: "canceled", updatedAt: FieldValue.serverTimestamp() },
               { merge: true }
