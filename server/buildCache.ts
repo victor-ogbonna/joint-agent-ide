@@ -14,6 +14,9 @@ import crypto from "crypto";
  * Anything that differs, however slightly, gets its own entry, so a user's
  * own code is always compiled from their own code.
  *
+ * Libraries are reused too, both downloaded ones and ones a user imported:
+ * see the build script below.
+ *
  * Kept safe by:
  * - a separate cache for each set of installed compilers and board packages,
  *   so after an update nothing made by the old compiler is ever reused;
@@ -21,6 +24,9 @@ import crypto from "crypto";
  *   every compile links its own;
  * - any problem with the cache folder only switches the cache off for that
  *   compile, which then runs exactly as it would without a cache;
+ * - a file in the cache damaged on disk makes the linker reject it; the
+ *   server then compiles again without the cache and sets that cache aside
+ *   (damagedCacheFailure, retireDamagedCache);
  * - old entries are deleted when the cache outgrows its limit, and only while
  *   no compile is running.
  *
@@ -75,6 +81,16 @@ export function toolchainFingerprint(coreDir: string): string {
  * The build script that turns the cache on for one compile. It runs inside
  * the build before anything is compiled; if the folder can't be used, the
  * compile goes ahead without the cache.
+ *
+ * It also names the build folder of each library inside the compile's own
+ * folder (downloaded ones in .pio/libdeps, imported ones in lib/) after the
+ * library's path inside the project. PlatformIO names it after the library's
+ * full path, which includes the compile's temporary folder, and the build
+ * system files each cached piece under its folder too, so without this no
+ * compile could reuse another's library pieces. A piece is still only reused
+ * when everything that went into it is the same. PlatformIO defines that
+ * name in one place (LibBuilderBase.build_dir); if it ever changes shape,
+ * libraries are simply compiled as before.
  */
 export function buildCacheScript(cacheDir: string): string {
   return [
@@ -84,6 +100,7 @@ export function buildCacheScript(cacheDir: string): string {
     "import os",
     "",
     `CACHE_DIR = ${JSON.stringify(cacheDir)}`,
+    "cache_on = False",
     "",
     "try:",
     "    folder = CACHE_DIR if os.path.isdir(CACHE_DIR) else os.path.dirname(CACHE_DIR)",
@@ -92,10 +109,90 @@ export function buildCacheScript(cacheDir: string): string {
     "        # The finished firmware is always linked fresh, never taken from the cache.",
     '        for name in ("firmware.elf", "firmware.hex", "firmware.bin"):',
     '            env.NoCache(os.path.join(env.subst("$BUILD_DIR"), name))',
+    "        cache_on = True",
     "except Exception:",
     "    env.CacheDir(None)",
     "",
+    "# Libraries in this compile's folder: build them in a folder named after their",
+    "# path inside the project, not after this compile's temporary folder, so their",
+    "# pieces can be reused. The tag is longer than PlatformIO's own (3), so these",
+    "# folders can't clash with those of libraries outside the project, or with",
+    "# each other. Any problem leaves PlatformIO as it is.",
+    "if cache_on:",
+    "    try:",
+    "        import hashlib",
+    "        import sys",
+    "",
+    '        project_dir = os.path.realpath(env.subst("$PROJECT_DIR"))',
+    "",
+    "        def same_folder_every_compile(original):",
+    "            def build_dir(self):",
+    "                try:",
+    "                    lib_path = os.path.realpath(self.path)",
+    "                    if lib_path != project_dir and os.path.commonpath([project_dir, lib_path]) == project_dir:",
+    '                        inside = os.path.relpath(lib_path, project_dir).replace(os.sep, "/")',
+    '                        tag = hashlib.sha1(inside.encode("utf-8")).hexdigest()[:8]',
+    '                        return os.path.join("$BUILD_DIR", "lib" + tag, os.path.basename(self.path))',
+    "                except Exception:",
+    "                    pass",
+    "                return original.fget(self)",
+    "            build_dir.same_folder_every_compile = True",
+    "            return property(build_dir)",
+    "",
+    "        for module in list(sys.modules.values()):",
+    "            try:",
+    '                builder = getattr(module, "LibBuilderBase", None)',
+    '                named = builder.__dict__.get("build_dir") if isinstance(builder, type) else None',
+    '                if isinstance(named, property) and not getattr(named.fget, "same_folder_every_compile", False):',
+    "                    builder.build_dir = same_folder_every_compile(named)",
+    "            except Exception:",
+    "                pass",
+    "    except Exception:",
+    "        pass",
+    "",
   ].join("\n");
+}
+
+// What the GNU linker and archiver say about a file they can't read. A
+// mistake in the code never produces these; a damaged object file does.
+const DAMAGED_FILE = /file format not recognized|file truncated|malformed archive|file in wrong format|archive has no index/i;
+
+/**
+ * Whether a compile failed because a file taken from the cache was damaged
+ * (a disk fault, say): the build took files from the cache, and the linker
+ * or archiver rejected a file as unreadable.
+ */
+export function damagedCacheFailure(output: string): boolean {
+  return /^Retrieved `/m.test(output) && DAMAGED_FILE.test(output);
+}
+
+let damagedCacheSeen = false;
+
+/** Notes that the current cache gave a compile a damaged file. */
+export function reportDamagedCache(): void {
+  damagedCacheSeen = true;
+}
+
+/**
+ * Sets aside the cache that gave a compile a damaged file: renames this
+ * compiler set's cache folder, so the next compile starts a fresh one, and
+ * trimming deletes the old one once it has been unused for an hour. Call
+ * only while no other compile is running, as one might be reading from it.
+ * Returns the new name, or null if there was nothing to set aside.
+ */
+export function retireDamagedCache(coreDir: string, now = Date.now()): string | null {
+  if (!damagedCacheSeen) return null;
+  damagedCacheSeen = false;
+  const current = path.join(buildCacheRoot(coreDir), toolchainFingerprint(coreDir));
+  const retired = `${current}.damaged-${now}`;
+  try {
+    fs.renameSync(current, retired);
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") console.error("[Build cache] couldn't set the damaged cache aside:", err?.message || err);
+    return null;
+  }
+  console.warn(`[Build cache] set aside a cache that held a damaged file: ${retired}`);
+  return retired;
 }
 
 /**
@@ -223,13 +320,15 @@ export function buildCacheStatus(coreDir: string) {
 
 /**
  * Trims the cache every 10 minutes, whenever no compile is running or
- * waiting. The trim runs start to finish without yielding, so no compile
- * can start while it is deleting.
+ * waiting, after setting aside a damaged cache that couldn't be set aside
+ * straight away. The trim runs start to finish without yielding, so no
+ * compile can start while it is deleting.
  */
 export function startBuildCachePruning(coreDir: string, idle: () => boolean): void {
   if (!buildCacheEnabled()) return;
   const trim = () => {
     if (!idle()) return;
+    retireDamagedCache(coreDir);
     try {
       const r = pruneBuildCache(buildCacheRoot(coreDir), buildCacheMaxBytes(), toolchainFingerprint(coreDir));
       lastSize = { at: Date.now(), bytes: r.after };

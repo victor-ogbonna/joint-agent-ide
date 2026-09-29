@@ -10,6 +10,7 @@ import { execFileSync } from "child_process";
 import {
   useBuildCache, buildCacheScript, toolchainFingerprint, pruneBuildCache, readyBuildCache,
   buildCacheEnabled, buildCacheMaxBytes, buildCacheRoot, buildCacheSize, SCRIPT_NAME,
+  damagedCacheFailure, reportDamagedCache, retireDamagedCache,
 } from "../server/buildCache.ts";
 
 let bad = 0;
@@ -77,6 +78,113 @@ console.log("Switched on");
   }
   const unwritable = useBuildCache("/nonexistent/folder", core, { BUILD_CACHE: "on" });
   check(unwritable === "", "if the script can't be written, the compile goes ahead without the cache");
+}
+
+console.log("Libraries are reused too");
+{
+  // The script run as a compile runs it (one process per compile), against a
+  // stand-in for PlatformIO's library builder: build_dir exactly as
+  // PlatformIO defines it.
+  const harness = `
+import sys, types, os, hashlib, json
+mod = types.ModuleType("piolib")
+class LibBuilderBase:
+    def __init__(self, path): self.path = path
+    @property
+    def build_dir(self):
+        lib_hash = hashlib.sha1(self.path.encode("utf-8")).hexdigest()[:3]
+        return os.path.join("$BUILD_DIR", "lib%s" % lib_hash, os.path.basename(self.path))
+class ArduinoLibBuilder(LibBuilderBase): pass
+mod.LibBuilderBase = LibBuilderBase
+sys.modules["piolib"] = mod
+class Env:
+    def __init__(self, project): self.project = project; self.cache = "unset"
+    def subst(self, s): return {"$PROJECT_DIR": self.project, "$BUILD_DIR": self.project + "/.pio/build/uno"}.get(s, s)
+    def CacheDir(self, p): self.cache = p
+    def NoCache(self, p): pass
+script, project, framework_lib = sys.argv[1:4]
+original = LibBuilderBase.__dict__["build_dir"]
+env = Env(project)
+for _ in range(2):
+    exec(open(script).read(), {"Import": lambda name: None, "env": env})
+now = LibBuilderBase.__dict__["build_dir"]
+inner = now.fget.__closure__[0].cell_contents if now.fget.__closure__ else None
+dht = project + "/.pio/libdeps/uno/DHT sensor library"
+print(json.dumps({
+    "cache": env.cache,
+    "changed": now is not original,
+    "wrapsOriginal": inner is original,
+    "dht": ArduinoLibBuilder(dht).build_dir,
+    "dhtBefore": original.fget(ArduinoLibBuilder(dht)),
+    "imported": ArduinoLibBuilder(project + "/lib/Cfg").build_dir,
+    "project": LibBuilderBase(project).build_dir,
+    "projectBefore": original.fget(LibBuilderBase(project)),
+    "framework": ArduinoLibBuilder(framework_lib).build_dir,
+    "frameworkBefore": original.fget(ArduinoLibBuilder(framework_lib)),
+}))
+`;
+  const script = (cacheParent) => {
+    const f = path.join(tmp("proj"), SCRIPT_NAME);
+    fs.writeFileSync(f, buildCacheScript(path.join(cacheParent, "fp")));
+    return f;
+  };
+  const compile = (scriptFile) => {
+    try {
+      return JSON.parse(execFileSync("python3", ["-c", harness, scriptFile, tmp("proj"), "/opt/core/packages/framework-arduino-avr/libraries/Wire"]).toString());
+    } catch (e) {
+      return { error: String(e.stderr || e.message) };
+    }
+  };
+  const on = script(tmp("cache"));
+  const a = compile(on), b = compile(on);
+  check(!a.error && !b.error, "the script runs", a.error || b.error || "");
+  if (!a.error && !b.error) {
+    check(a.cache.endsWith("/fp") && b.cache.endsWith("/fp"), "the cache is on");
+    check(a.dht === b.dht && a.dht !== a.dhtBefore && /^\$BUILD_DIR\/lib[0-9a-f]{8}\/DHT sensor library$/.test(a.dht),
+      "a downloaded library builds in the same folder in every compile", `${a.dht} / ${b.dht}`);
+    check(a.imported === b.imported && a.imported !== a.dht && /^\$BUILD_DIR\/lib[0-9a-f]{8}\/Cfg$/.test(a.imported),
+      "an imported library too, in a folder of its own", a.imported);
+    check(/^\$BUILD_DIR\/lib[0-9a-f]{3}\/Wire$/.test(a.framework),
+      "a library outside the compile's folder can't share a folder with one inside (different tag length)", a.framework);
+    check(a.framework === a.frameworkBefore && a.framework.endsWith("/Wire"),
+      "a library outside the compile's folder keeps PlatformIO's own folder", a.framework);
+    check(a.project === a.projectBefore, "the project itself is left alone");
+    check(a.changed && a.wrapsOriginal, "running the script twice changes it only once");
+  }
+  // With the cache folder unusable the cache is off, and PlatformIO is untouched.
+  const off = compile(script("/nonexistent/place"));
+  check(!off.error && off.cache === "unset" && !off.changed && off.dht === off.dhtBefore,
+    "with the cache off, libraries are built exactly as before", off.error || off.dht);
+}
+
+console.log("A damaged file in the cache");
+{
+  const retrieved = "Retrieved `.pio/build/uno/libFrameworkArduino.a' from cache\nLinking .pio/build/uno/firmware.elf\n";
+  check(damagedCacheFailure(retrieved + "ld: .pio/build/uno/libFrameworkArduino.a: file format not recognized; treating as linker script\ncollect2: error: ld returned 1 exit status"),
+    "the linker rejecting a file taken from the cache is recognised");
+  check(damagedCacheFailure(retrieved + "ld: .pio/build/uno/src/main.cpp.o: file truncated") && damagedCacheFailure(retrieved + "ar: malformed archive"),
+    "so are a truncated file and a broken archive");
+  check(!damagedCacheFailure(retrieved + "src/main.cpp:3:1: error: expected ';' before '}' token"), "a mistake in the code is not");
+  check(!damagedCacheFailure(retrieved + "undefined reference to `setup'"), "nor a missing function");
+  check(!damagedCacheFailure("Compiling .pio/build/uno/src/main.cpp.o\nld: libfoo.a: file format not recognized"),
+    "nor a bad file when nothing came from the cache");
+
+  const core = fakeCore();
+  const current = path.join(buildCacheRoot(core), toolchainFingerprint(core));
+  write(path.join(current, "AB/obj"), "x");
+  check(retireDamagedCache(core) === null && fs.existsSync(current), "nothing is set aside unless a damaged file was reported");
+  reportDamagedCache();
+  const now = Date.now();
+  const retired = retireDamagedCache(core, now);
+  check(retired === `${current}.damaged-${now}` && !fs.existsSync(current) && fs.existsSync(path.join(retired, "AB/obj")),
+    "after one, the cache folder is set aside and the next compile starts a fresh one");
+  check(retireDamagedCache(core) === null, "once");
+  reportDamagedCache();
+  check(retireDamagedCache(core) === null, "no cache folder to set aside: nothing happens");
+  const t = (now - 2 * 60 * 60 * 1000) / 1000;
+  fs.utimesSync(path.join(retired, "AB/obj"), t, t);
+  pruneBuildCache(buildCacheRoot(core), 10 * MB, toolchainFingerprint(core), now);
+  check(!fs.existsSync(retired), "trimming deletes it once it has been unused for an hour");
 }
 
 console.log("One cache per set of compilers");
