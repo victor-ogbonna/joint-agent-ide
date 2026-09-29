@@ -17,7 +17,7 @@ import { accessLevelFor } from './server/access';
 import { voiceNoteTooLong, MAX_VOICE_NOTE_SECONDS } from './server/voiceNote';
 import { registerPaystackRoutes, paystackSecretKey } from './server/paystack';
 import { registerAdminStatsRoutes } from './server/adminStats';
-import { useBuildCache, readyBuildCache, startBuildCachePruning } from './server/buildCache';
+import { useBuildCache, readyBuildCache, startBuildCachePruning, damagedCacheFailure, reportDamagedCache, retireDamagedCache } from './server/buildCache';
 import { catchAsyncErrors, jsonErrorHandler } from './server/asyncErrors';
 import { runBuild, COMPILE_TIMEOUT_MS, fileSystemInclude } from './server/buildRun';
 import { readJsonBodies } from './server/bodyLimits';
@@ -1470,7 +1470,9 @@ lib_deps =
 
   // Reuse files compiled by earlier compiles (server/buildCache.ts). Adds
   // nothing while the cache is off.
-  platformioIni += useBuildCache(tempDir, path.join(process.cwd(), ".platformio"));
+  const iniWithoutCache = platformioIni;
+  const buildCacheLine = useBuildCache(tempDir, path.join(process.cwd(), ".platformio"));
+  platformioIni += buildCacheLine;
 
   fs.writeFileSync(path.join(tempDir, "platformio.ini"), platformioIni);
   console.log(`[Compile] platformio.ini generated with libs: ${detectedLibDeps.join(', ') || 'none'}`);
@@ -1490,12 +1492,29 @@ lib_deps =
         const options = await compilerOptions(path.join(process.cwd(), ".platformio"));
         readyBuildCache(path.join(process.cwd(), ".platformio"), options.uid, options.gid);
         // Stopped, compiler and all, if it runs too long (server/buildRun.ts).
-        return await runBuild(pioPath, ['run'], {
+        const build = () => runBuild(pioPath, ['run'], {
           cwd: tempDir,
           ...options,
           maxBuffer: 1024 * 1024 * 50,
           timeoutMs: COMPILE_TIMEOUT_MS,
         });
+        try {
+          return await build();
+        } catch (err: any) {
+          // A file taken from the cache was damaged (a disk fault, say): the
+          // linker rejects it. Compile again, in this same slot, without the
+          // cache; if that works, set the damaged cache aside.
+          if (!buildCacheLine || err?.timedOut || !damagedCacheFailure(`${err?.stdout || ""}\n${err?.stderr || ""}`)) throw err;
+          console.warn("[Build cache] a compile hit a damaged cache file; compiling again without the cache.");
+          fs.rmSync(path.join(tempDir, ".pio", "build"), { recursive: true, force: true });
+          fs.writeFileSync(path.join(tempDir, "platformio.ini"), iniWithoutCache);
+          const result = await build();
+          reportDamagedCache();
+          // Only this compile is running, so nothing is reading from it;
+          // otherwise the next trim, when nothing is running, does it.
+          if (buildQueue.runningNow <= 1) retireDamagedCache(path.join(process.cwd(), ".platformio"));
+          return result;
+        }
       } finally {
         const ms = Date.now() - startedAt;
         countStat("compile_ms_total", ms);
