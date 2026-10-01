@@ -25,7 +25,8 @@ import WelcomeModal from "./components/WelcomeModal";
 import FeedbackWidget from "./components/FeedbackWidget";
 import GithubPanel from "./components/GithubPanel";
 import WebPreviewPanel from "./components/WebPreviewPanel";
-import PlansModal from "./components/PlansModal";
+import PlansModal, { type FirstMonthOffer, type PlanPriceView, type BillingPeriod } from "./components/PlansModal";
+import { storedRef, clearStoredRef } from "./lib/referral";
 import LibrariesModal from "./components/LibrariesModal";
 import OnboardingTour, { TourStep } from "./components/OnboardingTour";
 import { canInstallApp, installApp, isInstalledFullscreenApp, onInstallAvailabilityChange } from "./lib/installApp";
@@ -685,6 +686,24 @@ export default function App() {
     proUntil: number | null;
   } | null>(null);
   const [isCancelingSubscription, setIsCancelingSubscription] = useState(false);
+  // A creator code's free PRO trial and first-month offer (server/referrals.ts).
+  const [trialEndsAt, setTrialEndsAt] = useState<number | null>(null);
+  const [canUseCode, setCanUseCode] = useState(false);
+  const [offerUntil, setOfferUntil] = useState<number | null>(null);
+  const [offerOpensAt, setOfferOpensAt] = useState<number | null>(null);
+  // PRO's prices from Paystack (monthly, and yearly when there's a yearly plan).
+  const [planPrices, setPlanPrices] = useState<{ monthly: PlanPriceView | null; yearly: PlanPriceView | null } | null>(null);
+  const [offer, setOffer] = useState<FirstMonthOffer | null>(null);
+  const [offerLoading, setOfferLoading] = useState(false);
+  const trialActive = trialEndsAt !== null && trialEndsAt > Date.now();
+  /** The code, trial and offer fields of /api/quota/status. */
+  const applyCodeStatus = (status: any) => {
+    setTrialEndsAt(typeof status?.trialEndsAt === "number" ? status.trialEndsAt : null);
+    setCanUseCode(status?.canUseCode === true);
+    setOfferUntil(typeof status?.offerUntil === "number" ? status.offerUntil : null);
+    setOfferOpensAt(typeof status?.offerOpensAt === "number" ? status.offerOpensAt : null);
+    if (typeof status?.offerUntil !== "number") setOffer(null);
+  };
 
   const [mcu, setMcu] = useState<MCUType>("esp32");
   const [boardId, setBoardId] = useState<string>("esp32dev");
@@ -820,6 +839,19 @@ export default function App() {
         if (!res.ok) return;
         const status = await res.json();
         if (status.tier) { setTier(status.tier); setAccountTier(status.tier); }
+        applyCodeStatus(status);
+        // Arrived by a creator's link: put its code on the account now.
+        const pending = storedRef();
+        if (pending && status.referralCode !== pending) {
+          if (status.canUseCode) {
+            void claimCreatorCode(pending, true);
+          } else {
+            clearStoredRef();
+            if (!status.referralCode) logToTerminal(`[PRO] The creator code ${pending} is for people new to PRO, so it wasn't applied to this account.`, "info");
+          }
+        } else if (pending) {
+          clearStoredRef();
+        }
         if (status.blocked) {
           const info: QuotaBlockedInfo = {
             tier: status.tier === "free" ? "free" : "paid",
@@ -857,15 +889,168 @@ export default function App() {
           proUntil: typeof status.proUntil === "number" ? status.proUntil : null,
         });
         if (status.tier) setAccountTier(status.tier);
+        applyCodeStatus(status);
       } catch {
         // Non-fatal — the dropdown just won't show a usage figure this time.
       }
     })();
   };
 
+  /** Where the account stands now: plan, trial and offer. */
+  const refreshPlanStatus = async () => {
+    if (!user) return;
+    try {
+      const idToken = await user.getIdToken();
+      const res = await fetch("/api/quota/status", { headers: { Authorization: `Bearer ${idToken}` } });
+      if (!res.ok) return;
+      const status = await res.json();
+      if (status.tier) { setTier(status.tier); setAccountTier(status.tier); }
+      applyCodeStatus(status);
+    } catch {
+      // Non-fatal: the next status check catches up.
+    }
+  };
+
+  /**
+   * Put a creator's code on this account: 7 days of PRO, free. From a
+   * creator's link (fromLink) the result is only reported in the terminal;
+   * typed on the Plans page, the page shows it.
+   */
+  const claimCreatorCode = async (code: string, fromLink = false): Promise<{ ok: boolean; error?: string }> => {
+    if (!user) return { ok: false, error: "Sign in first." };
+    let res: Response;
+    try {
+      const idToken = await user.getIdToken();
+      res = await fetch("/api/referral/claim", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ code }),
+      });
+    } catch {
+      // Kept for the next visit when it came by a link: nothing was decided.
+      return { ok: false, error: "Couldn't reach the server. Try again." };
+    }
+    const body = await res.json().catch(() => ({}));
+    if (fromLink) clearStoredRef();
+    if (!res.ok) {
+      const error = typeof body.error === "string" ? body.error : "That code couldn't be used.";
+      if (fromLink) logToTerminal(`[PRO] The creator code ${code} wasn't applied: ${error}`, "info");
+      return { ok: false, error };
+    }
+    clearStoredRef();
+    clearLastKnownBlock();
+    setQuotaBlockInfo(null);
+    setAccountTier("pro");
+    if (typeof body.trialEndsAt === "number") setTrialEndsAt(body.trialEndsAt);
+    setCanUseCode(false);
+    logToTerminal(
+      `[PRO] Creator code ${body.code || code} applied: PRO is free for 7 days${typeof body.trialEndsAt === "number" ? `, until ${formatDay(body.trialEndsAt)}` : ""}.`,
+      "success",
+    );
+    void refreshPlanStatus();
+    return { ok: true };
+  };
+
+  // PRO's prices, read once when the Plans page first opens.
+  useEffect(() => {
+    if (!isPlansOpen || planPrices) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/paystack/prices");
+        const body = await res.json().catch(() => null);
+        if (!cancelled && res.ok && body) setPlanPrices({ monthly: body.monthly ?? null, yearly: body.yearly ?? null });
+      } catch {
+        // The Plans page falls back to the monthly price it knows.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isPlansOpen, planPrices]);
+
+  // The first-month offer's price comes from the server (it reads the PRO
+  // plan on Paystack), loaded when the Plans page opens.
+  useEffect(() => {
+    if (!isPlansOpen || offerUntil === null || offer || !user) return;
+    let cancelled = false;
+    setOfferLoading(true);
+    (async () => {
+      try {
+        const idToken = await user.getIdToken();
+        const res = await fetch("/api/billing/offer", { headers: { Authorization: `Bearer ${idToken}` } });
+        const body = await res.json().catch(() => ({}));
+        if (!cancelled && res.ok && body.eligible) setOffer(body as FirstMonthOffer);
+      } catch {
+        // The Plans page says the offer couldn't load.
+      } finally {
+        if (!cancelled) setOfferLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isPlansOpen, offerUntil, offer, user]);
+
+  /** The discounted first month: a one-off Paystack payment, checked by the server. */
+  const handleSubscribeOffer = async () => {
+    if (!user?.email || !offer) return;
+    if (!window.PaystackPop) {
+      logToTerminal("[BILLING] Payments aren't configured yet. Check back soon.", "error");
+      return;
+    }
+    setIsSubscribing(true);
+    try {
+      window.PaystackPop.setup({
+        key: offer.publicKey,
+        email: user.email,
+        amount: offer.amount,
+        currency: offer.currency,
+        metadata: { uid: user.uid, kind: offer.kind },
+        // A plain function, as in handleSubscribe: Paystack rejects an async one.
+        callback: (response) => {
+          void (async () => {
+            try {
+              const idToken = await user.getIdToken();
+              const verifyRes = await fetch("/api/paystack/verify", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+                body: JSON.stringify({ reference: response.reference }),
+              });
+              const body = await verifyRes.json().catch(() => ({}));
+              if (verifyRes.ok) {
+                clearLastKnownBlock();
+                setQuotaBlockInfo(null);
+                setIsUpgradeModalOpen(false);
+                setIsPlansOpen(false);
+                setAccountTier("pro");
+                setOffer(null);
+                setOfferUntil(null);
+                const until = typeof body.proUntil === "number" ? formatDay(body.proUntil) : null;
+                logToTerminal(
+                  body.renews
+                    ? `[BILLING] PRO is active, with your first month ${offer.discountPct}% off. Thanks!${until ? ` It renews at the normal price on ${until}.` : ""}`
+                    : `[BILLING] PRO is active${until ? ` until ${until}` : ""}. This payment method can't renew by itself, so renew from the Plans page before then.`,
+                  "success",
+                );
+                void refreshPlanStatus();
+              } else {
+                logToTerminal(`[BILLING] Payment verification failed: ${body.error || "Unknown error."}`, "error");
+              }
+            } catch (e: any) {
+              logToTerminal(`[BILLING] Payment verification failed: ${e.message}`, "error");
+            } finally {
+              setIsSubscribing(false);
+            }
+          })();
+        },
+        onClose: () => setIsSubscribing(false),
+      }).openIframe();
+    } catch (e: any) {
+      logToTerminal(`[BILLING] Could not start checkout: ${e.message}`, "error");
+      setIsSubscribing(false);
+    }
+  };
+
   const handleCancelSubscription = async () => {
     if (!user) return;
-    if (!window.confirm("Cancel your $7/month subscription? You'll keep PRO until the current cycle ends, then your account returns to the Free plan.")) return;
+    if (!window.confirm("Cancel your PRO subscription? You'll keep PRO until the period you've paid for ends, then your account returns to the Free plan.")) return;
     setIsCancelingSubscription(true);
     try {
       const idToken = await user.getIdToken();
@@ -3017,7 +3202,7 @@ export default function App() {
     // history the user wants back, and without this it was never written.
   }, [code, description, components, connections, mcu, chatMessages, currentProjectId, user]);
 
-  const handleSubscribe = async () => {
+  const handleSubscribe = async (period: BillingPeriod = "monthly") => {
     if (!user?.email) return;
     setIsSubscribing(true);
     try {
@@ -3028,10 +3213,12 @@ export default function App() {
         setIsSubscribing(false);
         return;
       }
+      // Yearly when chosen and a yearly plan is set; monthly otherwise.
+      const plan = period === "yearly" && cfg.yearlyPlanCode ? cfg.yearlyPlanCode : cfg.planCode;
       window.PaystackPop.setup({
         key: cfg.publicKey,
         email: user.email,
-        plan: cfg.planCode,
+        plan,
         metadata: { uid: user.uid },
         // Paystack's inline script rejects an async callback outright — it checks
         // the function's constructor name, and an async function reports
@@ -3130,7 +3317,7 @@ export default function App() {
             // accounts, a quiet badge for PRO ones — and nothing until the
             // server has said which, so PRO never flashes an upgrade.
             accountTier === null ? null : isPro ? (
-              <span className="pro-badge h-9 px-1 text-[15px] select-none" title="You're on PRO">
+              <span className="pro-badge h-9 px-1 text-[15px] select-none" title={trialActive && trialEndsAt !== null ? `Free PRO trial, ends ${formatDay(trialEndsAt)}` : "You're on PRO"}>
                 <Zap size={16} fill="currentColor" strokeWidth={1.5} aria-hidden="true" />
                 PRO
               </span>
@@ -3924,6 +4111,14 @@ export default function App() {
                   </>
                 ) : usageInfo.subscriptionStatus === "canceled" && isPro && usageInfo.proUntil ? (
                   <p className="mt-2 text-[10px] text-[var(--text-subtle)]">PRO until {formatDay(usageInfo.proUntil)} · won't renew</p>
+                ) : trialActive && trialEndsAt !== null ? (
+                  // A creator code's free trial: when it ends, and the way to keep PRO.
+                  <>
+                    <p className="mt-2 text-[10px] text-[var(--text-subtle)]">Free PRO trial · ends {formatDay(trialEndsAt)}</p>
+                    {offerOpensAt !== null && (
+                      <p className="mt-0.5 text-[10px] text-[var(--text-subtle)]">Then 20% off your first month of PRO</p>
+                    )}
+                  </>
                 ) : !isPro && accountTier !== null ? (
                   // PRO accounts, paid or granted, are never offered an upgrade.
                   <button
@@ -3931,7 +4126,7 @@ export default function App() {
                     className="w-full flex items-center gap-1.5 mt-2 text-[10px] font-medium gradient-text hover:opacity-80 transition"
                   >
                     <Rocket size={12} className="text-orange-500 rocket-blaze" />
-                    Upgrade — $7/mo
+                    {offerUntil !== null ? "Get PRO — 20% off your first month" : "Upgrade — $7/mo"}
                   </button>
                 ) : null}
               </div>
@@ -4031,11 +4226,20 @@ export default function App() {
         </div>
       )}
 
-      {isPlansOpen && !isPro && (
+      {isPlansOpen && (!isPro || trialActive) && (
         <PlansModal
           onClose={() => setIsPlansOpen(false)}
           onUpgrade={handleSubscribe}
           upgrading={isSubscribing}
+          prices={planPrices}
+          trialEndsAt={trialActive ? trialEndsAt : null}
+          offerOpensAt={offerOpensAt}
+          offerExpected={offerUntil !== null}
+          offer={offerUntil !== null ? offer : null}
+          offerLoading={offerLoading}
+          onUpgradeOffer={handleSubscribeOffer}
+          canUseCode={canUseCode}
+          onApplyCode={(code) => claimCreatorCode(code)}
         />
       )}
 

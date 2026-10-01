@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useDocumentScroll } from "./useDocumentScroll";
-import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw, UserPlus, Trash2, MessageSquarePlus, Mail, MailX, Paperclip, LayoutDashboard, Activity, Server, Settings } from "lucide-react";
+import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw, UserPlus, Trash2, MessageSquarePlus, Mail, MailX, Paperclip, LayoutDashboard, Activity, Server, Settings, BadgePercent } from "lucide-react";
 import OverviewTab from "./admin/OverviewTab";
 import UsersTab from "./admin/UsersTab";
 import TrafficTab from "./admin/TrafficTab";
 import PaymentsTab from "./admin/PaymentsTab";
 import ServerTab from "./admin/ServerTab";
+import CreatorsTab from "./admin/CreatorsTab";
 
 const TOKEN_KEY = "jointagent_admin_token";
 const TAB_KEY = "jointagent_admin_tab";
@@ -15,6 +16,7 @@ const TABS = [
   { id: "users", label: "Users", Icon: Users },
   { id: "traffic", label: "Traffic", Icon: Activity },
   { id: "payments", label: "Payments", Icon: CreditCard },
+  { id: "creators", label: "Creators", Icon: BadgePercent },
   { id: "server", label: "Server", Icon: Server },
   { id: "settings", label: "Settings", Icon: Settings },
 ] as const;
@@ -50,6 +52,8 @@ export default function AdminPage() {
   const [paystackMaskedSecretKey, setPaystackMaskedSecretKey] = useState<string | null>(null);
   const [paystackPublicKey, setPaystackPublicKey] = useState<string | null>(null);
   const [paystackPlanCode, setPaystackPlanCode] = useState<string | null>(null);
+  const [paystackYearlyPlanCode, setPaystackYearlyPlanCode] = useState<string | null>(null);
+  const [newYearlyPlanCode, setNewYearlyPlanCode] = useState("");
   const [newSecretKey, setNewSecretKey] = useState("");
   const [newPublicKey, setNewPublicKey] = useState("");
   const [newPlanCode, setNewPlanCode] = useState("");
@@ -105,6 +109,7 @@ export default function AdminPage() {
 
   // The dashboard tabs fetch through this; it only changes when the token does.
   const adminGet = useCallback((path: string) => adminFetch(token ?? "", path), [token]);
+  const adminPost = useCallback((path: string, body: unknown) => adminFetch(token ?? "", path, { method: "POST", body: JSON.stringify(body) }), [token]);
 
   const loadPaystackConfig = async (t: string) => {
     setLoadingPaystackConfig(true);
@@ -116,6 +121,7 @@ export default function AdminPage() {
       setPaystackMaskedSecretKey(data.maskedSecretKey);
       setPaystackPublicKey(data.publicKey);
       setPaystackPlanCode(data.planCode);
+      setPaystackYearlyPlanCode(data.yearlyPlanCode ?? null);
     } catch (e) {
       setPaystackSaveMessage({ type: "error", text: "Could not reach the server." });
     } finally {
@@ -319,6 +325,7 @@ export default function AdminPage() {
     if (newSecretKey.trim()) body.secretKey = newSecretKey.trim();
     if (newPublicKey.trim()) body.publicKey = newPublicKey.trim();
     if (newPlanCode.trim()) body.planCode = newPlanCode.trim();
+    if (newYearlyPlanCode.trim()) body.yearlyPlanCode = newYearlyPlanCode.trim();
     if (Object.keys(body).length === 0) return;
 
     setSavingPaystack(true);
@@ -338,9 +345,11 @@ export default function AdminPage() {
       setPaystackMaskedSecretKey(data.maskedSecretKey);
       setPaystackPublicKey(data.publicKey);
       setPaystackPlanCode(data.planCode);
+      setPaystackYearlyPlanCode(data.yearlyPlanCode ?? null);
       setNewSecretKey("");
       setNewPublicKey("");
       setNewPlanCode("");
+      setNewYearlyPlanCode("");
       setPaystackSaveMessage({
         type: "success",
         text: data.durable
@@ -443,6 +452,7 @@ export default function AdminPage() {
           {tab === "users" && <UsersTab get={adminGet} />}
           {tab === "traffic" && <TrafficTab get={adminGet} />}
           {tab === "payments" && <PaymentsTab get={adminGet} />}
+          {tab === "creators" && <CreatorsTab get={adminGet} post={adminPost} />}
           {tab === "server" && <ServerTab get={adminGet} />}
         </main>
       )}
@@ -595,6 +605,9 @@ export default function AdminPage() {
             <p>
               Plan code: <span className="font-mono text-[var(--text-main)]">{paystackPlanCode || "not set"}</span>
             </p>
+            <p>
+              Yearly plan code: <span className="font-mono text-[var(--text-main)]">{paystackYearlyPlanCode || "not set — the Plans page offers monthly only"}</span>
+            </p>
           </div>
 
           <form onSubmit={handleSavePaystackConfig} className="space-y-3">
@@ -629,10 +642,17 @@ export default function AdminPage() {
               placeholder="Plan code (PLN_...) — Paystack owns the amount"
               className="w-full bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-lg px-3 py-2 text-sm font-mono text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] transition"
             />
+            <input
+              type="text"
+              value={newYearlyPlanCode}
+              onChange={(e) => setNewYearlyPlanCode(e.target.value)}
+              placeholder="Yearly plan code (PLN_...) — interval Annually, 20% below 12 months"
+              className="w-full bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-lg px-3 py-2 text-sm font-mono text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] transition"
+            />
 
             <button
               type="submit"
-              disabled={savingPaystack || (!newSecretKey.trim() && !newPublicKey.trim() && !newPlanCode.trim())}
+              disabled={savingPaystack || (!newSecretKey.trim() && !newPublicKey.trim() && !newPlanCode.trim() && !newYearlyPlanCode.trim())}
               className="flex items-center justify-center gap-1.5 bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 rounded-lg transition"
             >
               {savingPaystack ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}

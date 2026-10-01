@@ -126,13 +126,15 @@ export function paymentPlanCode(data: any): string | null {
 }
 
 /**
- * Whether a successful payment pays for PRO. It must be for the PRO plan as
- * set now, or for the plan this account already subscribed on, so renewals
- * still count after the plan is changed. Paystack charges a plan's own
- * amount whatever the checkout asked for, so the plan is what fixes the
- * price: a payment for no plan (any amount someone chose) never counts.
+ * Whether a successful payment pays for PRO. It must be for a PRO plan as
+ * set now (monthly, or yearly when there is one), or for the plan this
+ * account already subscribed on, so renewals still count after the plan is
+ * changed. Paystack charges a plan's own amount whatever the checkout asked
+ * for, so the plan is what fixes the price: a payment for no plan (any
+ * amount someone chose) never counts.
  */
-export function paysForPro(planCode: string | null, configuredPlan: string | null, accountPlan: string | null): boolean {
+export function paysForPro(planCode: string | null, configured: string | null | (string | null)[], accountPlan: string | null): boolean {
   if (!planCode) return false;
-  return planCode === configuredPlan || (!!accountPlan && planCode === accountPlan);
+  const plans = Array.isArray(configured) ? configured : [configured];
+  return plans.some((p) => !!p && p === planCode) || (!!accountPlan && planCode === accountPlan);
 }

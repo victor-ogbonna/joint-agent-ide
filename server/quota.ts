@@ -4,6 +4,7 @@ import { adminAuth, adminDb, isFirebaseAdminConfigured } from "./firebaseAdmin";
 import { loadAdminConfig } from "./adminConfig";
 import { accessLevelFor, bypassesLaunchLock, LAUNCH_LOCKED_CODE, LAUNCH_LOCKED_MESSAGE } from "./access";
 import { hasPaidPro, standing, type BillingState } from "./billing";
+import { isOnTrial } from "./referrals";
 import { noteActive } from "./stats";
 
 /** Sentinel subscription status for accounts whose usage is never counted. */
@@ -100,6 +101,19 @@ export interface UserQuotaDoc {
   /** UTC date (YYYY-MM-DD) compileDayCount belongs to. */
   compileDay: string | null;
   compileDayCount: number;
+  /** The creator code this account came by (server/creators.ts), once taken. */
+  referralCode: string | null;
+  /** The free PRO trial a code gave (ms since epoch). */
+  trialStartedAt: number | null;
+  trialEndsAt: number | null;
+  /** The Paystack reference of the discounted first month, once paid. */
+  firstMonthReference: string | null;
+  /** The paid plan's interval ("monthly", "annually"), from the last payment. */
+  planInterval: string | null;
+  /** When the paid period began: a yearly plan's allowance refills monthly from here. */
+  cycleStartedAt: number | null;
+  /** On a yearly plan, which of its months cycleTokensUsed counts. */
+  cycleMonth: number | null;
 }
 
 const DEFAULT_USER_DOC: UserQuotaDoc = {
@@ -121,9 +135,16 @@ const DEFAULT_USER_DOC: UserQuotaDoc = {
   compileWindowCount: 0,
   compileDay: null,
   compileDayCount: 0,
+  referralCode: null,
+  trialStartedAt: null,
+  trialEndsAt: null,
+  firstMonthReference: null,
+  planInterval: null,
+  cycleStartedAt: null,
+  cycleMonth: null,
 };
 
-function readUserDoc(data: any): UserQuotaDoc {
+export function readUserDoc(data: any): UserQuotaDoc {
   data = data || {};
   const num = (v: any) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
   const time = (v: any) => (typeof v === "number" && Number.isFinite(v) ? v : null);
@@ -146,6 +167,13 @@ function readUserDoc(data: any): UserQuotaDoc {
     compileWindowCount: num(data.compileWindowCount),
     compileDay: typeof data.compileDay === "string" ? data.compileDay : null,
     compileDayCount: num(data.compileDayCount),
+    referralCode: typeof data.referralCode === "string" ? data.referralCode : null,
+    trialStartedAt: time(data.trialStartedAt),
+    trialEndsAt: time(data.trialEndsAt),
+    firstMonthReference: typeof data.firstMonthReference === "string" ? data.firstMonthReference : null,
+    planInterval: typeof data.planInterval === "string" ? data.planInterval : null,
+    cycleStartedAt: time(data.cycleStartedAt),
+    cycleMonth: typeof data.cycleMonth === "number" && Number.isFinite(data.cycleMonth) ? data.cycleMonth : null,
   };
 }
 
@@ -215,6 +243,25 @@ export async function requireFirebaseAuth(req: Request, res: Response, next: Nex
   next();
 }
 
+/**
+ * Sign-in only, without the pre-launch lock: for the pages around the product
+ * rather than the product itself (a creator's own page), which people need
+ * before launch too.
+ */
+export async function requireSignedIn(req: Request, res: Response, next: NextFunction) {
+  if (!isFirebaseAdminConfigured()) {
+    return res.status(503).json({ error: "Sign-in is not configured on the server yet.", code: "AUTH_NOT_CONFIGURED" });
+  }
+  const who = await verifyBearerToken(req);
+  if (!who) {
+    return res.status(401).json({ error: "Sign in required.", code: "AUTH_REQUIRED" });
+  }
+  req.uid = who.uid;
+  req.email = who.email;
+  req.emailVerified = who.emailVerified;
+  next();
+}
+
 /** The subscription side of an account, for server/billing.ts. */
 export function billingOf(doc: UserQuotaDoc): BillingState {
   const end = doc.currentPeriodEnd && typeof (doc.currentPeriodEnd as any).toMillis === "function"
@@ -231,11 +278,13 @@ export function subscriptionStanding(doc: UserQuotaDoc, now = Date.now()) {
 /**
  * Where an account stands: the owner, paid or granted PRO, or free. Paid PRO
  * includes a cancelled subscription until its paid period ends, and a failed
- * renewal until its grace period ends (server/billing.ts).
+ * renewal until its grace period ends (server/billing.ts). A creator code's
+ * trial is PRO until it ends, metered like granted PRO: the 5-hour window,
+ * no monthly cap.
  */
 export function tierOf(doc: UserQuotaDoc, level: string, now = Date.now()): Tier {
   if (level === "unmetered") return "unmetered";
-  if (hasPaidPro(billingOf(doc), now) || level === "pro") return "pro";
+  if (hasPaidPro(billingOf(doc), now) || level === "pro" || isOnTrial(doc, now)) return "pro";
   return "free";
 }
 
@@ -265,6 +314,37 @@ function latest(blockers: Array<{ reason: PauseReason; at: number | null }>) {
 }
 
 export type PauseReason = "window" | "day" | "cycle";
+
+function addMonths(ms: number, k: number): number {
+  const d = new Date(ms);
+  d.setUTCMonth(d.getUTCMonth() + k);
+  return d.getTime();
+}
+
+/**
+ * On a yearly plan, the month of it that `now` falls in, and when the next
+ * begins: the monthly allowance (PAID_TOKEN_CAP) refills every month of the
+ * year, as it would on the monthly plan. Null on a monthly plan, whose
+ * allowance refills with each payment.
+ */
+export function allowanceMonth(doc: Pick<UserQuotaDoc, "planInterval" | "cycleStartedAt">, now: number): { key: number; resetAt: number } | null {
+  if (String(doc.planInterval || "").toLowerCase() !== "annually" || doc.cycleStartedAt === null) return null;
+  const start = doc.cycleStartedAt;
+  if (now < start) return { key: 0, resetAt: addMonths(start, 1) };
+  const s = new Date(start);
+  const n = new Date(now);
+  let k = (n.getUTCFullYear() - s.getUTCFullYear()) * 12 + (n.getUTCMonth() - s.getUTCMonth());
+  while (k > 0 && addMonths(start, k) > now) k--;
+  while (addMonths(start, k + 1) <= now) k++;
+  return { key: k, resetAt: addMonths(start, k + 1) };
+}
+
+/** What counts against the paid allowance now: nothing yet in a new month of a yearly plan. */
+function cycleUsedNow(doc: UserQuotaDoc, now: number): number {
+  const month = allowanceMonth(doc, now);
+  if (month && doc.cycleMonth !== month.key) return 0;
+  return doc.cycleTokensUsed;
+}
 
 export interface Allowance {
   blocked: boolean;
@@ -306,15 +386,17 @@ export function allowanceFor(doc: UserQuotaDoc, tier: Tier, now = Date.now()): A
     dayCap = FREE_DAILY_TOKENS;
     if (dayUsed >= dayCap) blockers.push({ reason: "day", at: nextUtcMidnight(now) });
   } else if (hasPaidPro(billingOf(doc), now)) {
-    cycleUsed = doc.cycleTokensUsed;
+    cycleUsed = cycleUsedNow(doc, now);
     cycleCap = PAID_TOKEN_CAP;
     if (cycleUsed >= cycleCap) {
+      const month = allowanceMonth(doc, now);
       const end = doc.currentPeriodEnd && typeof (doc.currentPeriodEnd as any).toMillis === "function"
         ? (doc.currentPeriodEnd as any).toMillis() as number
         : null;
-      // A billing date already passed means the renewal has not landed yet:
-      // when it does is not something the server can promise.
-      blockers.push({ reason: "cycle", at: end !== null && end > now ? end : null });
+      // A yearly plan refills at its next month. Otherwise a billing date
+      // already passed means the renewal has not landed yet: when it does is
+      // not something the server can promise.
+      blockers.push({ reason: "cycle", at: month ? month.resetAt : end !== null && end > now ? end : null });
     }
   }
 
@@ -350,8 +432,8 @@ export function formatWait(resetAt: number | null, now = Date.now()): string {
 function pauseMessage(tier: Tier, a: Allowance, now = Date.now()): string {
   if (a.reason === "cycle") {
     return a.resetAt === null
-      ? "You've used this cycle's AI tokens. They refresh on your next billing date."
-      : `You've used this cycle's AI tokens. They refresh in ${formatWait(a.resetAt, now)}, on your next billing date.`;
+      ? "You've used this month's AI tokens. They refresh on your next billing date."
+      : `You've used this month's AI tokens. They refresh in ${formatWait(a.resetAt, now)}.`;
   }
   const when = formatWait(a.resetAt, now);
   if (tier === "free") {
@@ -476,7 +558,9 @@ export function tokenUsagePatch(doc: UserQuotaDoc, quota: Pick<QuotaContext, "ti
     patch.dayTokens = (doc.tokenDay === today ? doc.dayTokens : 0) + tokens;
     patch.lifetimeFreeTokensUsed = doc.lifetimeFreeTokensUsed + tokens;
   } else if (quota.subscriptionStatus === "active" || hasPaidPro(billingOf(doc), now)) {
-    patch.cycleTokensUsed = doc.cycleTokensUsed + tokens;
+    const month = allowanceMonth(doc, now);
+    patch.cycleTokensUsed = cycleUsedNow(doc, now) + tokens;
+    if (month) patch.cycleMonth = month.key;
   }
   return patch;
 }

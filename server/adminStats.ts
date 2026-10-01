@@ -72,7 +72,7 @@ async function authUsers(fresh: boolean): Promise<AuthUser[]> {
 async function userDocs(fresh: boolean): Promise<Map<string, UserDocSummary>> {
   return cached("userDocs", 60_000, fresh, async () => {
     const snap = await adminDb.collection("users")
-      .select("subscriptionStatus", "currentPeriodEnd", "lastPaymentAt", "pastDueAt", "lastActiveAt", "compilesTotal", "aiMessagesTotal")
+      .select("subscriptionStatus", "currentPeriodEnd", "lastPaymentAt", "pastDueAt", "lastActiveAt", "compilesTotal", "aiMessagesTotal", "trialEndsAt", "referralCode")
       .get();
     const map = new Map<string, UserDocSummary>();
     for (const d of snap.docs) {
@@ -85,6 +85,8 @@ async function userDocs(fresh: boolean): Promise<Map<string, UserDocSummary>> {
         lastActiveAt: ms(x.lastActiveAt),
         compilesTotal: typeof x.compilesTotal === "number" ? x.compilesTotal : 0,
         aiMessagesTotal: typeof x.aiMessagesTotal === "number" ? x.aiMessagesTotal : 0,
+        trialEndsAt: ms(x.trialEndsAt),
+        referralCode: typeof x.referralCode === "string" ? x.referralCode : null,
       });
     }
     return map;

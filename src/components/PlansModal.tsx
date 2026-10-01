@@ -1,9 +1,21 @@
-import React from "react";
-import { X, Check, Minus, Rocket, Loader2 } from "lucide-react";
+import React, { useState } from "react";
+import { X, Check, Minus, Rocket, Loader2, Gift, Clock } from "lucide-react";
 import {
   WINDOW_HOURS, FREE_WINDOW_TOKENS, PRO_WINDOW_TOKENS, FREE_MAX_REPLY_TOKENS, PRO_MAX_REPLY_TOKENS,
-  FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES, FREE_PROJECT_LIMIT, PRO_PRICE,
+  FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES, FREE_PROJECT_LIMIT, PRO_PRICE, formatDay, formatMoney,
 } from "../lib/plans";
+
+/** The first month at a discount, for an account that came by a creator code (server/paystack.ts). */
+export interface FirstMonthOffer {
+  /** In the currency's smallest unit. */
+  amount: number;
+  fullAmount: number;
+  currency: string;
+  discountPct: number;
+  until: number;
+  publicKey: string;
+  kind: string;
+}
 
 /**
  * Free vs PRO, side by side. Every row is something the server actually
@@ -37,11 +49,56 @@ function Cell({ value, pro }: { value: boolean | string; pro: boolean }) {
     : <Minus size={22} strokeWidth={2.4} className="text-[var(--text-subtle)]" aria-label="Not included" />;
 }
 
-export default function PlansModal({ onClose, onUpgrade, upgrading }: {
+export interface PlanPriceView {
+  /** In the currency's smallest unit. */
+  amount: number;
+  currency: string;
+}
+
+export type BillingPeriod = "monthly" | "yearly";
+
+export default function PlansModal({ onClose, onUpgrade, upgrading, prices = null, trialEndsAt = null, offerOpensAt = null, offerExpected = false, offer = null, offerLoading = false, onUpgradeOffer, canUseCode = false, onApplyCode }: {
   onClose: () => void;
-  onUpgrade: () => void;
+  onUpgrade: (period: BillingPeriod) => void;
   upgrading: boolean;
+  /** PRO's prices from Paystack; yearly is null when there's no yearly plan. */
+  prices?: { monthly: PlanPriceView | null; yearly: PlanPriceView | null } | null;
+  /** When the account's free PRO trial ends, while it lasts. */
+  trialEndsAt?: number | null;
+  /** When the first month's discount opens (the trial's end), while it hasn't. */
+  offerOpensAt?: number | null;
+  /** The account has the first-month discount now (its price may still be loading). */
+  offerExpected?: boolean;
+  offer?: FirstMonthOffer | null;
+  offerLoading?: boolean;
+  onUpgradeOffer?: () => void;
+  /** Whether the account can still take a creator code. */
+  canUseCode?: boolean;
+  onApplyCode?: (code: string) => Promise<{ ok: boolean; error?: string }>;
 }) {
+  const [period, setPeriod] = useState<BillingPeriod>("monthly");
+  const monthly = prices?.monthly ?? null;
+  const yearly = prices?.yearly ?? null;
+  // Against twelve months at the monthly price, when both are in one currency.
+  const savePct = monthly && yearly && monthly.currency === yearly.currency && monthly.amount > 0
+    ? Math.round(100 - (yearly.amount / (monthly.amount * 12)) * 100)
+    : null;
+  const monthlyLabel = monthly ? `${formatMoney(monthly.amount, monthly.currency)}/month` : PRO_PRICE;
+  const [codeOpen, setCodeOpen] = useState(false);
+  const [code, setCode] = useState("");
+  const [applying, setApplying] = useState(false);
+  const [codeError, setCodeError] = useState<string | null>(null);
+  const applyCode = async () => {
+    if (!onApplyCode || !code.trim() || applying) return;
+    setApplying(true);
+    setCodeError(null);
+    try {
+      const result = await onApplyCode(code.trim());
+      if (!result.ok) setCodeError(result.error || "That code couldn't be used.");
+    } finally {
+      setApplying(false);
+    }
+  };
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-black/70 backdrop-blur-sm" onClick={onClose}>
       <div className="flex min-h-full items-end sm:items-center justify-center sm:p-4">
@@ -61,8 +118,13 @@ export default function PlansModal({ onClose, onUpgrade, upgrading }: {
                 <Rocket size={12} className="rocket-blaze" /> PRO
               </div>
               <h2 id="plans-title" className="font-display font-bold text-lg text-[var(--text-main)] leading-snug">
-                Build more with the full agent
+                {trialEndsAt ? "Keep the full agent after your trial" : "Build more with the full agent"}
               </h2>
+              {trialEndsAt && (
+                <p className="mt-1.5 inline-flex items-center gap-1.5 rounded-full bg-[var(--accent-primary-soft)] px-2.5 py-1 text-[11px] font-semibold text-[var(--accent-primary)]">
+                  <Clock size={12} aria-hidden="true" /> Your free PRO trial ends {formatDay(trialEndsAt)}
+                </p>
+              )}
               <p className="text-xs text-[var(--text-muted)] mt-1">
                 10× more AI every {WINDOW_HOURS} hours, full-size replies, auto-debug, Plan Mode, and unlimited compiles and projects.
               </p>
@@ -96,16 +158,130 @@ export default function PlansModal({ onClose, onUpgrade, upgrading }: {
             {FREE_DAILY_COMPILES} successful compiles a day. Usage limits apply to both plans.
           </p>
 
-          <button
-            onClick={onUpgrade}
-            disabled={upgrading}
-            className="mt-5 w-full flex items-center justify-center gap-2 rounded-full py-3.5 text-[15px] font-bold text-white shadow-lg btn-lift disabled:opacity-60"
-            style={{ background: "var(--gradient-hero)", boxShadow: "var(--shadow-glow)" }}
-          >
-            {upgrading ? <Loader2 size={17} className="animate-spin" /> : <Rocket size={17} />}
-            {upgrading ? "Opening checkout…" : `Upgrade to PRO — ${PRO_PRICE}`}
-          </button>
-          <p className="mt-3 text-center text-[11px] text-[var(--text-muted)]">Renews monthly. Cancel anytime.</p>
+          {trialEndsAt ? (
+            // No checkout during the trial: the first month's discount opens when it ends.
+            <p className="mt-5 rounded-xl bg-[var(--bg-panel)] border border-[var(--border-main)] px-4 py-3 text-center text-[12px] text-[var(--text-muted)]">
+              {offerOpensAt
+                ? <>When your trial ends on {formatDay(offerOpensAt)}, your first month of PRO is 20% off. You'll see the offer here then.</>
+                : <>Enjoy PRO until {formatDay(trialEndsAt)}.</>}
+            </p>
+          ) : (
+            <>
+              {yearly && (
+                <div className="mt-5 grid grid-cols-2 rounded-full border border-[var(--border-main)] bg-[var(--bg-panel)] p-1" role="radiogroup" aria-label="Billing">
+                  {(["monthly", "yearly"] as const).map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      role="radio"
+                      aria-checked={period === p}
+                      onClick={() => setPeriod(p)}
+                      className={`min-h-[40px] rounded-full text-[13px] font-semibold transition ${period === p ? "text-white shadow" : "text-[var(--text-muted)] hover:text-[var(--text-main)]"}`}
+                      style={period === p ? { background: "var(--gradient-hero)" } : undefined}
+                    >
+                      {p === "monthly" ? "Monthly" : <>Yearly{savePct !== null && savePct > 0 ? <span className="ml-1 text-[11px] font-bold">· save {savePct}%</span> : null}</>}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {period === "yearly" && yearly ? (
+                <>
+                  <button
+                    onClick={() => onUpgrade("yearly")}
+                    disabled={upgrading}
+                    className="mt-4 w-full flex items-center justify-center gap-2 rounded-full py-3.5 text-[15px] font-bold text-white shadow-lg btn-lift disabled:opacity-60"
+                    style={{ background: "var(--gradient-hero)", boxShadow: "var(--shadow-glow)" }}
+                  >
+                    {upgrading ? <Loader2 size={17} className="animate-spin" /> : <Rocket size={17} />}
+                    {upgrading ? "Opening checkout…" : `Upgrade to PRO — ${formatMoney(yearly.amount, yearly.currency)}/year`}
+                  </button>
+                  <p className="mt-3 text-center text-[11px] text-[var(--text-muted)]">
+                    {savePct !== null && savePct > 0 ? `${savePct}% less than paying monthly. ` : ""}Renews yearly. Cancel anytime.
+                  </p>
+                </>
+              ) : offerExpected && onUpgradeOffer ? (
+                offer ? (
+                  <>
+                    <button
+                      onClick={onUpgradeOffer}
+                      disabled={upgrading}
+                      className={`${yearly ? "mt-4" : "mt-5"} w-full flex items-center justify-center gap-2 rounded-full py-3.5 text-[15px] font-bold text-white shadow-lg btn-lift disabled:opacity-60`}
+                      style={{ background: "var(--gradient-hero)", boxShadow: "var(--shadow-glow)" }}
+                    >
+                      {upgrading ? <Loader2 size={17} className="animate-spin" /> : <Gift size={17} />}
+                      {upgrading ? "Opening checkout…" : `Get PRO — first month ${formatMoney(offer.amount, offer.currency)}`}
+                    </button>
+                    <p className="mt-3 text-center text-[11px] text-[var(--text-muted)]">
+                      {offer.discountPct}% off your first month, then {formatMoney(offer.fullAmount, offer.currency)}/month. Cancel anytime.
+                    </p>
+                    <p className="mt-1 text-center text-[10px] text-[var(--text-subtle)]">Offer ends {formatDay(offer.until)}</p>
+                  </>
+                ) : offerLoading ? (
+                  <p className="mt-5 flex items-center justify-center gap-2 text-[12px] text-[var(--text-muted)]">
+                    <Loader2 size={14} className="animate-spin" /> Loading your offer…
+                  </p>
+                ) : (
+                  <p className="mt-5 text-center text-[12px] text-[var(--text-muted)]">
+                    Your first-month offer couldn't load just now. Close this and open it again in a moment.
+                  </p>
+                )
+              ) : (
+                <>
+                  <button
+                    onClick={() => onUpgrade("monthly")}
+                    disabled={upgrading}
+                    className={`${yearly ? "mt-4" : "mt-5"} w-full flex items-center justify-center gap-2 rounded-full py-3.5 text-[15px] font-bold text-white shadow-lg btn-lift disabled:opacity-60`}
+                    style={{ background: "var(--gradient-hero)", boxShadow: "var(--shadow-glow)" }}
+                  >
+                    {upgrading ? <Loader2 size={17} className="animate-spin" /> : <Rocket size={17} />}
+                    {upgrading ? "Opening checkout…" : `Upgrade to PRO — ${monthlyLabel}`}
+                  </button>
+                  <p className="mt-3 text-center text-[11px] text-[var(--text-muted)]">Renews monthly. Cancel anytime.</p>
+                </>
+              )}
+            </>
+          )}
+
+          {canUseCode && onApplyCode && (
+            <div className="mt-4 border-t border-[var(--border-main)] pt-3">
+              {!codeOpen ? (
+                <button
+                  type="button"
+                  onClick={() => setCodeOpen(true)}
+                  className="mx-auto flex min-h-[40px] items-center gap-1.5 text-[12px] font-medium text-[var(--text-muted)] hover:text-[var(--text-main)]"
+                >
+                  <Gift size={13} aria-hidden="true" /> Have a creator code?
+                </button>
+              ) : (
+                <form onSubmit={(e) => { e.preventDefault(); void applyCode(); }}>
+                  <label htmlFor="creator-code" className="text-[12px] font-medium text-[var(--text-main)]">Creator code</label>
+                  <p className="text-[11px] text-[var(--text-muted)]">7 days of PRO free, then 20% off your first month.</p>
+                  <div className="mt-2 flex gap-2">
+                    <input
+                      id="creator-code"
+                      value={code}
+                      onChange={(e) => { setCode(e.target.value.toUpperCase()); setCodeError(null); }}
+                      maxLength={24}
+                      autoCapitalize="characters"
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder="e.g. TOBI20"
+                      className="min-w-0 flex-1 rounded-lg border border-[var(--border-main)] bg-[var(--bg-surface)] px-3 py-2 text-[14px] font-semibold tracking-wide text-[var(--text-main)] placeholder:font-normal placeholder:text-[var(--text-subtle)] focus:border-[var(--accent-primary)] focus:outline-none"
+                    />
+                    <button
+                      type="submit"
+                      disabled={applying || !code.trim()}
+                      className="flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[var(--border-main)] px-3 text-[13px] font-semibold text-[var(--text-main)] hover:bg-[var(--bg-hover)] disabled:opacity-50"
+                    >
+                      {applying ? <Loader2 size={14} className="animate-spin" /> : null} Apply
+                    </button>
+                  </div>
+                  {codeError && <p role="alert" className="mt-2 text-[11px] text-red-500">{codeError}</p>}
+                </form>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

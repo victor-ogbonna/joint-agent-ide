@@ -25,6 +25,8 @@ import { registerShareRoutes } from './server/share';
 import { isFirebaseAdminConfigured } from './server/firebaseAdmin';
 import { registerWaitlistRoutes } from './server/waitlist';
 import { registerFeedbackRoutes } from './server/feedback';
+import { registerCreatorRoutes } from './server/creators';
+import { canUseCode, firstMonthOfferUntil, firstMonthOfferOpensAt } from './server/referrals';
 import { registerGithubRoutes } from './server/github';
 import { registerFirebaseAuthProxy } from './server/firebaseAuthProxy';
 import { detectLibDeps, isSafeLibDep } from './server/libraryDeps';
@@ -379,6 +381,7 @@ app.post("/api/admin/access-lists", requireAdmin, async (req, res) => {
 registerPaystackRoutes(app, requireAdmin);
 registerWaitlistRoutes(app, requireAdmin);
 registerFeedbackRoutes(app, requireFirebaseAuth, requireAdmin);
+registerCreatorRoutes(app, requireAdmin);
 registerGithubRoutes(app, requireFirebaseAuth);
 registerLibraryRoutes(app, requireFirebaseAuth);
 // Read-only links to a project's code and circuit, secrets hidden.
@@ -400,7 +403,8 @@ registerAdminStatsRoutes(app, requireAdmin, {
 // countdown (hence requireFirebaseAuth, not the quota-enforcing variant).
 app.get("/api/quota/status", requireFirebaseAuth, async (req, res) => {
   const doc = await getOrCreateUserDoc(req.uid!);
-  const tier = tierOf(doc, accessLevelFor(req.email ?? null, req.emailVerified === true));
+  const level = accessLevelFor(req.email ?? null, req.emailVerified === true);
+  const tier = tierOf(doc, level);
   const a = allowanceFor(doc, tier);
   res.json({
     subscriptionStatus: doc.subscriptionStatus,
@@ -419,6 +423,12 @@ app.get("/api/quota/status", requireFirebaseAuth, async (req, res) => {
     reason: a.reason,
     resetAt: a.resetAt,
     compilesLeft: tier === "free" ? compileAllowance(doc).left : null,
+    // A creator code's trial and first-month offer (server/referrals.ts).
+    referralCode: doc.referralCode,
+    trialEndsAt: doc.trialEndsAt,
+    canUseCode: canUseCode(doc, level),
+    offerUntil: firstMonthOfferUntil(doc, Date.now()),
+    offerOpensAt: firstMonthOfferOpensAt(doc, Date.now()),
   });
 });
 

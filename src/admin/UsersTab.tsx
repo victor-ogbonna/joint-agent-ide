@@ -5,18 +5,20 @@ import { useAdminData, type AdminGet, type AdminUser, type UsersResponse } from 
 import { full, date, ago } from "./format";
 import { providerName } from "./OverviewTab";
 
-type Filter = "all" | "free" | "pro" | "granted" | "owner" | "overLimit" | "pastDue" | "early";
+type Filter = "all" | "free" | "pro" | "trial" | "granted" | "owner" | "overLimit" | "pastDue" | "early" | "creator";
 type Sort = "newest" | "active" | "compiles" | "projects";
 
 const FILTERS: { id: Filter; label: string; test: (u: AdminUser) => boolean }[] = [
   { id: "all", label: "All", test: () => true },
   { id: "free", label: "Free", test: (u) => u.plan === "free" },
   { id: "pro", label: "PRO", test: (u) => u.plan === "pro" },
+  { id: "trial", label: "PRO trial", test: (u) => u.plan === "trial" },
   { id: "granted", label: "Granted PRO", test: (u) => u.plan === "granted" },
   { id: "owner", label: "Owner", test: (u) => u.plan === "owner" },
   { id: "overLimit", label: "Over 5 projects", test: (u) => u.overLimit },
   { id: "pastDue", label: "Payment failed", test: (u) => u.subscriptionStatus === "past_due" },
   { id: "early", label: "Early access", test: (u) => u.early },
+  { id: "creator", label: "Came by a creator code", test: (u) => !!u.referralCode },
 ];
 
 const SORTS: { id: Sort; label: string; by: (a: AdminUser, b: AdminUser) => number }[] = [
@@ -33,10 +35,18 @@ export function PlanBadge({ user }: { user: AdminUser }) {
   if (user.plan === "owner") return <span className={`${base} bg-[var(--bg-hover)] text-[var(--text-main)]`}>Owner</span>;
   if (user.plan === "granted") return <span className={`${base} bg-orange-500/15 text-orange-400`}>Granted PRO</span>;
   if (user.plan === "pro") return <span className={`${base} bg-orange-500/15 text-orange-400`}>PRO</span>;
+  if (user.plan === "trial") return <span className={`${base} bg-orange-500/15 text-orange-400`}>PRO trial</span>;
   return <span className={`${base} bg-[var(--bg-hover)] text-[var(--text-muted)]`}>Free</span>;
 }
 
 function planNote(u: AdminUser): string | null {
+  const via = u.referralCode ? ` · via ${u.referralCode}` : "";
+  const note = basePlanNote(u);
+  return note ? `${note}${via}` : u.referralCode ? `via ${u.referralCode}` : null;
+}
+
+function basePlanNote(u: AdminUser): string | null {
+  if (u.plan === "trial" && u.trialEndsAt) return `trial ends ${date(u.trialEndsAt)}`;
   if (u.plan === "pro" && u.renewsAt) return `renews ${date(u.renewsAt)}`;
   if (u.plan === "pro" && u.proUntil) return `ends ${date(u.proUntil)}`;
   if (u.subscriptionStatus === "past_due") return "last payment failed";

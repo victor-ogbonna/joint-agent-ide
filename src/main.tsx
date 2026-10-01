@@ -6,13 +6,17 @@ import HomePage from './HomePage.tsx';
 import PrivacyPage from './PrivacyPage.tsx';
 import ThanksPage from './ThanksPage.tsx';
 import SharePage from './SharePage.tsx';
+import CreatorPage from './CreatorPage.tsx';
 import { AuthProvider, useAuth } from './contexts/AuthContext.tsx';
 import './index.css';
 import { startInstallSupport } from './lib/installApp.ts';
+import { captureRefFromUrl } from './lib/referral.ts';
 
 // Caught before anything renders: Chrome's install offer can arrive while the
 // launch screen is still up.
 startInstallSupport();
+// A creator's link: its code waits here until the visitor has signed in.
+captureRefFromUrl();
 
 // No router library yet. Every extra route here bypasses Firebase auth on
 // purpose: /admin has its own password gate, /privacy has to be publicly
@@ -26,6 +30,9 @@ const isWaitlistRoute = currentPath === '/waitlist';
 // Where a successful waitlist signup lands. Public and auth-free like
 // /waitlist — the people seeing it do not have accounts yet.
 const isThanksRoute = currentPath === '/thanks';
+// A creator's own page (server/creators.ts): signs in on its own, and is
+// never held behind the pre-launch lock, since creators promote before launch.
+const isCreatorRoute = currentPath === '/creator';
 // A shared project's read-only page (server/share.ts). Public like /privacy:
 // people opening a link someone sent them mostly have no account.
 const shareId = /^\/share\/([A-Za-z0-9_-]{22})$/.exec(currentPath)?.[1] ?? null;
@@ -142,6 +149,10 @@ createRoot(document.getElementById('root')!).render(
       <PrivacyPage />
     ) : isThanksRoute ? (
       <ThanksPage />
+    ) : isCreatorRoute ? (
+      <AuthProvider>
+        <CreatorPage />
+      </AuthProvider>
     ) : isWaitlistRoute ? (
       // Same marketing page, product doors removed. Rendered outside
       // AuthProvider deliberately — nothing on it touches auth.
