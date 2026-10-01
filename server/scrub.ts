@@ -29,7 +29,9 @@ export function scrubToolchainNames(text: string): string {
     // Text only — the server locates artifacts by real filesystem paths.
     .replace(/\.pio\b/g, ".jagent")
     .replace(/\bPlatformIO\b/gi, "Joint-Agent")
-    // Bare "pio" only as a standalone word, so "compio" or a path fragment is
-    // left alone.
-    .replace(/(^|[\s`'"(\[])pio(?=[\s`'")\].,:]|$)/g, "$1jagent");
+    // The server's own build folder name (/tmp/pio_sketch_XXXXXX).
+    .replace(/\bpio_sketch_/g, "sketch_")
+    // Bare "pio" only as a standalone word or the last part of a path (the
+    // "Command failed: …/bin/pio run" line), so "compio" is left alone.
+    .replace(/(^|[\s`'"(\[\/])pio(?=[\s`'")\].,:]|$)/g, "$1jagent");
 }

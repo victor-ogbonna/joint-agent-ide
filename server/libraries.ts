@@ -10,6 +10,7 @@ import {
 } from "./libraryManifest";
 import { isBuiltinHeader, knownLibraryHeader } from "./libraryDeps";
 import { count as countStat } from "./stats";
+import { scrubToolchainNames } from "./scrub";
 
 /**
  * Libraries a user adds themselves, on top of the ones found automatically
@@ -326,7 +327,8 @@ export async function searchCatalogue(query: string, page = 1): Promise<{ items:
         owner: String(it.owner?.username ?? ""),
         name: String(it.name ?? ""),
         version: String(it.version?.name ?? ""),
-        description: String(it.description ?? "").replace(/\s+/g, " ").trim().slice(0, 280),
+        // A maker's own description can name the build system ("for PlatformIO").
+        description: scrubToolchainNames(String(it.description ?? "").replace(/\s+/g, " ").trim()).slice(0, 280),
         updated: typeof it.version?.released_at === "string" ? it.version.released_at : null,
       }))
       .filter((it: CatalogueItem) => OWNER_NAME.test(it.owner) && PACKAGE_NAME.test(it.name));

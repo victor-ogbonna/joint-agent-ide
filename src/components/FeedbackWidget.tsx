@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { MessageSquarePlus, X, Bug, Lightbulb, MessageCircle, Loader2, Check, Plus, Paperclip } from "lucide-react";
 import { auth } from "../lib/firebase";
 
@@ -69,9 +69,16 @@ interface FeedbackWidgetProps {
    *  on top of the files control). */
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /**
+   * The trigger only: its panel is the "headless" one rendered elsewhere. On
+   * phones the Workspace row and the profile menu both open that one panel;
+   * each used to open its own, and both could be open at once, one on top of
+   * the other.
+   */
+  panelElsewhere?: boolean;
 }
 
-export default function FeedbackWidget({ boardId, mcu, variant = "fab", open: openProp, onOpenChange }: FeedbackWidgetProps) {
+export default function FeedbackWidget({ boardId, mcu, variant = "fab", open: openProp, onOpenChange, panelElsewhere = false }: FeedbackWidgetProps) {
   const [openSelf, setOpenSelf] = useState(false);
   const controlled = openProp !== undefined;
   const open = controlled ? openProp : openSelf;
@@ -91,6 +98,11 @@ export default function FeedbackWidget({ boardId, mcu, variant = "fab", open: op
     // so a network blip doesn't make them retype it.
     if (sent) { setSent(false); setMessage(""); setError(""); setFiles([]); }
   };
+  // Closed by a trigger outside this panel: after a send, the next open starts
+  // with a fresh form, the same as closing it here.
+  useEffect(() => {
+    if (!open && sent) { setSent(false); setMessage(""); setError(""); setFiles([]); }
+  }, [open, sent]);
 
   const addFiles = async (picked: FileList | null) => {
     if (!picked || picked.length === 0) return;
@@ -144,8 +156,8 @@ export default function FeedbackWidget({ boardId, mcu, variant = "fab", open: op
 
   return (
     <>
-      {open && (
-        <div className={`fixed ${variant === "sidebar" ? "bottom-24" : "bottom-16"} left-4 z-50 w-[19rem] max-w-[calc(100vw-2rem)] bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl shadow-2xl overflow-hidden`}>
+      {open && !panelElsewhere && (
+        <div className={`fixed ${variant === "fab" ? "bottom-16" : "bottom-24"} left-4 z-50 w-[19rem] max-w-[calc(100vw-2rem)] bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl shadow-2xl overflow-hidden`}>
           <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-[var(--border-main)]">
             <span className="text-xs font-semibold text-[var(--text-main)]">Send feedback</span>
             <button type="button" onClick={close} title="Close" className="text-[var(--text-muted)] hover:text-[var(--text-main)]">

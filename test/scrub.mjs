@@ -34,6 +34,13 @@ Please run \`pio run -t upload\` or open PlatformIO Home.`,
   "upload failure": `Uploading .pio/build/megaatmega2560/firmware.hex
 avrdude: stk500v2_ReceiveMessage(): timeout
 *** [upload] Error 1`,
+
+  // The error the compile route sends back when a build fails.
+  "failed compile message": `Command failed: /app/.platformio/penv/bin/pio run
+src/main.cpp:2:36: error: expected ';' before '}' token
+*** [.pio/build/uno/src/main.cpp.o] Error 1
+In file included from /tmp/pio_sketch_AbC123/src/main.cpp:1:
+/bin/sh: 1: /app/.platformio/penv/bin/pio: not found`,
 };
 
 // The strongest sample: stdout captured verbatim from a real `uno` build.
