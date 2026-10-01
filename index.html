@@ -72,6 +72,25 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- A browser too old to run the app (Internet Explorer, old Edge, Chrome
+         before 80) would show a blank page: say what to do instead. Plain ES5,
+         so it runs there. Every browser the app supports passes both checks. -->
+    <script>
+      (function () {
+        var ok = "noModule" in document.createElement("script");
+        try { new Function("var a = {}; return a?.b ?? 1;")(); } catch (e) { ok = false; }
+        if (ok) return;
+        var root = document.getElementById("root");
+        if (!root) return;
+        document.body.style.background = "#0B0D12";
+        root.innerHTML =
+          '<div style="max-width:520px;margin:15vh auto 0;padding:24px;font-family:Arial,sans-serif;color:#f1f5f9;background:#11141b;border:1px solid #2a2f3a;border-radius:12px;line-height:1.5">' +
+          '<h1 style="font-size:20px;margin:0 0 12px">Please update your browser</h1>' +
+          '<p style="margin:0 0 10px">Joint-Agent IDE needs a newer browser than this one.</p>' +
+          '<p style="margin:0">Update Google Chrome (menu, then Help, then About Google Chrome), or open this page in the latest Chrome, Microsoft Edge or Firefox. On Windows 7 or 8, Chrome 109 works.</p>' +
+          "</div>";
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

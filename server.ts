@@ -34,7 +34,7 @@ import { detectLibDeps, isSafeLibDep } from './server/libraryDeps';
 import { registerLibraryRoutes, prepareLibraries, mergeLibDeps, missingLibraryHint, libraryNoteFor, NO_LIBRARIES } from './server/libraries';
 import { loadBoardCatalog, getBoardCatalog, getBoardById, boardFamily, resolveBoard, describeBoardForPrompt, describeFamilyForPrompt, BoardInfo } from './server/boards';
 import { getCachedContentName } from './server/geminiCache';
-import { streamChat, completeChat, isDeepSeekConfigured, DEEPSEEK_MODEL, ChatMessage, ToolSpec, modelFor } from './server/deepseek';
+import { streamChat, completeChat, isDeepSeekConfigured, DEEPSEEK_MODEL, ChatMessage, ToolSpec, modelFor, AiTimeoutError } from './server/deepseek';
 import { CONTEXT_BUDGET_TOKENS, ConversationMessage, planCompaction, SUMMARY_INSTRUCTION, transcriptOf, KEEP_RECENT_MESSAGES, attachedImages } from './server/context';
 
 
@@ -460,6 +460,7 @@ app.get("/api/boards", (req, res) => {
 import { WORKSPACE_COMMANDS, isWorkspaceCommand, toWorkspaceCommand } from "./server/commands.js";
 import { scrubToolchainNames } from "./server/scrub.js";
 import { siteFiles } from "./server/siteFiles.js";
+import { holdOpen } from "./server/holdOpen.js";
 import { buildEnv } from "./server/buildEnv.js";
 import { setUpBuildAccount, compilerOptions, handOver, buildIsolation } from "./server/buildUser.js";
 import { buildQueue, ServerBusyError } from "./server/buildQueue.js";
@@ -677,6 +678,25 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
   const send = (event: Record<string, any>) => res.write(`data: ${JSON.stringify(event)}\n\n`);
+  // A comment line every 15 seconds while the reply is under way. Without
+  // it, nothing travels while the AI thinks or waits its turn, and a
+  // connection silent for minutes gets dropped on the way (phone networks,
+  // routers, antivirus software): the browser's "network error". The app
+  // skips lines that aren't "data:".
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded && !res.destroyed) res.write(": keep-alive\n\n");
+  }, 15_000);
+  // The browser has gone (closed the tab, lost its connection, or pressed
+  // Stop): the reply stops with it rather than running on unseen, and the
+  // app's own retry (src/lib/aiClient.ts) is never answered twice.
+  const clientGone = new AbortController();
+  res.on("close", () => {
+    clearInterval(heartbeat);
+    if (!res.writableEnded) clientGone.abort();
+  });
+  // What the AI wrote, for counting a reply that was stopped part-way.
+  let writtenChars = 0;
+  let compactionTokens = 0;
 
   if (!isDeepSeekConfigured()) {
     send({ type: "text_delta", text: "AI Agent is offline — DEEPSEEK_API_KEY is not configured." });
@@ -732,7 +752,6 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     // Full at AUTOCOMPACT_AT: fold everything but the recent tail into a
     // summary, tell the browser which messages it replaced, and carry on.
     let history = conversation;
-    let compactionTokens = 0;
     const codeNote = currentCode
       ? "The sketch currently in the user's editor is below. \"The code\" means this sketch: when asked for a change, " +
         "change this code and keep everything else in it — pins, wiring, timing, behaviour — exactly as it is, unless the " +
@@ -747,7 +766,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
         const summary = await completeChat([
           { role: "system", content: SUMMARY_INSTRUCTION },
           { role: "user", content: transcriptOf(plan.older) },
-        ], {}, model);
+        ], { signal: clientGone.signal }, model);
         compactionTokens = summary.outputTokens;
         const text = summary.text.trim();
         if (text) {
@@ -759,6 +778,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
           });
         }
       } catch (err: any) {
+        if (clientGone.signal.aborted) throw err;
         // Better an oversized request than none: the model's own window is
         // larger than the budget, so this still goes through.
         console.error("[Context] compaction failed:", err?.message || err);
@@ -789,12 +809,18 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
       msgs,
       chatMode === "plan" ? undefined : DEEPSEEK_IMPLEMENT_TOOLS,
       {
-        onText: (text) => send({ type: "text_delta", text }),
+        onText: (text) => {
+          writtenChars += text.length;
+          send({ type: "text_delta", text });
+        },
         // Throttled so a long tool call does not spam the stream — the user
         // needs to know work is happening, not a byte counter.
         onToolProgress: (() => {
           let last = 0;
-          return (toolName: string) => {
+          let counted = 0;
+          return (toolName: string, argsSoFar: number) => {
+            writtenChars += Math.max(0, argsSoFar - counted);
+            counted = Math.max(counted, argsSoFar);
             const now = Date.now();
             if (now - last < 1200) return;
             last = now;
@@ -808,6 +834,12 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
         })(),
       },
       model,
+      {
+        signal: clientGone.signal,
+        // The AI service holds a request while it's busy: say so, rather
+        // than leave the person looking at nothing.
+        onWaiting: () => send({ type: "tool_progress", text: "The AI service is busy right now. Your message is in its queue and will start shortly…" }),
+      },
     );
 
     let result = await runChat(dsMessages);
@@ -902,6 +934,28 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     send({ type: "done" });
     res.end();
   } catch (error: any) {
+    if (clientGone.signal.aborted) {
+      // Nobody is reading any more. What was written before it stopped is
+      // counted (about 4 characters a token), as a finished reply would be.
+      const tokens = compactionTokens + Math.ceil(writtenChars / 4);
+      if (tokens > 0) await incrementTokenUsage(req.uid!, req.quota, tokens);
+      if (!res.writableEnded) res.end();
+      return;
+    }
+    if (error instanceof AiTimeoutError) {
+      // Waited as long as is sensible (server/deepseek.ts). Nothing usable
+      // came back, so nothing is counted.
+      console.warn(`[AI] chat reply stopped: ${error.kind}`);
+      send({
+        type: "text_delta",
+        text: error.kind === "busy"
+          ? "The AI service is very busy right now, so your reply didn't start in time. Nothing was used from your allowance. Send your message again in a minute."
+          : "The AI service stopped part-way through your reply. Send your message again.",
+      });
+      send({ type: "done" });
+      res.end();
+      return;
+    }
     console.error("API Error: ", error.message);
     let msg = error.message || "Failed.";
     try {
@@ -929,6 +983,10 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
 });
 
 app.post("/api/ai/generate", requireAuthAndQuota, async (req, res) => {
+  // Kept alive while the AI writes (server/holdOpen.ts); stopped if the person leaves.
+  holdOpen(res);
+  const clientGone = new AbortController();
+  res.on("close", () => { if (!res.writableEnded) clientGone.abort(); });
   const { prompt, mcu, boardId } = req.body || {};
 
   if (typeof prompt !== "string" || !prompt.trim()) {
@@ -1005,7 +1063,7 @@ Wire colours: #EF4444 power, #000000 GND, #3B82F6 signal.
 All four top-level keys are required. Do not wrap the JSON in markdown fences.`,
       },
       { role: "user", content: `Create: ${prompt}` },
-    ], { jsonMode: true }, modelFor(req.quota!.tier === "free"));
+    ], { jsonMode: true, signal: clientGone.signal }, modelFor(req.quota!.tier === "free"));
 
     await incrementTokenUsage(req.uid!, req.quota, response.outputTokens);
     countStat("ai_generate");
@@ -1021,6 +1079,10 @@ All four top-level keys are required. Do not wrap the JSON in markdown fences.`,
     const data = JSON.parse(resultText.trim());
     return res.json(data);
   } catch (error: any) {
+    if (clientGone.signal.aborted) return;
+    if (error instanceof AiTimeoutError) {
+      return res.status(503).json({ error: "The AI service is very busy right now. Try again in a minute.", code: "AI_BUSY" });
+    }
     console.error("Generation Error: ", error.message);
     // Return mock fallback as recovery so user gets a seamless experience
     const mockData = getMockProject(prompt, mcu === "esp32" ? "esp32" : "arduino");
@@ -1033,6 +1095,10 @@ All four top-level keys are required. Do not wrap the JSON in markdown fences.`,
 
 // Debug code
 app.post("/api/ai/debug", requireAuthAndQuota, async (req, res) => {
+  // Kept alive while the AI writes the fix (server/holdOpen.ts); stopped if the person leaves.
+  holdOpen(res);
+  const clientGone = new AbortController();
+  res.on("close", () => { if (!res.writableEnded) clientGone.abort(); });
   const { code, error, mcu } = req.body || {};
 
   if (typeof code !== "string" || !code || typeof error !== "string" || !error) {
@@ -1077,7 +1143,7 @@ Respond with a single JSON object and nothing else, in exactly this shape:
 Both keys are required. Do not wrap the JSON in markdown fences.`,
       },
       { role: "user", content: `CODE:\n${code}\n\nERROR:\n${error}` },
-    ], { jsonMode: true }, modelFor(req.quota!.tier === "free"));
+    ], { jsonMode: true, signal: clientGone.signal }, modelFor(req.quota!.tier === "free"));
 
     await incrementTokenUsage(req.uid!, req.quota, response.outputTokens);
     countStat("ai_debug");
@@ -1093,6 +1159,11 @@ Both keys are required. Do not wrap the JSON in markdown fences.`,
     const data = JSON.parse(resultText.trim());
     return res.json(data);
   } catch (err: any) {
+    if (clientGone.signal.aborted) return;
+    if (err instanceof AiTimeoutError) {
+      // No fix came back in time: say so, rather than hand back a non-fix.
+      return res.status(503).json({ error: "The AI service is very busy right now and couldn't write a fix in time. Try again in a minute.", code: "AI_BUSY" });
+    }
     console.error("Debugging Error: ", err.message);
     return res.json({
       code: code + "\n\n// Fallback Debug Fix\n#define DIAGNOSTIC_RECOVERY 1\n",
@@ -1350,6 +1421,8 @@ const TRANSCRIBE_ATTEMPTS: Array<{ model: string; thinkingLow: boolean }> = [
 ];
 
 app.post("/api/ai/transcribe", requireAuthAndQuota, async (req, res) => {
+  // Kept alive while a long voice note is written out (server/holdOpen.ts).
+  holdOpen(res);
   try {
     const { audioData, mimeType } = req.body || {};
     if (!audioData) return res.status(400).json({ error: "No audio data provided." });
@@ -1407,6 +1480,9 @@ app.post("/api/ai/transcribe", requireAuthAndQuota, async (req, res) => {
 // Compilation Endpoint
 // ----------------------------------------------------
 app.post("/api/compile", requireFirebaseAuth, async (req, res) => {
+  // A compile can wait its turn and then build for minutes with nothing to
+  // send: kept alive meanwhile (server/holdOpen.ts).
+  holdOpen(res);
   const { code, mcu, boardId } = req.body || {};
   if (typeof code !== "string" || !code || typeof mcu !== "string" || !mcu) {
     return res.status(400).json({ error: "Code and MCU are required." });
@@ -1749,6 +1825,13 @@ async function startServer() {
   }
   // Last: turns an error from any route into one JSON answer.
   app.use(jsonErrorHandler);
+
+  // Caddy keeps connections to this server open between requests for up to
+  // 30 seconds (Caddyfile). Node's own limit was 5 seconds, so it could close
+  // one just as Caddy sent a request down it, and that request failed with a
+  // 502. Waiting longer than Caddy does means Caddy always closes first.
+  httpServer.keepAliveTimeout = 65_000;
+  httpServer.headersTimeout = 66_000;
 
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`AI Microcontroller Web3 IDE Server running on http://0.0.0.0:${PORT}`);

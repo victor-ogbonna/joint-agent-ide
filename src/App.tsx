@@ -324,6 +324,8 @@ function useIsNarrowScreen(): boolean {
 }
 
 type MobilePane = "files" | "agent" | "editor";
+/** A build to carry on with once a project holds the work (see pendingBuild). */
+type PendingBuild = { kind: "compile" } | { kind: "flash" } | { kind: "smartFlash"; code?: string };
 
 export default function App() {
   const { user, signOut } = useAuth();
@@ -780,6 +782,12 @@ export default function App() {
   // Shown once per sign-in: "start new" vs "continue previous". Keyed on uid in
   // a ref so a re-render never reopens it, but signing in as someone else does.
   const [showWelcome, setShowWelcome] = useState(false);
+  // A build asked for before any project was opened or started
+  // (needsProjectFirst): the start/continue menu comes up first, and a new
+  // project made from it takes the work on screen and then carries on with
+  // the build (ready). Opening a saved project instead, or closing the menu,
+  // drops it.
+  const [pendingBuild, setPendingBuild] = useState<{ build: PendingBuild; ready: boolean } | null>(null);
   // The walk-through: automatic on a first-time account's first visit, and
   // on request from the profile menu. Seen once per account on this device.
   const [tourOpen, setTourOpen] = useState(false);
@@ -1663,9 +1671,9 @@ export default function App() {
     } else if (cmdClean === "clear") {
       setTerminalLines([]);
     } else if (cmdClean === "compile") {
-      handleCompile();
+      if (!needsProjectFirst({ kind: "compile" })) handleCompile();
     } else if (cmdClean === "flash") {
-      handleFlash();
+      if (!needsProjectFirst({ kind: "flash" })) handleFlash();
     } else if (cmdClean === "ret") {
       handleRetrieveFirmware();
     } else if (cmdClean === "engine") {
@@ -2855,7 +2863,18 @@ export default function App() {
             if (!assistantContent) updateAssistantMsg({ content: event.text });
           }
         },
-        { signal: abortControllerRef.current.signal }
+        {
+          signal: abortControllerRef.current.signal,
+          // The connection dropped part-way (src/lib/aiClient.ts): the reply
+          // starts again, unless it already changed the conversation or the
+          // workspace.
+          canRetry: () => !compactedThisRequest && !projectUpdate && !pendingCommand,
+          onRetry: () => {
+            assistantContent = "";
+            if (started) updateAssistantMsg({ content: "Connection dropped. Reconnecting…" });
+            logToTerminal("[AI AGENT] The connection dropped. Reconnecting…", "info");
+          },
+        }
       );
 
       if (result.blocked) {
@@ -2882,7 +2901,7 @@ export default function App() {
 
         if (projectUpdate?.code && effectiveMode === "implement") {
           if (mcuPluggedInRef.current) {
-            handleSmartFlash(projectUpdate.code);
+            if (!needsProjectFirst({ kind: "smartFlash", code: projectUpdate.code })) handleSmartFlash(projectUpdate.code);
           } else {
             logToTerminal("[SMART FLASH] Board not connected. Click 'Smart Flash' next to the agent chat once your device is plugged in.", "info");
           }
@@ -2961,12 +2980,20 @@ export default function App() {
     }
   };
   const openNewProject = async () => {
-    if (await atProjectLimit()) { setProjectLimitOpen(true); return; }
+    if (await atProjectLimit()) {
+      setProjectLimitOpen(true);
+      dropPendingBuild("[PROJECT] Build cancelled: no free project slot for this work. Open a saved project, or free a slot.");
+      return;
+    }
     setShowNewProjectModal(true);
   };
 
   const handleCreateProject = async (name: string, board: BoardInfo, codeOverride?: string) => {
     if (!user) return;
+    // Made from the menu shown before a build (needsProjectFirst): the new
+    // project takes the work on screen (code, wiring, conversation) rather
+    // than starting blank, and the build then carries on.
+    const keepWork = pendingBuild !== null;
     // Counted again at the moment of creating: another tab or device may
     // have added one since the form opened.
     if (await atProjectLimit(true)) {
@@ -2974,39 +3001,55 @@ export default function App() {
       setImportedFileCode(null);
       setImportedFileName("");
       setProjectLimitOpen(true);
+      dropPendingBuild("[PROJECT] Build cancelled: no free project slot for this work. Open a saved project, or free a slot.");
       return;
     }
-    handleStopGeneration(); // cancel any in-flight agent request from the project being left
-    const initialCode = codeOverride || INITIAL_CODE;
+    if (!keepWork) handleStopGeneration(); // cancel any in-flight agent request from the project being left
+    const initialCode = keepWork ? codeRef.current : codeOverride || INITIAL_CODE;
+    const initialDescription = keepWork ? description : DEFAULT_DESCRIPTION;
+    const initialComponents = keepWork ? components : INITIAL_COMPONENTS;
+    const initialConnections = keepWork ? connections : INITIAL_CONNECTIONS;
     try {
       const newId = await createProject(user.uid, name, {
         code: initialCode,
-        description: DEFAULT_DESCRIPTION,
-        components: INITIAL_COMPONENTS,
-        connections: INITIAL_CONNECTIONS,
+        description: initialDescription,
+        components: initialComponents,
+        connections: initialConnections,
         mcu: board.family,
         boardId: board.id,
       });
+      if (keepWork && chatMessages.length) {
+        // The conversation that produced the code goes with it.
+        try {
+          await updateProject(user.uid, newId, { messages: trimMessagesForStorage(chatMessages as any) });
+        } catch (err: any) {
+          logToTerminal(`[PROJECT] The conversation wasn't saved with it yet: ${err.message}. It saves with your next change.`, "info");
+        }
+      }
       skipNextAutosaveRef.current = true;
       setCurrentProjectId(newId);
       setCurrentProjectName(name);
-      setCode(initialCode);
-      setDescription(DEFAULT_DESCRIPTION);
-      setComponents(INITIAL_COMPONENTS);
-      setConnections(INITIAL_CONNECTIONS);
       setMcu(board.family);
       setBoardId(board.id);
-      setChatMessages([]); // a brand new project starts with no conversation
-      setContextUsage(null);
-      // The terminal is per-project too: build output, flash logs and serial
-      // traffic from the previous board were carrying over and reading as if
-      // they belonged to the project just created.
-      setTerminalLines([]);
+      if (!keepWork) {
+        setCode(initialCode);
+        setDescription(DEFAULT_DESCRIPTION);
+        setComponents(INITIAL_COMPONENTS);
+        setConnections(INITIAL_CONNECTIONS);
+        setChatMessages([]); // a brand new project starts with no conversation
+        setContextUsage(null);
+        // The terminal is per-project too: build output, flash logs and serial
+        // traffic from the previous board were carrying over and reading as if
+        // they belonged to the project just created.
+        setTerminalLines([]);
+      }
       setShowNewProjectModal(false);
       setShowProjectsBrowser(false);
       logToTerminal(`[PROJECT] Created "${name}" for ${board.name}.`, "success");
+      if (keepWork) setPendingBuild((p) => (p ? { ...p, ready: true } : p));
     } catch (err: any) {
       logToTerminal(`[PROJECT] Failed to create project: ${err.message}`, "error");
+      dropPendingBuild("[PROJECT] Build cancelled: the project couldn't be created. Try again.");
     } finally {
       setImportedFileCode(null);
       setImportedFileName("");
@@ -3130,15 +3173,55 @@ export default function App() {
     setShowWelcome(true);
   }, [user, recentFetched]);
 
-  const handleOpenProject = async (projectId: string) => {
-    if (!user) return;
+  /**
+   * Builds happen inside a project. Someone who skipped the start/continue
+   * menu after signing in is shown it again before anything compiles: by
+   * the Compile, Flash and Smart Flash buttons, the terminal's commands, and
+   * the agent's own Smart Flash after it writes code. True when it was shown
+   * (the caller then stops; a new project made from it carries the build on).
+   */
+  const needsProjectFirst = (build: PendingBuild): boolean => {
+    if (currentProjectIdRef.current) return false;
+    // Flashing with no board connected compiles nothing: its own message says so.
+    if (build.kind === "flash" && (!detectedBoardRef.current || !mcuPluggedInRef.current)) return false;
+    setPendingBuild({ build, ready: false });
+    setShowWelcome(true);
+    logToTerminal("[PROJECT] Before building: start a new project for this work, or open a saved one.", "info");
+    return true;
+  };
+
+  // A new project now holds the work: carry on with the build it was asked
+  // for. Runs after the render that set the project, board and code, so the
+  // build uses them.
+  useEffect(() => {
+    if (!pendingBuild?.ready || !currentProjectId) return;
+    const { build } = pendingBuild;
+    setPendingBuild(null);
+    if (build.kind === "compile") void handleCompile();
+    else if (build.kind === "flash") void handleFlash();
+    // With no board connected, Smart Flash opens the browser's board chooser,
+    // which only opens straight after a tap: the person taps it again.
+    else if (!mcuPluggedInRef.current) logToTerminal("[PROJECT] Your work is in the new project. Connect your board, then press Smart Flash.", "info");
+    else void handleSmartFlash(build.code);
+  }, [pendingBuild, currentProjectId]);
+
+  /** The start/continue menu, closed without starting a new project for a pending build. */
+  const dropPendingBuild = (why: string) => {
+    if (!pendingBuild) return;
+    setPendingBuild(null);
+    logToTerminal(why, "info");
+  };
+
+  /** Opens a saved project. True once it's open. */
+  const handleOpenProject = async (projectId: string): Promise<boolean> => {
+    if (!user) return false;
     handleStopGeneration(); // cancel any in-flight agent request from the project being left
     setIsLoadingProject(true);
     try {
       const data = await getProject(user.uid, projectId);
       if (!data) {
         logToTerminal("[PROJECT] That project could not be found.", "error");
-        return;
+        return false;
       }
       skipNextAutosaveRef.current = true;
       setCurrentProjectId(projectId);
@@ -3155,12 +3238,29 @@ export default function App() {
       setChatMessages((data.messages || []) as any);
       setContextUsage(null);
       setShowProjectsBrowser(false);
+      // The workspace is that project's now: a build waiting on a new
+      // project (needsProjectFirst) no longer applies.
+      setPendingBuild(null);
       logToTerminal(`[PROJECT] Opened "${data.name}".`, "success");
+      return true;
     } catch (err: any) {
       logToTerminal(`[PROJECT] Failed to open project: ${err.message}`, "error");
+      return false;
     } finally {
       setIsLoadingProject(false);
     }
+  };
+
+  /**
+   * A project picked in Recents opens on its conversation, in the Agent
+   * section: Agent-Mode, and on a phone the Agent tab. Picking the project
+   * already open just goes there.
+   */
+  const handleOpenRecent = async (projectId: string) => {
+    const opened = projectId === currentProjectIdRef.current || await handleOpenProject(projectId);
+    if (!opened) return;
+    if (appMode !== "agentic") setAppMode("agentic");
+    if (isNarrowRef.current) slideToPane("agent");
   };
 
   const handleRenameProject = async (newName: string) => {
@@ -3691,7 +3791,7 @@ export default function App() {
                     return (
                       <div key={p.id} className="relative group flex items-center">
                       <button
-                        onClick={() => { if (!isOpen) handleOpenProject(p.id); }}
+                        onClick={() => void handleOpenRecent(p.id)}
                         title={`${p.name} — ${boardNames.get(p.boardId) || (p.mcu || "").toUpperCase()}`}
                         className={`w-[calc(100%-0.75rem)] text-left mx-1.5 px-2 py-1.5 flex items-center gap-2 text-[11px] rounded-md transition ${
                           isOpen
@@ -3785,7 +3885,7 @@ export default function App() {
                             logToTerminal("[SMART FLASH] Ignored a tap that landed as the board connected. Tap Smart Flash again to flash.", "info");
                             return;
                           }
-                          handleSmartFlash();
+                          if (!needsProjectFirst({ kind: "smartFlash" })) handleSmartFlash();
                         }}
                         onQuotaBlocked={(info) => { setQuotaBlockInfo(info); setIsUpgradeModalOpen(true); }}
                       />
@@ -3834,8 +3934,8 @@ export default function App() {
                       <CodeEditor
                         code={code}
                         setCode={setCode}
-                        onCompile={() => handleCompile()}
-                        onFlash={() => handleFlash()}
+                        onCompile={() => { if (!needsProjectFirst({ kind: "compile" })) handleCompile(); }}
+                        onFlash={() => { if (!needsProjectFirst({ kind: "flash" })) handleFlash(); }}
                         onDebug={() => handleDebugCode()}
                         isCompiling={isCompiling}
                         isFlashing={isFlashing}
@@ -4448,21 +4548,43 @@ export default function App() {
           displayName={user.displayName?.split(" ")[0] || ""}
           projects={recentProjects}
           loading={loadingRecent}
+          forBuild={pendingBuild !== null}
           onNewProject={() => { setShowWelcome(false); void openNewProject(); }}
-          onOpenProject={(id) => { setShowWelcome(false); handleOpenProject(id); }}
-          onBrowseAll={() => { setShowWelcome(false); setShowProjectsBrowser(true); }}
-          onClose={() => setShowWelcome(false)}
+          onOpenProject={(id) => {
+            setShowWelcome(false);
+            dropPendingBuild("[PROJECT] Opened a saved project instead. Press Compile, Flash or Smart Flash when you're ready.");
+            handleOpenProject(id);
+          }}
+          onBrowseAll={() => {
+            setShowWelcome(false);
+            dropPendingBuild("[PROJECT] Open a saved project, then press Compile, Flash or Smart Flash when you're ready.");
+            setShowProjectsBrowser(true);
+          }}
+          onClose={() => {
+            setShowWelcome(false);
+            dropPendingBuild("[PROJECT] Build cancelled. Start a new project or open a saved one to build.");
+          }}
           boardNames={boardNames}
         />
       )}
 
       {showNewProjectModal && (
         <NewProjectModal
-          onClose={() => { setShowNewProjectModal(false); setImportedFileCode(null); setImportedFileName(""); }}
+          onClose={() => {
+            setShowNewProjectModal(false);
+            setImportedFileCode(null);
+            setImportedFileName("");
+            dropPendingBuild("[PROJECT] Build cancelled. Start a new project or open a saved one to build.");
+          }}
           onCreate={(name, board) => handleCreateProject(name, board, importedFileCode || undefined)}
           initialName={importedFileName}
           mode={importedFileCode ? "import" : "create"}
-          detectedBoardId={detectedBoardId}
+          note={!pendingBuild ? undefined
+            : pendingBuild.build.kind === "smartFlash" && !mcuPluggedIn
+              ? "Your code and conversation move into the new project. Then connect your board and press Smart Flash."
+              : "Your code and conversation move into the new project, then the build continues."}
+          // For work already under way, its board unless another is plugged in.
+          detectedBoardId={detectedBoardId || (pendingBuild ? boardId : null)}
           detectedFamily={detectedMcu}
           detectedName={detectedBoard}
         />

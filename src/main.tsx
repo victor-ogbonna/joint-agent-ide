@@ -1,3 +1,6 @@
+// First, before anything else runs: stand-ins for newer browser functions
+// that older browsers (old laptops' Chrome) lack.
+import './lib/polyfills.ts';
 import {StrictMode, useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
@@ -9,6 +12,7 @@ import SharePage from './SharePage.tsx';
 import CreatorPage from './CreatorPage.tsx';
 import TeamPage from './TeamPage.tsx';
 import { AuthProvider, useAuth } from './contexts/AuthContext.tsx';
+import VerifyEmailScreen from './components/VerifyEmailScreen.tsx';
 import './index.css';
 import { startInstallSupport } from './lib/installApp.ts';
 import { captureRefFromUrl } from './lib/referral.ts';
@@ -89,10 +93,14 @@ function LaunchScreen() {
 }
 
 function RootRoute() {
-  const { user, loading, signOut } = useAuth();
+  const { user, loading, signOut, sendVerificationEmail, refreshVerification } = useAuth();
   const [holding, setHolding] = useState(true);
   const [access, setAccess] = useState<'checking' | 'open' | 'locked'>('checking');
   const [accessDenied, setAccessDenied] = useState(false);
+  // Signed in with an email and password not yet verified, while locked
+  // (VerifyEmailScreen). recheck asks the server again once it is.
+  const [needsVerify, setNeedsVerify] = useState(false);
+  const [recheck, setRecheck] = useState(0);
 
   useEffect(() => {
     const t = setTimeout(() => setHolding(false), MIN_LAUNCH_MS);
@@ -120,10 +128,22 @@ function RootRoute() {
         const probe = await fetch('/api/quota/status', { headers: { Authorization: `Bearer ${idToken}` } });
         if (cancelled) return;
         if (probe.status === 403) {
+          // Access is given to a verified address (server/access.ts). An
+          // email-and-password account whose address isn't verified yet may
+          // well be on the list: ask for the verification rather than
+          // turning it away.
+          const passwordAccount = user.providerData.some((p) => p.providerId === 'password');
+          if (!user.emailVerified && passwordAccount) {
+            setNeedsVerify(true);
+            setAccess('locked');
+            return;
+          }
+          setNeedsVerify(false);
           await signOut();
           setAccessDenied(true);
           setAccess('locked');
         } else {
+          setNeedsVerify(false);
           setAccess('open');
         }
       } catch {
@@ -131,9 +151,27 @@ function RootRoute() {
       }
     })();
     return () => { cancelled = true; };
-  }, [user, signOut]);
+  }, [user, signOut, recheck]);
 
   if (loading || holding || access === 'checking') return <LaunchScreen />;
+
+  if (access === 'locked' && needsVerify && user) {
+    return (
+      <VerifyEmailScreen
+        email={user.email}
+        onResend={sendVerificationEmail}
+        onCheck={async () => {
+          const verified = await refreshVerification();
+          if (verified) setRecheck((n) => n + 1);
+          return verified;
+        }}
+        onSignOut={async () => {
+          setNeedsVerify(false);
+          await signOut();
+        }}
+      />
+    );
+  }
 
   // Locked: everyone without a grant sees the waitlist page. inviteSignIn keeps
   // a sign-in door open for accounts that have been granted access — without it

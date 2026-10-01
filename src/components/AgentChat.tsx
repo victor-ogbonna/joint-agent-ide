@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { motion } from "motion/react";
 import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Square, Code, X, Clock} from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -7,6 +7,25 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { ChatMessage, MCUType, SchematicComponent, SchematicConnection } from "../types";
 import { callAiEndpoint, QuotaBlockedInfo } from "../lib/aiClient";
+
+/** The message box grows with its text up to this, then scrolls: 240px, or 40% of a short screen. */
+const INPUT_MAX_PX = 240;
+const INPUT_MAX_SCREEN = 0.4;
+
+/**
+ * Fits the message box to its text: one line when empty, taller as the text
+ * grows, never past the limit above (then it scrolls). Run whenever the text
+ * changes, by typing or otherwise (a voice note, sending, reusing a message).
+ */
+function fitInput(el: HTMLTextAreaElement | null) {
+  if (!el) return;
+  el.style.height = "auto";
+  const max = Math.max(48, Math.min(INPUT_MAX_PX, Math.round(window.innerHeight * INPUT_MAX_SCREEN)));
+  // The height includes the border (box-sizing: border-box); scrollHeight doesn't.
+  const content = el.scrollHeight + (el.offsetHeight - el.clientHeight);
+  el.style.height = `${Math.min(content, max)}px`;
+  el.style.overflowY = content > max ? "auto" : "hidden";
+}
 
 interface AgentChatProps {
   messages: ChatMessage[];
@@ -341,6 +360,23 @@ export default function AgentChat({
   onUpgrade
 }: AgentChatProps) {
   const [input, setInput] = useState("");
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Before paint, so the box never shows at the wrong size.
+  useLayoutEffect(() => { fitInput(inputRef.current); }, [input]);
+  // And again when its width changes (the pane or window resized), which
+  // changes how the text wraps.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let width = el.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (el.clientWidth === width) return;
+      width = el.clientWidth;
+      fitInput(el);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
   const [images, setImages] = useState<string[]>([]);
   const [imageError, setImageError] = useState("");
   // On a phone or tablet the picker offers the camera as well as the gallery.
@@ -905,31 +941,22 @@ export default function AgentChat({
             </div>
           )}
           {imageError && <p className="mb-1 text-[10px] text-red-500">{imageError}</p>}
+          {/* One line when empty; grows with the text to its limit, then
+              scrolls (fitInput, above). */}
           <textarea
+            ref={inputRef}
             value={input}
-            onChange={(e) => {
-              setInput(e.target.value);
-              e.target.style.height = 'auto';
-              e.target.style.height = `${e.target.scrollHeight}px`;
-              // To handle width auto-grow, we can let scrollWidth dictate if it exceeds 100%
-              e.target.style.width = '100%';
-              if (e.target.scrollWidth > e.target.clientWidth) {
-                e.target.style.width = `${e.target.scrollWidth}px`;
-              }
-            }}
+            onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 handleSubmit(e);
-                e.currentTarget.style.height = 'auto';
-                e.currentTarget.style.width = '100%';
               }
             }}
             disabled={isLoading || isTranscribing}
-            rows={3}
-            className="w-full bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-md px-3 py-2 text-xs text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-orange-500 transition resize-none terminal-scrollbar overflow-hidden"
+            rows={1}
+            className="block w-full bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-md px-3 py-2 text-xs leading-4 text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-orange-500 transition-colors resize-none terminal-scrollbar overflow-hidden"
             placeholder={isTranscribing ? "Transcribing audio..." : "Ask Joint-Agent..."}
-            style={{ minHeight: '64px', maxHeight: '384px', maxWidth: '150%' }}
           />
           {/* A failed transcription used to be invisible — it went to
               console.error only, so the mic looked simply broken. */}

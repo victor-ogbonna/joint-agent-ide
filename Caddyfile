@@ -21,6 +21,18 @@ jointagentide.com, www.jointagentide.com {
 		# which reads as the agent hanging and then dumping — the streaming
 		# effect disappears entirely.
 		flush_interval -1
+		# While the app restarts (an update, a crash), a page load waits for
+		# it to come back, for up to 30 seconds, instead of failing at once
+		# with a 502. Caddy can't send a POST twice, so the app asks again by
+		# itself when one fails that way (src/lib/resilientFetch.ts).
+		lb_try_duration 30s
+		lb_try_interval 500ms
+		transport http {
+			# Idle connections to the app are closed after 30 seconds: before
+			# the app's own 65 (server.ts), so the app never closes one just
+			# as a request is sent down it.
+			keepalive 30s
+		}
 	}
 
 	encode gzip

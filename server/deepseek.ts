@@ -14,7 +14,8 @@
 
 import { MarkupGuard, parseTextToolCall } from "./toolMarkup.js";
 
-const BASE_URL = "https://api.deepseek.com";
+// DEEPSEEK_BASE_URL points it elsewhere: a stand-in service in tests.
+const BASE_URL = process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com";
 // The canonical rolling name. "deepseek-v4-flash" was an undocumented alias
 // that the API silently resolves to this same model (verified against
 // /chat/completions, which echoes the model it actually served) — but only
@@ -98,7 +99,40 @@ function isRetryable(status: number): boolean {
 
 const FATAL = /^\S+ \d{3}:/;
 
-async function postWithRetry(profile: ModelProfile, path: string, body: any, label: string): Promise<Response> {
+/**
+ * When the AI service is busy it holds a request open, sending keep-alive
+ * lines instead of a reply, for up to half an hour. Waiting on that in
+ * silence is what looked like the agent hanging. So a reply that hasn't
+ * started after FIRST_REPLY_MS, or goes quiet for STREAM_IDLE_MS once it has,
+ * is stopped with an AiTimeoutError the user can act on. The person is told
+ * after WAITING_NOTICE_MS that the service is busy (StreamOptions.onWaiting).
+ */
+export const FIRST_REPLY_MS = 5 * 60_000;
+export const STREAM_IDLE_MS = 2 * 60_000;
+export const WAITING_NOTICE_MS = 20_000;
+/** A reply that isn't streamed may take this long in all. */
+export const COMPLETE_MAX_MS = 10 * 60_000;
+
+export class AiTimeoutError extends Error {
+  constructor(public kind: "busy" | "stalled") {
+    super(kind === "busy"
+      ? "The AI service is very busy right now and didn't start your reply in time."
+      : "The AI service stopped sending your reply part-way.");
+    this.name = "AiTimeoutError";
+  }
+}
+
+/** A controller that also stops when `outer` does. */
+function linkedController(outer?: AbortSignal): AbortController {
+  const controller = new AbortController();
+  if (outer) {
+    if (outer.aborted) controller.abort();
+    else outer.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+  return controller;
+}
+
+async function postWithRetry(profile: ModelProfile, path: string, body: any, label: string, signal?: AbortSignal): Promise<Response> {
   let lastErr: any;
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
     try {
@@ -109,6 +143,7 @@ async function postWithRetry(profile: ModelProfile, path: string, body: any, lab
           Authorization: `Bearer ${profile.apiKey()}`,
         },
         body: JSON.stringify(body),
+        signal,
       });
       if (res.ok) return res;
 
@@ -120,12 +155,15 @@ async function postWithRetry(profile: ModelProfile, path: string, body: any, lab
     } catch (err: any) {
       // A thrown non-retryable error above must not be swallowed into a retry.
       if (FATAL.test(err?.message || "")) throw err;
+      // Stopped on purpose (the person left, or the wait ran out): no retry.
+      if (signal?.aborted) throw err;
       lastErr = err;
       if (attempt === RETRY_DELAYS_MS.length) break;
     }
     const wait = RETRY_DELAYS_MS[attempt] + Math.floor(Math.random() * 400);
     console.warn(`[${profile.label}] ${label} failed (attempt ${attempt + 1}) — retrying in ${wait}ms`);
     await new Promise((r) => setTimeout(r, wait));
+    if (signal?.aborted) throw lastErr;
   }
   throw lastErr;
 }
@@ -134,17 +172,17 @@ async function postWithRetry(profile: ModelProfile, path: string, body: any, lab
 const SAFE_OUTPUT_TOKENS = 8192;
 const refusedCap = new Set<string>();
 
-async function postChat(profile: ModelProfile, body: any, label: string): Promise<Response> {
+async function postChat(profile: ModelProfile, body: any, label: string, signal?: AbortSignal): Promise<Response> {
   const cap = () => refusedCap.has(profile.id) ? Math.min(SAFE_OUTPUT_TOKENS, profile.maxOutputTokens) : profile.maxOutputTokens;
   try {
-    return await postWithRetry(profile, "/chat/completions", { ...body, max_tokens: cap() }, label);
+    return await postWithRetry(profile, "/chat/completions", { ...body, max_tokens: cap() }, label, signal);
   } catch (err: any) {
     const msg = err?.message || "";
     const tooLarge = / 400:/.test(msg) && /max_tokens|max_output|maxOutputTokens/i.test(msg);
     if (!tooLarge || refusedCap.has(profile.id) || profile.maxOutputTokens <= SAFE_OUTPUT_TOKENS) throw err;
     console.warn(`[${profile.label}] max_tokens ${profile.maxOutputTokens} refused; using ${SAFE_OUTPUT_TOKENS} from now on`);
     refusedCap.add(profile.id);
-    return await postWithRetry(profile, "/chat/completions", { ...body, max_tokens: cap() }, label);
+    return await postWithRetry(profile, "/chat/completions", { ...body, max_tokens: cap() }, label, signal);
   }
 }
 
@@ -152,6 +190,15 @@ export interface StreamHandlers {
   onText: (delta: string) => void;
   /** Called while a tool call's arguments accumulate, so the UI can show progress. */
   onToolProgress?: (toolName: string, argsSoFar: number) => void;
+}
+
+export interface StreamOptions {
+  /** Stops the reply (the person left or pressed Stop); it then throws an AbortError. */
+  signal?: AbortSignal;
+  /** Called once if the AI service hasn't started replying after WAITING_NOTICE_MS. */
+  onWaiting?: () => void;
+  /** The waits above, shorter in tests. */
+  timing?: { firstReplyMs?: number; idleMs?: number; noticeMs?: number };
 }
 
 export interface StreamResult {
@@ -182,6 +229,54 @@ export async function streamChat(
   tools: ToolSpec[] | undefined,
   handlers: StreamHandlers,
   profile: ModelProfile = PRO_MODEL,
+  options: StreamOptions = {},
+): Promise<StreamResult> {
+  // The watchdog (see FIRST_REPLY_MS): "data:" frames are the reply; the
+  // service's keep-alive lines while it's busy are not.
+  const controller = linkedController(options.signal);
+  const firstReplyMs = options.timing?.firstReplyMs ?? FIRST_REPLY_MS;
+  const idleMs = options.timing?.idleMs ?? STREAM_IDLE_MS;
+  const noticeMs = options.timing?.noticeMs ?? WAITING_NOTICE_MS;
+  const startedAt = Date.now();
+  let lastData = 0;
+  let noticed = false;
+  let timedOut: AiTimeoutError | null = null;
+  const watchdog = setInterval(() => {
+    const now = Date.now();
+    if (!lastData) {
+      if (!noticed && now - startedAt >= noticeMs) {
+        noticed = true;
+        try { options.onWaiting?.(); } catch { /* a notice must not stop the reply */ }
+      }
+      if (now - startedAt >= firstReplyMs) timedOut = new AiTimeoutError("busy");
+    } else if (now - lastData >= idleMs) {
+      timedOut = new AiTimeoutError("stalled");
+    }
+    if (timedOut) {
+      clearInterval(watchdog);
+      controller.abort();
+    }
+  }, Math.min(1000, Math.max(20, Math.floor(Math.min(firstReplyMs, idleMs, noticeMs) / 4))));
+  try {
+    return await readChatStream(messages, tools, handlers, profile, controller.signal, () => { lastData = Date.now(); });
+  } catch (err) {
+    if (timedOut) {
+      console.warn(`[${profile.label}] reply stopped: ${timedOut.kind === "busy" ? "the service didn't start it in time" : "the service went quiet part-way"}`);
+      throw timedOut;
+    }
+    throw err;
+  } finally {
+    clearInterval(watchdog);
+  }
+}
+
+async function readChatStream(
+  messages: ChatMessage[],
+  tools: ToolSpec[] | undefined,
+  handlers: StreamHandlers,
+  profile: ModelProfile,
+  signal: AbortSignal,
+  onData: () => void,
 ): Promise<StreamResult> {
   const res = await postChat(
     profile,
@@ -194,7 +289,8 @@ export async function streamChat(
       ...(profile.streamUsage ? { stream_options: { include_usage: true } } : {}),
       ...(tools?.length ? { tools, tool_choice: "auto" } : {}),
     },
-    "chat stream"
+    "chat stream",
+    signal,
   );
 
   const reader = res.body?.getReader();
@@ -223,6 +319,7 @@ export async function streamChat(
     for (const raw of lines) {
       const line = raw.trim();
       if (!line.startsWith("data:")) continue;
+      onData();
       const payload = line.slice(5).trim();
       if (payload === "[DONE]") continue;
 
@@ -286,24 +383,38 @@ export async function streamChat(
   return { toolCall, textToolCall, sentText, truncated, promptTokens, outputTokens };
 }
 
-/** Non-streaming completion, for the endpoints that just need one JSON blob back. */
+/**
+ * Non-streaming completion, for the endpoints that just need one JSON blob
+ * back. Stopped by `signal`, or with an AiTimeoutError after COMPLETE_MAX_MS.
+ */
 export async function completeChat(
   messages: ChatMessage[],
-  opts: { jsonMode?: boolean } = {},
+  opts: { jsonMode?: boolean; signal?: AbortSignal; maxMs?: number } = {},
   profile: ModelProfile = PRO_MODEL,
 ): Promise<{ text: string; outputTokens: number }> {
-  const res = await postChat(
-    profile,
-    {
-      model: profile.model,
-      messages,
-      ...(opts.jsonMode ? { response_format: { type: "json_object" } } : {}),
-    },
-    "completion"
-  );
-  const data: any = await res.json();
-  return {
-    text: data.choices?.[0]?.message?.content ?? "",
-    outputTokens: data.usage?.completion_tokens ?? 0,
-  };
+  const controller = linkedController(opts.signal);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, opts.maxMs ?? COMPLETE_MAX_MS);
+  try {
+    const res = await postChat(
+      profile,
+      {
+        model: profile.model,
+        messages,
+        ...(opts.jsonMode ? { response_format: { type: "json_object" } } : {}),
+      },
+      "completion",
+      controller.signal,
+    );
+    const data: any = await res.json();
+    return {
+      text: data.choices?.[0]?.message?.content ?? "",
+      outputTokens: data.usage?.completion_tokens ?? 0,
+    };
+  } catch (err) {
+    if (timedOut) throw new AiTimeoutError("busy");
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
