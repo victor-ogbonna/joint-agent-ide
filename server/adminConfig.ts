@@ -56,9 +56,26 @@ export function loadAdminConfig(): AdminConfig {
   }
 }
 
+// Written whole to a file beside it, flushed to disk, then renamed over the
+// old one, which swaps them in one step. Written in place, a crash midway left
+// a half-written file that read back as empty: the launch lock off, every
+// access grant gone and the Paystack keys lost.
 function writeLocalAdminConfig(patch: Partial<AdminConfig>): void {
   const next = { ...loadAdminConfig(), ...patch };
-  fs.writeFileSync(ADMIN_CONFIG_PATH, JSON.stringify(next, null, 2), "utf-8");
+  const tmp = `${ADMIN_CONFIG_PATH}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    const fd = fs.openSync(tmp, "w", 0o600);
+    try {
+      fs.writeSync(fd, JSON.stringify(next, null, 2), null, "utf-8");
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, ADMIN_CONFIG_PATH);
+  } catch (err) {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* nothing was left */ }
+    throw err;
+  }
 }
 
 interface RenderEnvVar {

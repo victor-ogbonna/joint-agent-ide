@@ -28,6 +28,9 @@ services:
       # Anything saved from the admin page lands here. Must be a mounted path —
       # see the note in server/adminConfig.ts.
       ADMIN_CONFIG_DIR: /app/data
+      # Compiles at the same moment; the rest wait in line (server/buildQueue.ts).
+      # A BUILD_SLOTS line in .env replaces the 5.
+      BUILD_SLOTS: "${BUILD_SLOTS:-5}"
     volumes:
       # Bind mount rather than a named volume so the state is visible on the
       # host, easy to back up, and survives `docker compose down -v`.

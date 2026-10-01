@@ -418,6 +418,8 @@ console.log("The build's environment");
   check(env.PATH === "/usr/bin" && env.HOME === "/root" && env.LANG && env.LC_ALL && env.https_proxy && env.Path, "system basics and proxies pass");
   check(!["GEMINI_API_KEY", "DEEPSEEK_API_KEY", "PAYSTACK_SECRET_KEY", "ADMIN_PASSWORD", "FIREBASE_SERVICE_ACCOUNT", "GITHUB_CLIENT_SECRET", "PLATFORMIO_AUTH_TOKEN"].some((k) => k in env), "no secret reaches a build");
   check(env.PLATFORMIO_CORE_DIR === "/app/.platformio" && env.PLATFORMIO_SETTING_ENABLE_TELEMETRY === "No", "the compiler's own settings pass, with its folder set");
+  const plain = buildEnv("/app/.platformio", { PATH: "/usr/bin" });
+  check(plain.PLATFORMIO_SETTING_ENABLE_TELEMETRY === "no", "and its usage reports are off unless the server says otherwise");
 }
 
 console.log("Storage");

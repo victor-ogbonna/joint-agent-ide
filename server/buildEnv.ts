@@ -22,6 +22,7 @@ const KEEP = new Set([
 
 /** The compiler's account token is a credential like any other. */
 const DROP = new Set(["PLATFORMIO_AUTH_TOKEN"]);
+const TELEMETRY = "PLATFORMIO_SETTING_ENABLE_TELEMETRY";
 
 export function buildEnv(coreDir?: string, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
@@ -33,5 +34,8 @@ export function buildEnv(coreDir?: string, base: NodeJS.ProcessEnv = process.env
     if (KEEP.has(key) || key.startsWith("LC_") || key.startsWith("PLATFORMIO_")) env[name] = value;
   }
   if (coreDir) env.PLATFORMIO_CORE_DIR = coreDir;
+  // The compiler reports each run to its makers' server unless told not to.
+  // Off, unless the server's own settings say otherwise.
+  if (!Object.keys(env).some((name) => name.toUpperCase() === TELEMETRY)) env[TELEMETRY] = "no";
   return env;
 }

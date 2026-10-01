@@ -26,9 +26,11 @@ jointagentide.com, www.jointagentide.com {
 	encode gzip
 
 	header {
-		# Basic hardening. HSTS is deliberately omitted while serving on :80 —
-		# it would be ignored over HTTP, and switching it on before a domain is
-		# live risks pinning browsers to HTTPS for an IP that cannot serve it.
+		# Basic hardening. HSTS: once a browser has been here over HTTPS, it
+		# never tries plain HTTP for this site again (for a year), so nobody on
+		# the same Wi-Fi can serve it a fake page. Only these two names, not
+		# other subdomains.
+		Strict-Transport-Security "max-age=31536000"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "SAMEORIGIN"
 		Referrer-Policy "strict-origin-when-cross-origin"

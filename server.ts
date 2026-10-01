@@ -168,6 +168,9 @@ process.on("unhandledRejection", (reason: any) => {
 // publishes no host port and is reachable only through Caddy on the compose
 // network, so that one hop is the only one that can ever be real.
 app.set("trust proxy", 1);
+// Every response said "X-Powered-By: Express", naming the server software to
+// anyone looking for one to attack.
+app.disable("x-powered-by");
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 // The `verify` callback stashes the exact raw request bytes onto req.rawBody —
@@ -1529,7 +1532,7 @@ lib_deps =
       countStat("compile_waits");
       countStat("compile_wait_ms_total", waited);
       recordMax("compile_wait_ms_max", waited);
-    });
+    }, req.uid ?? null);
 
     // Derive the artifact from the RESOLVED BOARD, never from the `mcu` string
     // the client sent. Those two can disagree — if the UI's mcu state says
