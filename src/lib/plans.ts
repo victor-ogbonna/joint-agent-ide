@@ -48,3 +48,18 @@ export function formatWhen(at: number, now = Date.now()): string {
   }
   return `on ${when.toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}`;
 }
+
+/** Money in a currency's smallest unit (kobo, cents), as people read it: "$5.60", "₦4,000". */
+export function formatMoney(minor: number, currency: string): string {
+  const major = minor / 100;
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency,
+      minimumFractionDigits: minor % 100 === 0 ? 0 : 2,
+      maximumFractionDigits: 2,
+    }).format(major);
+  } catch {
+    return `${currency} ${major.toFixed(2)}`;
+  }
+}

@@ -45,7 +45,7 @@ jointagentide.com, www.jointagentide.com {
 	# browsers do not always oblige. "no-store" leaves no room for
 	# interpretation.
 	@html {
-		path / /index.html /waitlist /privacy /thanks /admin /share/*
+		path / /index.html /waitlist /privacy /thanks /admin /creator /share/*
 	}
 	# ">" REPLACES the header. Without it Caddy appends, and the app server's
 	# own "public, max-age=0" stayed alongside ours — two conflicting

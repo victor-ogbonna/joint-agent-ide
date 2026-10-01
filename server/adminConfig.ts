@@ -33,6 +33,8 @@ export interface AdminConfig {
   paystackSecretKey?: string;
   paystackPublicKey?: string;
   paystackPlanCode?: string;
+  /** The yearly PRO plan (Paystack, interval "annually"). Optional. */
+  paystackYearlyPlanCode?: string;
 }
 
 // Which real Render environment variable each admin-config field should be
@@ -46,6 +48,7 @@ const RENDER_ENV_VAR_NAMES: Record<keyof AdminConfig, string> = {
   paystackSecretKey: "PAYSTACK_SECRET_KEY",
   paystackPublicKey: "PAYSTACK_PUBLIC_KEY",
   paystackPlanCode: "PAYSTACK_PLAN_CODE",
+  paystackYearlyPlanCode: "PAYSTACK_YEARLY_PLAN_CODE",
 };
 
 export function loadAdminConfig(): AdminConfig {

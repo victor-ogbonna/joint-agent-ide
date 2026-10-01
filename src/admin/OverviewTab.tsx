@@ -110,6 +110,7 @@ export default function OverviewTab({ get }: { get: AdminGet }) {
             { label: "Free", value: u.plans.free, note: `${percent(u.plans.free, u.total)}%` },
             { label: "PRO (paying)", value: u.plans.pro, note: `${percent(u.plans.pro, u.total)}%` },
             { label: "PRO (granted)", value: u.plans.granted },
+            { label: "PRO trial (creator code)", value: u.plans.trial ?? 0 },
             { label: "Owner", value: u.plans.owner },
           ]} />
         </Card>
