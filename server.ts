@@ -433,6 +433,7 @@ app.get("/api/boards", (req, res) => {
 
 import { WORKSPACE_COMMANDS, isWorkspaceCommand, toWorkspaceCommand } from "./server/commands.js";
 import { scrubToolchainNames } from "./server/scrub.js";
+import { siteFiles } from "./server/siteFiles.js";
 import { buildEnv } from "./server/buildEnv.js";
 import { setUpBuildAccount, compilerOptions, handOver, buildIsolation } from "./server/buildUser.js";
 import { buildQueue, ServerBusyError } from "./server/buildQueue.js";
@@ -565,7 +566,7 @@ Schematic wiring rules (CRITICAL for a correct, renderable circuit):
 6. Use sensible wire colors: red/orange (#EF4444 / #F59E0B) for power, black (#000000) for GND, blue (#3B82F6) or another distinct color per signal line.
 7. Give every component a unique, descriptive 'id' (e.g. 'led1', 'resistor1', 'dht1') and a friendly 'label'.
 
-CRITICAL: Since this project is making use of PlatformIO in the backend, you MUST ensure that every generated C++ code includes '#include <Arduino.h>' at the very top so that the code can be properly compiled and flashed.
+CRITICAL: The code is compiled as a plain C++ file (src/main.cpp), not an Arduino IDE sketch, so you MUST ensure that every generated C++ code includes '#include <Arduino.h>' at the very top so that the code can be properly compiled and flashed.
 
 CODE QUALITY (the code IS the deliverable — the chat reply is not):
 - Comment the code properly, every time. Explain WHY a line exists, not what it literally does, and name each pin's role where it is configured. Beginners read this code to learn; uncommented code fails them.
@@ -576,7 +577,7 @@ If the user asks you to write, modify, update code or create a project, use the 
 If the user asks to see, open, enable or activate the serial monitor (or to watch serial output), call 'execute_terminal_command' with the command 'monitor'. That is not a code change: do NOT call 'generate_project' for it, and do not rewrite or reflash their sketch.
 Use 'execute_terminal_command' ONLY to compile, to open the serial monitor, or to list the user's project files. NEVER use it to inspect the machine, hunt for config files, probe /dev, or report tool versions: that is infrastructure, not the user's project, and it is of no use to them.
 The serial monitor, board detection and flashing all run in the user's own browser over USB. They are NOT server-side and NOT shell commands. If asked to open the serial monitor or connect a board, point the user at the Serial Monitor and Detect Board controls and run nothing.
-Never name the underlying build system, its config files or its directories. The toolchain is "the Joint-Agent Engine".
+Never name the underlying build system, its config files or its directories, in the code comments or anywhere else. The toolchain is "the Joint-Agent Engine".
 If answering a general question, just respond conversationally.`;
   }
 
@@ -602,7 +603,7 @@ NEVER PUT FIRMWARE CODE IN YOUR REPLY:
 
 DECIDE — DO NOT INTERROGATE:
 - The Microcontroller Reference above already gives you the board, its clock/RAM/flash and its exact exposed pin names. TRUST IT. You already know the board.
-- NEVER ask the user which board they are on, which pin the onboard LED is on, whether the LED is active HIGH or LOW, or whether they use Arduino IDE or PlatformIO. The platform is always PlatformIO. Asking the user for hardware facts is the exact friction this product exists to remove.
+- NEVER ask the user which board they are on, which pin the onboard LED is on, whether the LED is active HIGH or LOW, or which IDE or build tool they use: builds always run on the Joint-Agent Engine. Asking the user for hardware facts is the exact friction this product exists to remove.
 - Pick sensible defaults and STATE them in one line each ("Onboard LED on GPIO 2, active HIGH. 500 ms on/off."). A stated default the user can correct beats a question they have to answer.
 - Ask AT MOST 2 clarifying questions, and only where a wrong guess would genuinely waste the user's time or produce the wrong project. If nothing is genuinely ambiguous, ask NOTHING and say what you will build.
 - When you do ask, format them as a bulleted list, each ending in '?'.
@@ -917,7 +918,7 @@ app.post("/api/ai/generate", requireAuthAndQuota, async (req, res) => {
 Generate microcontroller code (C++) and a full schematic diagram for a: ${mcu.toUpperCase()}.
 Microcontroller Pinout Reference: ${mcuDescription}
 
-CRITICAL: Since this project is making use of PlatformIO in the backend, you MUST ensure that every generated C++ code includes '#include <Arduino.h>' at the very top so that the code can be properly compiled and flashed.
+CRITICAL: The code is compiled as a plain C++ file (src/main.cpp), not an Arduino IDE sketch, so you MUST ensure that every generated C++ code includes '#include <Arduino.h>' at the very top so that the code can be properly compiled and flashed.
 
 CODE QUALITY (the code IS the deliverable — the chat reply is not):
 - Comment the code properly, every time. Explain WHY a line exists, not what it literally does, and name each pin's role where it is configured. Beginners read this code to learn; uncommented code fails them.
@@ -941,6 +942,8 @@ Wiring guidelines:
 4. For components, use the MCU pin names exactly as described above ('D13', 'A0', 'D23', etc. for Arduino/ESP32).
 5. Always represent the microcontroller ID in connections as 'mcu'.
 6. Do NOT invent new component types outside of the supported component list.
+
+Never name the underlying build system, its config files or its directories, in the code comments or anywhere else. The toolchain is "the Joint-Agent Engine".
 
 Return your response in strict JSON matching the requested schema.`;
 
@@ -1016,6 +1019,7 @@ app.post("/api/ai/debug", requireAuthAndQuota, async (req, res) => {
   const systemPrompt = `You are an expert compiler and debugger for microcontrollers (${mcu.toUpperCase()}).
 Review the provided C++ code and the compilation/behavior error.
 Fix the code. CRITICAL: You MUST ensure the corrected C++ code includes '#include <Arduino.h>' at the very top.
+Never name the underlying build system, its config files or its directories, in the code comments or anywhere else. The toolchain is "the Joint-Agent Engine".
 Return your response as a JSON object containing:
 - "code": The corrected C++ code.
 - "explanation": Short, scannable bullet points explaining the bug, why it occurred, and how it was resolved.
@@ -1657,7 +1661,7 @@ app.get("/api/status", (_req, res) => {
     deepseekConfigured: isDeepSeekConfigured(),
     geminiConfigured: !!ai,
     geminiApiKeySet: !!activeApiKey,
-    platformioInstalled: fs.existsSync(path.join(process.cwd(), ".platformio", "penv", "bin", "pio")),
+    compilerInstalled: fs.existsSync(path.join(process.cwd(), ".platformio", "penv", "bin", "pio")),
     // Builds run under their own account, away from the server's keys.
     buildsIsolated: buildIsolation().isolated,
   });
@@ -1705,7 +1709,9 @@ async function startServer() {
     console.log("Vite development middleware integrated.");
   } else {
     const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
+    // The site's files only: the server's own bundle shares this folder and
+    // is never served (server/siteFiles.ts).
+    app.use(siteFiles(distPath));
     // A shared project's page: the app itself, kept out of search results.
     app.get("/share/:id", (_req, res) => {
       res.setHeader("X-Robots-Tag", "noindex");

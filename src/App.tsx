@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from "react";
 import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass, Share2} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
@@ -443,12 +443,75 @@ export default function App() {
 
   /**
    * Swipe between the phone's sections: left for the next one, right for the
-   * previous, in the bottom bar's order. Only a quick, clearly sideways flick
+   * previous, in the bottom bar's order. Only a clearly sideways movement
    * counts, so scrolling a chat or the terminal never switches sections by
    * accident. A code line or terminal line that can still scroll sideways gets
    * the swipe first, and the panel resize bar is left alone.
+   *
+   * The section follows the finger once the movement is plainly sideways
+   * ("drag"), and on release slides out while the next one slides in; short
+   * of a switch it springs back. A quick flick switches as before, and so
+   * does a drag past a third of the screen. The motion is inline styles on
+   * <main>, cleared the moment the new section is on screen.
    */
-  const swipeRef = useRef<{ x: number; y: number; t: number; scroller: HTMLElement | null; scrollLeft: number; skip: boolean } | null>(null);
+  const swipeRef = useRef<{ x: number; y: number; t: number; scroller: HTMLElement | null; scrollLeft: number; skip: boolean; mode: "wait" | "drag" | "off"; still: boolean } | null>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const paneSlideTimerRef = useRef<number | null>(null);
+  const PANE_OUT_MS = 120;
+  const reducedMotion = () => {
+    try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch { return false; }
+  };
+  /** Back to where it sits, after a drag that did not switch. */
+  const springBack = () => {
+    const el = mainRef.current;
+    if (!el) return;
+    el.style.transition = "transform 220ms cubic-bezier(0.22, 1, 0.36, 1)";
+    el.style.transform = "";
+    window.setTimeout(() => {
+      if (swipeRef.current?.mode === "drag" || paneSlideTimerRef.current !== null) return;
+      el.style.transition = "";
+      el.style.willChange = "";
+    }, 240);
+  };
+  /**
+   * Switch section with the current one sliding out first: from where a
+   * drag left it (fromX), towards the side it is leaving by. The new section
+   * then slides in from the other side (.pane-in-next / .pane-in-prev).
+   */
+  const slideToPane = (pane: MobilePane, fromX = 0) => {
+    if (paneSlideTimerRef.current !== null) {
+      window.clearTimeout(paneSlideTimerRef.current);
+      paneSlideTimerRef.current = null;
+    }
+    const el = mainRef.current;
+    const from = mobilePaneOrder.indexOf(mobilePaneRef.current);
+    const to = mobilePaneOrder.indexOf(pane);
+    if (!el || !isNarrowRef.current || from < 0 || to < 0 || from === to || reducedMotion()) {
+      setMobilePane(pane);
+      return;
+    }
+    const away = to > from ? -1 : 1;
+    el.style.willChange = "transform, opacity";
+    el.style.transition = `transform ${PANE_OUT_MS}ms cubic-bezier(0.4, 0, 1, 1), opacity ${PANE_OUT_MS}ms linear`;
+    el.style.transform = `translateX(${fromX + away * el.clientWidth * 0.25}px)`;
+    el.style.opacity = "0";
+    paneSlideTimerRef.current = window.setTimeout(() => {
+      paneSlideTimerRef.current = null;
+      setMobilePane(pane);
+    }, PANE_OUT_MS);
+  };
+  // The new section is in the page: put <main> back, before it is painted.
+  useLayoutEffect(() => {
+    const el = mainRef.current;
+    if (!el || paneSlideTimerRef.current !== null) return;
+    el.style.transition = "";
+    el.style.transform = "";
+    el.style.opacity = "";
+    el.style.willChange = "";
+  }, [mobilePane, isNarrow]);
+  useEffect(() => () => {
+    if (paneSlideTimerRef.current !== null) window.clearTimeout(paneSlideTimerRef.current);
+  }, []);
   const horizontalScrollerOf = (el: HTMLElement | null, stop: HTMLElement): HTMLElement | null => {
     for (let node = el; node && node !== stop; node = node.parentElement) {
       if (node.scrollWidth > node.clientWidth + 1) {
@@ -459,7 +522,12 @@ export default function App() {
     return null;
   };
   const handleMainTouchStart = (e: React.TouchEvent<HTMLElement>) => {
-    if (!isNarrow || e.touches.length !== 1) { swipeRef.current = null; return; }
+    // A second finger, or a touch while a section is sliding out, is not a swipe.
+    if (!isNarrow || e.touches.length !== 1 || paneSlideTimerRef.current !== null) {
+      if (swipeRef.current?.mode === "drag" && !swipeRef.current.still) springBack();
+      swipeRef.current = null;
+      return;
+    }
     const touch = e.touches[0];
     const target = e.target as HTMLElement;
     const scroller = horizontalScrollerOf(target, e.currentTarget);
@@ -467,25 +535,67 @@ export default function App() {
       x: touch.clientX, y: touch.clientY, t: Date.now(),
       scroller, scrollLeft: scroller?.scrollLeft ?? 0,
       skip: Boolean(target.closest?.('[role="separator"], [data-separator], [data-no-swipe]')),
+      mode: "wait",
+      // Reduced motion: the same swipes switch, with nothing moving on the way.
+      still: reducedMotion(),
     };
+  };
+  // Finger moving left reveals more to the right, and the reverse.
+  const canStillScroll = (start: NonNullable<typeof swipeRef.current>, dx: number) => {
+    const sc = start.scroller;
+    if (!sc) return false;
+    return dx < 0 ? start.scrollLeft + sc.clientWidth < sc.scrollWidth - 1 : start.scrollLeft > 0;
+  };
+  const handleMainTouchMove = (e: React.TouchEvent<HTMLElement>) => {
+    const start = swipeRef.current;
+    const el = mainRef.current;
+    if (!start || start.skip || start.mode === "off" || !el || !isNarrowRef.current || e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    if (start.mode === "wait") {
+      if (Math.abs(dx) < 12 && Math.abs(dy) < 12) return;   // too little to tell yet
+      if (Math.abs(dx) < Math.abs(dy) * 1.8 || canStillScroll(start, dx)) {
+        start.mode = "off";
+        return;
+      }
+      start.mode = "drag";
+      if (start.still) return;
+      el.style.transition = "none";
+      el.style.willChange = "transform";
+    }
+    if (start.still) return;
+    // Towards a side with no section it gives a little, then springs back.
+    const at = mobilePaneOrder.indexOf(mobilePaneRef.current);
+    const hasNext = Boolean(mobilePaneOrder[at + (dx < 0 ? 1 : -1)]);
+    el.style.transform = `translateX(${hasNext ? dx : dx * 0.2}px)`;
   };
   const handleMainTouchEnd = (e: React.TouchEvent<HTMLElement>) => {
     const start = swipeRef.current;
     swipeRef.current = null;
-    if (!start || start.skip || e.changedTouches.length !== 1) return;
+    if (!start) return;
+    const dragged = start.mode === "drag";
+    const moved = dragged && !start.still;
+    if (start.skip || e.changedTouches.length !== 1) {
+      if (moved) springBack();
+      return;
+    }
     const touch = e.changedTouches[0];
     const dx = touch.clientX - start.x;
     const dy = touch.clientY - start.y;
-    if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.8 || Date.now() - start.t > 700) return;
-    const sc = start.scroller;
-    if (sc) {
-      // Finger moving left reveals more to the right, and the reverse.
-      const canGoFurther = dx < 0 ? start.scrollLeft + sc.clientWidth < sc.scrollWidth - 1 : start.scrollLeft > 0;
-      if (canGoFurther) return;
-    }
+    const flick = Math.abs(dx) >= 70 && Math.abs(dx) >= Math.abs(dy) * 1.8 && Date.now() - start.t <= 700;
+    const far = dragged && Math.abs(dx) > (mainRef.current?.clientWidth ?? Infinity) / 3;
     const at = mobilePaneOrder.indexOf(mobilePane);
     const next = mobilePaneOrder[at + (dx < 0 ? 1 : -1)];
-    if (next) setMobilePane(next);
+    if (next && (flick || far) && !canStillScroll(start, dx)) {
+      slideToPane(next, moved ? dx : 0);
+    } else if (moved) {
+      springBack();
+    }
+  };
+  const handleMainTouchCancel = () => {
+    if (swipeRef.current?.mode === "drag" && !swipeRef.current.still) springBack();
+    swipeRef.current = null;
   };
   const [isWalletModalOpen, setIsWalletModalOpen] = useState(false);
   const [isEdgeImpulseModalOpen, setIsEdgeImpulseModalOpen] = useState(false);
@@ -1368,9 +1478,7 @@ export default function App() {
       handleFlash();
     } else if (cmdClean === "ret") {
       handleRetrieveFirmware();
-    } else if (cmdClean === "engine" || cmdClean === "pio system" || cmdClean === "platformio --version" || cmdClean === "pio --version") {
-      // The old spellings stay as undocumented aliases so anyone who learned
-      // them still gets an answer; only "engine" is advertised.
+    } else if (cmdClean === "engine") {
       logToTerminal("Joint-Agent Engine System Information:", "info");
       logToTerminal("  Engine:        Joint-Agent Engine (embedded build core)", "info");
       logToTerminal(`  Host OS:       Linux (Cloud Sandbox)`, "info");
@@ -1391,6 +1499,15 @@ export default function App() {
   // Compile microcontroller code simulation
   const handleCompile = async (overrideCode?: string): Promise<{ success: boolean, data?: any, errorText?: string, compileSucceeded?: boolean, limited?: { reason: "window" | "day"; resetAt: number | null }, missingLibrary?: string, busy?: boolean }> => {
     setIsCompiling(true);
+    // A running serial monitor stops once a compile starts, so the board's
+    // output does not run on underneath the build. Flashing starts it again
+    // by itself; so does its Reconnect button. Nothing is running when a
+    // flash compiles: the flash has already stopped it.
+    const monitorWasRunning = !!(serialReaderRef.current || monitorLoopRef.current);
+    await stopSerialMonitor();
+    if (monitorWasRunning) {
+      logToTerminal("[SERIAL MONITOR STOPPED] Compiling. It starts again after flashing, or press Reconnect.", "serial");
+    }
     const codeToCompile = overrideCode || code;
     logToTerminal(`[COMPILER] Sending code to cloud build server for ${mcu.toUpperCase()}...`, "info");
 
@@ -3180,10 +3297,12 @@ export default function App() {
 
       {/* Main Workspace Layout with Resizable Panels */}
       <main
+        ref={mainRef}
         className="flex-1 flex overflow-hidden"
         onTouchStart={handleMainTouchStart}
+        onTouchMove={handleMainTouchMove}
         onTouchEnd={handleMainTouchEnd}
-        onTouchCancel={() => { swipeRef.current = null; }}
+        onTouchCancel={handleMainTouchCancel}
       >
         <PanelGroup orientation="horizontal">
 
@@ -3345,7 +3464,14 @@ export default function App() {
                 <button onClick={() => { setCompactDock(false); setIsSerialPlotterOpen(!isSerialPlotterOpen); if (isNarrow) { setMobilePane("editor"); if (!isSerialPlotterOpen) setMobileDockTab("plotter"); } }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isSerialPlotterOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
                   <Activity size={13} /> Serial Plotter
                 </button>
-                <FeedbackWidget variant="sidebar" boardId={boardId} mcu={mcu} />
+                {isNarrow && user ? (
+                  // On phones this row opens the one panel kept below <main>,
+                  // shared with the profile menu's entry: it stays open, and
+                  // keeps what was typed, across a switch of section.
+                  <FeedbackWidget variant="sidebar" panelElsewhere open={feedbackOpen} onOpenChange={setFeedbackOpen} />
+                ) : (
+                  <FeedbackWidget variant="sidebar" boardId={boardId} mcu={mcu} />
+                )}
               </div>
 
                 {/* Recent work, last: below the tools and Feedback, where the
@@ -3698,7 +3824,7 @@ export default function App() {
           ]).map(({ id, label, icon: Icon }) => (
             <button
               key={id}
-              onClick={() => setMobilePane(id)}
+              onClick={() => slideToPane(id)}
               aria-current={mobilePane === id}
               className={`flex-1 flex flex-col items-center justify-center gap-0.5 py-2 min-h-[52px] text-[10px] font-medium transition ${
                 mobilePane === id

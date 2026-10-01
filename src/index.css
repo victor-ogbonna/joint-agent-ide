@@ -210,17 +210,18 @@ select:focus-visible,
   .tour-spotlight { transition: none; }
 }
 
-/* A phone section sliding in from the side it was swiped from. */
+/* A phone section sliding in from the side it was swiped from, after the
+   one before it has slid out the other way (slideToPane in App.tsx). */
 @keyframes paneInFromRight {
-  from { opacity: 0.4; transform: translateX(28px); }
+  from { opacity: 0; transform: translateX(25%); }
   to { opacity: 1; transform: none; }
 }
 @keyframes paneInFromLeft {
-  from { opacity: 0.4; transform: translateX(-28px); }
+  from { opacity: 0; transform: translateX(-25%); }
   to { opacity: 1; transform: none; }
 }
-.pane-in-next { animation: paneInFromRight 0.2s ease-out; }
-.pane-in-prev { animation: paneInFromLeft 0.2s ease-out; }
+.pane-in-next { animation: paneInFromRight 0.3s cubic-bezier(0.22, 1, 0.36, 1); }
+.pane-in-prev { animation: paneInFromLeft 0.3s cubic-bezier(0.22, 1, 0.36, 1); }
 @media (prefers-reduced-motion: reduce) {
   .pane-in-next, .pane-in-prev { animation: none; }
 }
