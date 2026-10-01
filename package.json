@@ -11,7 +11,7 @@
     "lint": "tsc --noEmit",
     "test:flash": "node test/avrFlash.sim.mjs",
     "test:webusb": "node test/webusb.sim.mjs",
-    "test": "npm run test:flash && npm run test:webusb && npm run test:esp32 && npm run test:serial && npm run test:pump && npm run test:scrub && npm run test:commands && npm run test:monitor && npm run test:markup && npm run test:context && npm run test:tiers && npm run test:baud && npm run test:detect && npm run test:libraries && npm run test:builduser && npm run test:billing && npm run test:buildqueue && npm run test:adminmetrics && npm run test:buildcache && npm run test:asyncerrors && npm run test:buildrun && npm run test:bodylimits && npm run test:hidesecrets && npm run test:share && npm run test:sitefiles && npm run test:adminconfig && npm run test:referrals",
+    "test": "npm run test:flash && npm run test:webusb && npm run test:esp32 && npm run test:serial && npm run test:pump && npm run test:scrub && npm run test:commands && npm run test:monitor && npm run test:markup && npm run test:context && npm run test:tiers && npm run test:baud && npm run test:detect && npm run test:libraries && npm run test:builduser && npm run test:billing && npm run test:buildqueue && npm run test:adminmetrics && npm run test:buildcache && npm run test:asyncerrors && npm run test:buildrun && npm run test:bodylimits && npm run test:hidesecrets && npm run test:share && npm run test:sitefiles && npm run test:adminconfig && npm run test:referrals && npm run test:teams",
     "test:esp32": "node test/esp32.sim.mjs",
     "test:pump": "node test/pump.sim.mjs",
     "test:serial": "node test/serialLines.sim.mjs",
@@ -36,7 +36,8 @@
     "test:share": "tsx test/share.mjs",
     "test:sitefiles": "tsx test/siteFiles.mjs",
     "test:adminconfig": "tsx test/adminConfig.mjs",
-    "test:referrals": "tsx test/referrals.mjs"
+    "test:referrals": "tsx test/referrals.mjs",
+    "test:teams": "tsx test/teams.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

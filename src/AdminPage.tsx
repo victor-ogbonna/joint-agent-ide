@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useDocumentScroll } from "./useDocumentScroll";
-import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw, UserPlus, Trash2, MessageSquarePlus, Mail, MailX, Paperclip, LayoutDashboard, Activity, Server, Settings, BadgePercent } from "lucide-react";
+import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw, UserPlus, Trash2, MessageSquarePlus, Mail, MailX, Paperclip, LayoutDashboard, Activity, Server, Settings, BadgePercent, School } from "lucide-react";
 import OverviewTab from "./admin/OverviewTab";
 import UsersTab from "./admin/UsersTab";
 import TrafficTab from "./admin/TrafficTab";
 import PaymentsTab from "./admin/PaymentsTab";
 import ServerTab from "./admin/ServerTab";
 import CreatorsTab from "./admin/CreatorsTab";
+import TeamsTab from "./admin/TeamsTab";
 
 const TOKEN_KEY = "jointagent_admin_token";
 const TAB_KEY = "jointagent_admin_tab";
@@ -17,6 +18,7 @@ const TABS = [
   { id: "traffic", label: "Traffic", Icon: Activity },
   { id: "payments", label: "Payments", Icon: CreditCard },
   { id: "creators", label: "Creators", Icon: BadgePercent },
+  { id: "teams", label: "Teams", Icon: School },
   { id: "server", label: "Server", Icon: Server },
   { id: "settings", label: "Settings", Icon: Settings },
 ] as const;
@@ -453,6 +455,7 @@ export default function AdminPage() {
           {tab === "traffic" && <TrafficTab get={adminGet} />}
           {tab === "payments" && <PaymentsTab get={adminGet} />}
           {tab === "creators" && <CreatorsTab get={adminGet} post={adminPost} />}
+          {tab === "teams" && <TeamsTab get={adminGet} post={adminPost} />}
           {tab === "server" && <ServerTab get={adminGet} />}
         </main>
       )}
