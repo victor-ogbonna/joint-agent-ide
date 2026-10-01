@@ -282,6 +282,11 @@ export default function PlansModal({ onClose, onUpgrade, upgrading, prices = nul
               )}
             </div>
           )}
+
+          <p className="mt-4 text-center text-[11px] text-[var(--text-muted)]">
+            Buying for a school, class or team?{" "}
+            <a href="/team" target="_blank" rel="noopener" className="font-semibold text-[var(--accent-primary)] hover:underline">See team licenses</a>
+          </p>
         </div>
       </div>
     </div>

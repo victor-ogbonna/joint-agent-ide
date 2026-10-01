@@ -7,6 +7,7 @@ import PrivacyPage from './PrivacyPage.tsx';
 import ThanksPage from './ThanksPage.tsx';
 import SharePage from './SharePage.tsx';
 import CreatorPage from './CreatorPage.tsx';
+import TeamPage from './TeamPage.tsx';
 import { AuthProvider, useAuth } from './contexts/AuthContext.tsx';
 import './index.css';
 import { startInstallSupport } from './lib/installApp.ts';
@@ -33,6 +34,9 @@ const isThanksRoute = currentPath === '/thanks';
 // A creator's own page (server/creators.ts): signs in on its own, and is
 // never held behind the pre-launch lock, since creators promote before launch.
 const isCreatorRoute = currentPath === '/creator';
+// Team and school licenses (server/teams.ts): signs in on its own; joining by
+// a team's link (/team?join=CODE) lands here.
+const isTeamRoute = currentPath === '/team';
 // A shared project's read-only page (server/share.ts). Public like /privacy:
 // people opening a link someone sent them mostly have no account.
 const shareId = /^\/share\/([A-Za-z0-9_-]{22})$/.exec(currentPath)?.[1] ?? null;
@@ -152,6 +156,10 @@ createRoot(document.getElementById('root')!).render(
     ) : isCreatorRoute ? (
       <AuthProvider>
         <CreatorPage />
+      </AuthProvider>
+    ) : isTeamRoute ? (
+      <AuthProvider>
+        <TeamPage />
       </AuthProvider>
     ) : isWaitlistRoute ? (
       // Same marketing page, product doors removed. Rendered outside

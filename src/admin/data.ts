@@ -75,7 +75,7 @@ export interface Overview {
     providers: Record<string, number>;
     signups: { today: number; d7: number; d30: number };
     active: { d1: number; d7: number; d30: number };
-    plans: { owner: number; granted: number; pro: number; proRenewing: number; proEnding: number; trial?: number; free: number; early: number };
+    plans: { owner: number; granted: number; pro: number; proRenewing: number; proEnding: number; team?: number; trial?: number; free: number; early: number };
     pastDue: number;
     freeOverLimit: number;
     withProjects: number;
@@ -103,7 +103,7 @@ export interface AdminUser {
   createdAt: number | null;
   lastSignInAt: number | null;
   lastActiveAt: number | null;
-  plan: "owner" | "granted" | "pro" | "trial" | "free";
+  plan: "owner" | "granted" | "pro" | "team" | "trial" | "free";
   early: boolean;
   subscriptionStatus: string;
   renewsAt: number | null;
@@ -115,6 +115,8 @@ export interface AdminUser {
   /** The creator code the account came by. */
   referralCode?: string | null;
   trialEndsAt?: number | null;
+  /** The team or school license the account is on. */
+  teamId?: string | null;
 }
 
 export interface UsersResponse {

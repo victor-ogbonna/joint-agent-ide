@@ -9,6 +9,8 @@ import { subscriptionStanding, getOrCreateUserDoc } from "./quota";
 import { count as countStat } from "./stats";
 import { applyFirstMonthPayment, recordCommission, paymentFacts, CreatorError, type PlanPrice } from "./creators";
 import { firstMonthOfferUntil, discountedAmount, FIRST_MONTH_KIND, FIRST_MONTH_DISCOUNT_PCT } from "./referrals";
+import { applyTeamPayment, TeamError } from "./teams";
+import { TEAM_KIND } from "./teamRules";
 
 declare global {
   namespace Express {
@@ -21,6 +23,12 @@ declare global {
 /** The Paystack secret key, for the admin dashboard's payment history. */
 export function paystackSecretKey(): string | null {
   return getPaystackConfig().secretKey;
+}
+
+/** The public key the checkout opens with, once payments are fully set up; else null. */
+export function paystackPublicKey(): string | null {
+  const cfg = getPaystackConfig();
+  return cfg.secretKey && cfg.publicKey ? cfg.publicKey : null;
 }
 
 function getPaystackConfig() {
@@ -302,6 +310,17 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
       if (data.metadata?.uid !== req.uid) {
         return res.status(403).json({ error: "This transaction does not belong to the signed-in account." });
       }
+      // A team or school license (server/teams.ts): never PRO's own plan, and
+      // never a creator's commission.
+      if (data.metadata?.kind === TEAM_KIND) {
+        try {
+          const result = await applyTeamPayment(adminDb, req.uid!, data, Date.now());
+          return res.json({ success: true, team: true, paidUntil: result.paidUntil, seats: result.seats });
+        } catch (err) {
+          if (err instanceof TeamError) return res.status(err.status).json({ error: err.message });
+          throw err;
+        }
+      }
       // The discounted first month a creator code gives (server/creators.ts).
       if (data.metadata?.kind === FIRST_MONTH_KIND) {
         try {
@@ -394,6 +413,15 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
       if (uid) {
         switch (event?.event) {
           case "charge.success": {
+            // A team or school license (see /verify above).
+            if (data?.metadata?.kind === TEAM_KIND) {
+              try {
+                await applyTeamPayment(adminDb, uid, data, Date.now());
+              } catch (err: any) {
+                console.error(`[Paystack webhook] Team payment ${data?.reference} for uid=${uid} not applied: ${err?.message || err}`);
+              }
+              break;
+            }
             // The discounted first month (see /verify above).
             if (data?.metadata?.kind === FIRST_MONTH_KIND) {
               try {

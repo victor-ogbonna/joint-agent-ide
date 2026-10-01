@@ -1,4 +1,5 @@
 import { hasPaidPro, standing, type BillingState } from "./billing";
+import { teamGivesPro } from "./teamRules";
 
 /**
  * The admin dashboard's arithmetic: who is on which plan, sign-ups and
@@ -38,6 +39,9 @@ export interface UserDocSummary {
   /** A creator code's free PRO trial (server/creators.ts). */
   trialEndsAt?: number | null;
   referralCode?: string | null;
+  /** The team or school license the account is on (server/teams.ts), and when that's paid until. */
+  teamId?: string | null;
+  teamPaidUntil?: number | null;
 }
 
 export interface AccessLists {
@@ -46,7 +50,7 @@ export interface AccessLists {
   earlyAccessEmails: string[];
 }
 
-export type Plan = "owner" | "granted" | "pro" | "trial" | "free";
+export type Plan = "owner" | "granted" | "pro" | "team" | "trial" | "free";
 
 export interface AdminUserRow {
   uid: string;
@@ -73,6 +77,8 @@ export interface AdminUserRow {
   referralCode: string | null;
   /** When a code's PRO trial ends (or ended). */
   trialEndsAt: number | null;
+  /** The team or school license the account is on, if any. */
+  teamId: string | null;
 }
 
 const norm = (e: string | null | undefined) => (e || "").trim().toLowerCase();
@@ -92,6 +98,7 @@ export function planOf(user: Pick<AuthUser, "email" | "verified">, doc: UserDocS
   if (email && lists.ownerEmails.map(norm).includes(email)) return "owner";
   if (hasPaidPro(billingOf(doc), now)) return "pro";
   if (email && lists.proAccessEmails.map(norm).includes(email)) return "granted";
+  if (doc?.teamId && teamGivesPro(doc.teamPaidUntil ?? null, now)) return "team";
   if (typeof doc?.trialEndsAt === "number" && doc.trialEndsAt > now) return "trial";
   return "free";
 }
@@ -133,6 +140,7 @@ export function buildUserRows(
       overLimit: plan === "free" && projects > freeProjectLimit,
       referralCode: doc?.referralCode ?? null,
       trialEndsAt: doc?.trialEndsAt ?? null,
+      teamId: doc?.teamId ?? null,
     };
   }).sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
 }
@@ -144,7 +152,7 @@ export interface UserSummary {
   providers: Record<string, number>;
   signups: { today: number; d7: number; d30: number };
   active: { d1: number; d7: number; d30: number };
-  plans: { owner: number; granted: number; pro: number; proRenewing: number; proEnding: number; trial: number; free: number; early: number };
+  plans: { owner: number; granted: number; pro: number; proRenewing: number; proEnding: number; team: number; trial: number; free: number; early: number };
   /** Paid PRO accounts whose last renewal failed. */
   pastDue: number;
   freeOverLimit: number;
@@ -178,6 +186,7 @@ export function summarizeUsers(rows: AdminUserRow[], now: number): UserSummary {
       pro: count((r) => r.plan === "pro"),
       proRenewing: count((r) => r.plan === "pro" && r.proUntil === null),
       proEnding: count((r) => r.plan === "pro" && r.proUntil !== null),
+      team: count((r) => r.plan === "team"),
       trial: count((r) => r.plan === "trial"),
       free: count((r) => r.plan === "free"),
       early: count((r) => r.early),

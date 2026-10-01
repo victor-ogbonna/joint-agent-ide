@@ -10,6 +10,7 @@ import { buildCacheStatus } from "./buildCache";
 import { STATS_COLLECTION, liveToday, unflushed, lastHour, utcDay as todayUtc } from "./stats";
 import { librariesDirectory } from "./libraries";
 import { paystackSecretKey } from "./paystack";
+import { teamPaidUntilMap } from "./teams";
 import { getBoardById } from "./boards";
 import {
   buildUserRows, summarizeUsers, dayRange, buildSeries, totals, boardTotals, addStats, paymentRows, summarizePayments,
@@ -72,8 +73,13 @@ async function authUsers(fresh: boolean): Promise<AuthUser[]> {
 async function userDocs(fresh: boolean): Promise<Map<string, UserDocSummary>> {
   return cached("userDocs", 60_000, fresh, async () => {
     const snap = await adminDb.collection("users")
-      .select("subscriptionStatus", "currentPeriodEnd", "lastPaymentAt", "pastDueAt", "lastActiveAt", "compilesTotal", "aiMessagesTotal", "trialEndsAt", "referralCode")
+      .select("subscriptionStatus", "currentPeriodEnd", "lastPaymentAt", "pastDueAt", "lastActiveAt", "compilesTotal", "aiMessagesTotal", "trialEndsAt", "referralCode", "teamId")
       .get();
+    // Only for the plan column: without it, team members just read as Free.
+    const teams = await teamPaidUntilMap(adminDb).catch((err: any) => {
+      console.error("[Admin] Reading teams for the plan column failed:", err?.message || err);
+      return new Map<string, number | null>();
+    });
     const map = new Map<string, UserDocSummary>();
     for (const d of snap.docs) {
       const x = d.data();
@@ -87,6 +93,8 @@ async function userDocs(fresh: boolean): Promise<Map<string, UserDocSummary>> {
         aiMessagesTotal: typeof x.aiMessagesTotal === "number" ? x.aiMessagesTotal : 0,
         trialEndsAt: ms(x.trialEndsAt),
         referralCode: typeof x.referralCode === "string" ? x.referralCode : null,
+        teamId: typeof x.teamId === "string" && x.teamId ? x.teamId : null,
+        teamPaidUntil: typeof x.teamId === "string" && x.teamId ? teams.get(x.teamId) ?? null : null,
       });
     }
     return map;

@@ -5,6 +5,7 @@ import { loadAdminConfig } from "./adminConfig";
 import { accessLevelFor, bypassesLaunchLock, LAUNCH_LOCKED_CODE, LAUNCH_LOCKED_MESSAGE } from "./access";
 import { hasPaidPro, standing, type BillingState } from "./billing";
 import { isOnTrial } from "./referrals";
+import { teamGivesPro, teamMonthKey, nextTeamMonthStart } from "./teamRules";
 import { noteActive } from "./stats";
 
 /** Sentinel subscription status for accounts whose usage is never counted. */
@@ -19,7 +20,9 @@ export const UNMETERED_STATUS = "unmetered";
  * PRO: PRO_WINDOW_TOKENS a window (10x Free), and a subscriber at most
  * PAID_TOKEN_CAP a billing cycle (reset by server/paystack.ts on each
  * successful charge). A granted PRO account has the window, not the cycle
- * cap: nothing would ever reset it.
+ * cap: nothing would ever reset it. A team or school license's member
+ * (server/teams.ts) has PRO's window and at most PAID_TOKEN_CAP a calendar
+ * month (UTC).
  *
  * Only what the model writes is counted, as before.
  */
@@ -114,6 +117,13 @@ export interface UserQuotaDoc {
   cycleStartedAt: number | null;
   /** On a yearly plan, which of its months cycleTokensUsed counts. */
   cycleMonth: number | null;
+  /** The team or school license this account is on (server/teams.ts). */
+  teamId: string | null;
+  /** When that license is paid until. Read from the team, never stored here (teamPaidUntilFor). */
+  teamPaidUntil: number | null;
+  /** The calendar month (teamMonthKey) teamMonthTokens counts. */
+  teamMonth: number | null;
+  teamMonthTokens: number;
 }
 
 const DEFAULT_USER_DOC: UserQuotaDoc = {
@@ -142,6 +152,10 @@ const DEFAULT_USER_DOC: UserQuotaDoc = {
   planInterval: null,
   cycleStartedAt: null,
   cycleMonth: null,
+  teamId: null,
+  teamPaidUntil: null,
+  teamMonth: null,
+  teamMonthTokens: 0,
 };
 
 export function readUserDoc(data: any): UserQuotaDoc {
@@ -174,7 +188,37 @@ export function readUserDoc(data: any): UserQuotaDoc {
     planInterval: typeof data.planInterval === "string" ? data.planInterval : null,
     cycleStartedAt: time(data.cycleStartedAt),
     cycleMonth: typeof data.cycleMonth === "number" && Number.isFinite(data.cycleMonth) ? data.cycleMonth : null,
+    teamId: typeof data.teamId === "string" && data.teamId ? data.teamId : null,
+    teamPaidUntil: null,
+    teamMonth: typeof data.teamMonth === "number" && Number.isFinite(data.teamMonth) ? data.teamMonth : null,
+    teamMonthTokens: num(data.teamMonthTokens),
   };
+}
+
+// A team's paid-until date, kept a minute so a member's every request
+// doesn't read the team too. server/teams.ts forgets a team when it changes.
+const TEAM_CACHE_MS = 60_000;
+const teamCache = new Map<string, { at: number; paidUntil: number | null }>();
+
+/** When a team's license is paid until (teams/{id}), or null. */
+export async function teamPaidUntilFor(teamId: string, now = Date.now()): Promise<number | null> {
+  const hit = teamCache.get(teamId);
+  if (hit && now - hit.at < TEAM_CACHE_MS) return hit.paidUntil;
+  const snap = await adminDb.collection("teams").doc(teamId).get();
+  const v = snap.exists ? snap.get("paidUntil") : null;
+  const paidUntil = typeof v === "number" && Number.isFinite(v) ? v : null;
+  teamCache.set(teamId, { at: now, paidUntil });
+  return paidUntil;
+}
+
+export function forgetTeam(teamId: string): void {
+  teamCache.delete(teamId);
+}
+
+/** The account with its team's paid-until date filled in. */
+export async function withTeam(doc: UserQuotaDoc): Promise<UserQuotaDoc> {
+  if (!doc.teamId) return doc;
+  return { ...doc, teamPaidUntil: await teamPaidUntilFor(doc.teamId) };
 }
 
 export async function getOrCreateUserDoc(uid: string): Promise<UserQuotaDoc> {
@@ -182,10 +226,11 @@ export async function getOrCreateUserDoc(uid: string): Promise<UserQuotaDoc> {
   const snap = await ref.get();
   if (!snap.exists) {
     const now = FieldValue.serverTimestamp();
-    await ref.set({ ...DEFAULT_USER_DOC, createdAt: now, updatedAt: now });
-    return DEFAULT_USER_DOC;
+    const { teamPaidUntil: _notStored, ...fields } = DEFAULT_USER_DOC;
+    await ref.set({ ...fields, createdAt: now, updatedAt: now });
+    return { ...DEFAULT_USER_DOC };
   }
-  return readUserDoc(snap.data());
+  return withTeam(readUserDoc(snap.data()));
 }
 
 type Identity = { uid: string; email: string | null; emailVerified: boolean };
@@ -280,12 +325,18 @@ export function subscriptionStanding(doc: UserQuotaDoc, now = Date.now()) {
  * includes a cancelled subscription until its paid period ends, and a failed
  * renewal until its grace period ends (server/billing.ts). A creator code's
  * trial is PRO until it ends, metered like granted PRO: the 5-hour window,
- * no monthly cap.
+ * no monthly cap. A team license's member has PRO while it is paid, and for
+ * its grace days after (server/teamRules.ts).
  */
 export function tierOf(doc: UserQuotaDoc, level: string, now = Date.now()): Tier {
   if (level === "unmetered") return "unmetered";
-  if (hasPaidPro(billingOf(doc), now) || level === "pro" || isOnTrial(doc, now)) return "pro";
+  if (hasPaidPro(billingOf(doc), now) || level === "pro" || isOnTrial(doc, now) || onTeamPro(doc, now)) return "pro";
   return "free";
+}
+
+/** Whether the account has PRO through a team license. */
+export function onTeamPro(doc: Pick<UserQuotaDoc, "teamId" | "teamPaidUntil">, now: number): boolean {
+  return !!doc.teamId && teamGivesPro(doc.teamPaidUntil, now);
 }
 
 export function utcDay(ms = Date.now()): string {
@@ -398,6 +449,10 @@ export function allowanceFor(doc: UserQuotaDoc, tier: Tier, now = Date.now()): A
       // not something the server can promise.
       blockers.push({ reason: "cycle", at: month ? month.resetAt : end !== null && end > now ? end : null });
     }
+  } else if (onTeamPro(doc, now)) {
+    cycleUsed = doc.teamMonth === teamMonthKey(now) ? doc.teamMonthTokens : 0;
+    cycleCap = PAID_TOKEN_CAP;
+    if (cycleUsed >= cycleCap) blockers.push({ reason: "cycle", at: nextTeamMonthStart(now) });
   }
 
   const governing = blockers.length ? latest(blockers) : null;
@@ -561,6 +616,10 @@ export function tokenUsagePatch(doc: UserQuotaDoc, quota: Pick<QuotaContext, "ti
     const month = allowanceMonth(doc, now);
     patch.cycleTokensUsed = cycleUsedNow(doc, now) + tokens;
     if (month) patch.cycleMonth = month.key;
+  } else if (onTeamPro(doc, now)) {
+    const key = teamMonthKey(now);
+    patch.teamMonth = key;
+    patch.teamMonthTokens = (doc.teamMonth === key ? doc.teamMonthTokens : 0) + tokens;
   }
   return patch;
 }
@@ -575,7 +634,7 @@ export async function incrementTokenUsage(uid: string, quota: QuotaContext | und
   try {
     await adminDb.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
-      const doc = readUserDoc(snap.exists ? snap.data() : {});
+      const doc = await withTeam(readUserDoc(snap.exists ? snap.data() : {}));
       tx.set(ref, { ...tokenUsagePatch(doc, quota, tokens, Date.now()), updatedAt: FieldValue.serverTimestamp() }, { merge: true });
     });
   } catch (err) {
@@ -669,7 +728,7 @@ export async function consumeCompile(uid: string, email: string | null, emailVer
   const ref = adminDb.collection("users").doc(uid);
   return adminDb.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
-    const doc = readUserDoc(snap.exists ? snap.data() : {});
+    const doc = await withTeam(readUserDoc(snap.exists ? snap.data() : {}));
     if (tierOf(doc, level) !== "free") return { allowed: true, reason: null, left: null, resetAt: null, receipt: null };
     const { patch, ...spend } = spendCompile(doc, Date.now());
     if (patch) tx.set(ref, { ...patch, updatedAt: FieldValue.serverTimestamp() }, { merge: true });

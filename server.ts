@@ -15,17 +15,18 @@ import { readAccessLists, sanitiseEmailList } from './server/access';
 import { requireAuthAndQuota, requireFirebaseAuth, hasValidSignIn, incrementTokenUsage, getOrCreateUserDoc, consumeCompile, refundCompile, CompileReceipt, tierOf, allowanceFor, compileAllowance, formatWait, subscriptionStanding, FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES } from './server/quota';
 import { accessLevelFor } from './server/access';
 import { voiceNoteTooLong, MAX_VOICE_NOTE_SECONDS } from './server/voiceNote';
-import { registerPaystackRoutes, paystackSecretKey } from './server/paystack';
+import { registerPaystackRoutes, paystackSecretKey, paystackPublicKey } from './server/paystack';
 import { registerAdminStatsRoutes } from './server/adminStats';
 import { useBuildCache, readyBuildCache, startBuildCachePruning, damagedCacheFailure, reportDamagedCache, retireDamagedCache } from './server/buildCache';
 import { catchAsyncErrors, jsonErrorHandler } from './server/asyncErrors';
 import { runBuild, COMPILE_TIMEOUT_MS, fileSystemInclude } from './server/buildRun';
 import { readJsonBodies } from './server/bodyLimits';
 import { registerShareRoutes } from './server/share';
-import { isFirebaseAdminConfigured } from './server/firebaseAdmin';
+import { adminDb, isFirebaseAdminConfigured } from './server/firebaseAdmin';
 import { registerWaitlistRoutes } from './server/waitlist';
 import { registerFeedbackRoutes } from './server/feedback';
 import { registerCreatorRoutes } from './server/creators';
+import { registerTeamRoutes, teamForStatus, type TeamStatus } from './server/teams';
 import { canUseCode, firstMonthOfferUntil, firstMonthOfferOpensAt } from './server/referrals';
 import { registerGithubRoutes } from './server/github';
 import { registerFirebaseAuthProxy } from './server/firebaseAuthProxy';
@@ -382,6 +383,7 @@ registerPaystackRoutes(app, requireAdmin);
 registerWaitlistRoutes(app, requireAdmin);
 registerFeedbackRoutes(app, requireFirebaseAuth, requireAdmin);
 registerCreatorRoutes(app, requireAdmin);
+registerTeamRoutes(app, requireAdmin, { paystackPublicKey });
 registerGithubRoutes(app, requireFirebaseAuth);
 registerLibraryRoutes(app, requireFirebaseAuth);
 // Read-only links to a project's code and circuit, secrets hidden.
@@ -402,7 +404,16 @@ registerAdminStatsRoutes(app, requireAdmin, {
 // allowance — used both to seed the UI on load and by a paused user's
 // countdown (hence requireFirebaseAuth, not the quota-enforcing variant).
 app.get("/api/quota/status", requireFirebaseAuth, async (req, res) => {
-  const doc = await getOrCreateUserDoc(req.uid!);
+  let doc = await getOrCreateUserDoc(req.uid!);
+  // The account's team or school license (server/teams.ts), taking up an
+  // invitation to its address first. Never stops the status itself.
+  let team: TeamStatus | null = null;
+  try {
+    team = await teamForStatus(adminDb, { uid: req.uid!, email: req.email ?? null, emailVerified: req.emailVerified === true }, doc, Date.now());
+    doc = { ...doc, teamId: team ? team.id : null, teamPaidUntil: team ? team.paidUntil : null };
+  } catch (err: any) {
+    console.error(`[Teams] Status for uid=${req.uid} failed:`, err?.message || err);
+  }
   const level = accessLevelFor(req.email ?? null, req.emailVerified === true);
   const tier = tierOf(doc, level);
   const a = allowanceFor(doc, tier);
@@ -429,6 +440,8 @@ app.get("/api/quota/status", requireFirebaseAuth, async (req, res) => {
     canUseCode: canUseCode(doc, level),
     offerUntil: firstMonthOfferUntil(doc, Date.now()),
     offerOpensAt: firstMonthOfferOpensAt(doc, Date.now()),
+    // The team license, for the app's banner while it is in its grace days.
+    team,
   });
 });
 

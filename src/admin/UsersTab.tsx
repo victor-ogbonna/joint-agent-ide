@@ -5,13 +5,14 @@ import { useAdminData, type AdminGet, type AdminUser, type UsersResponse } from 
 import { full, date, ago } from "./format";
 import { providerName } from "./OverviewTab";
 
-type Filter = "all" | "free" | "pro" | "trial" | "granted" | "owner" | "overLimit" | "pastDue" | "early" | "creator";
+type Filter = "all" | "free" | "pro" | "team" | "trial" | "granted" | "owner" | "overLimit" | "pastDue" | "early" | "creator";
 type Sort = "newest" | "active" | "compiles" | "projects";
 
 const FILTERS: { id: Filter; label: string; test: (u: AdminUser) => boolean }[] = [
   { id: "all", label: "All", test: () => true },
   { id: "free", label: "Free", test: (u) => u.plan === "free" },
   { id: "pro", label: "PRO", test: (u) => u.plan === "pro" },
+  { id: "team", label: "Team PRO", test: (u) => u.plan === "team" },
   { id: "trial", label: "PRO trial", test: (u) => u.plan === "trial" },
   { id: "granted", label: "Granted PRO", test: (u) => u.plan === "granted" },
   { id: "owner", label: "Owner", test: (u) => u.plan === "owner" },
@@ -35,6 +36,7 @@ export function PlanBadge({ user }: { user: AdminUser }) {
   if (user.plan === "owner") return <span className={`${base} bg-[var(--bg-hover)] text-[var(--text-main)]`}>Owner</span>;
   if (user.plan === "granted") return <span className={`${base} bg-orange-500/15 text-orange-400`}>Granted PRO</span>;
   if (user.plan === "pro") return <span className={`${base} bg-orange-500/15 text-orange-400`}>PRO</span>;
+  if (user.plan === "team") return <span className={`${base} bg-orange-500/15 text-orange-400`}>Team PRO</span>;
   if (user.plan === "trial") return <span className={`${base} bg-orange-500/15 text-orange-400`}>PRO trial</span>;
   return <span className={`${base} bg-[var(--bg-hover)] text-[var(--text-muted)]`}>Free</span>;
 }

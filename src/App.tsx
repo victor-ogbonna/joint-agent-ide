@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from "react";
-import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass, Share2} from "lucide-react";
+import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass, Share2, Users} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip } from "recharts";
@@ -27,6 +27,8 @@ import GithubPanel from "./components/GithubPanel";
 import WebPreviewPanel from "./components/WebPreviewPanel";
 import PlansModal, { type FirstMonthOffer, type PlanPriceView, type BillingPeriod } from "./components/PlansModal";
 import { storedRef, clearStoredRef } from "./lib/referral";
+import TeamLicenseBanner from "./components/TeamLicenseBanner";
+import { readTeamStatus, stateLabel, type TeamStatusView } from "./lib/teams";
 import LibrariesModal from "./components/LibrariesModal";
 import OnboardingTour, { TourStep } from "./components/OnboardingTour";
 import { canInstallApp, installApp, isInstalledFullscreenApp, onInstallAvailabilityChange } from "./lib/installApp";
@@ -696,8 +698,11 @@ export default function App() {
   const [offer, setOffer] = useState<FirstMonthOffer | null>(null);
   const [offerLoading, setOfferLoading] = useState(false);
   const trialActive = trialEndsAt !== null && trialEndsAt > Date.now();
-  /** The code, trial and offer fields of /api/quota/status. */
+  // The team or school license the account is on (server/teams.ts).
+  const [teamStatus, setTeamStatus] = useState<TeamStatusView | null>(null);
+  /** The code, trial, offer and team fields of /api/quota/status. */
   const applyCodeStatus = (status: any) => {
+    setTeamStatus(readTeamStatus(status?.team));
     setTrialEndsAt(typeof status?.trialEndsAt === "number" ? status.trialEndsAt : null);
     setCanUseCode(status?.canUseCode === true);
     setOfferUntil(typeof status?.offerUntil === "number" ? status.offerUntil : null);
@@ -3317,7 +3322,7 @@ export default function App() {
             // accounts, a quiet badge for PRO ones — and nothing until the
             // server has said which, so PRO never flashes an upgrade.
             accountTier === null ? null : isPro ? (
-              <span className="pro-badge h-9 px-1 text-[15px] select-none" title={trialActive && trialEndsAt !== null ? `Free PRO trial, ends ${formatDay(trialEndsAt)}` : "You're on PRO"}>
+              <span className="pro-badge h-9 px-1 text-[15px] select-none" title={trialActive && trialEndsAt !== null ? `Free PRO trial, ends ${formatDay(trialEndsAt)}` : teamStatus && (teamStatus.state === "active" || teamStatus.state === "grace") ? `PRO through ${teamStatus.name}` : "You're on PRO"}>
                 <Zap size={16} fill="currentColor" strokeWidth={1.5} aria-hidden="true" />
                 PRO
               </span>
@@ -3481,6 +3486,9 @@ export default function App() {
             and big enough to hit without aiming. */}
         {isNarrow && <div className="px-2 pb-2">{modeSwitcher(true)}</div>}
       </header>
+
+      {/* A team or school license in its grace days: when PRO ends. */}
+      <TeamLicenseBanner team={teamStatus} />
 
       {/* Main Workspace Layout with Resizable Panels */}
       <main
@@ -4131,6 +4139,36 @@ export default function App() {
                 ) : null}
               </div>
             )}
+            {teamStatus && (
+              // The team or school license: its standing, and its page.
+              <div className="px-3 py-2 mb-1 border-b border-[var(--border-main)]">
+                <p className="flex items-center gap-1.5 text-[10px] text-[var(--text-muted)]">
+                  <Users size={11} />
+                  <span className="truncate text-[var(--text-main)] font-medium">{teamStatus.name}</span>
+                  <span className={`ml-auto shrink-0 ${teamStatus.state === "active" ? "text-green-500" : teamStatus.state === "grace" ? "text-orange-400" : "text-[var(--text-subtle)]"}`}>{stateLabel(teamStatus.state)}</span>
+                </p>
+                <p className="mt-1 text-[10px] text-[var(--text-subtle)]">
+                  {teamStatus.state === "active" && teamStatus.paidUntil !== null
+                    ? `Paid until ${formatDay(teamStatus.paidUntil)}`
+                    : teamStatus.state === "grace" && teamStatus.graceUntil !== null
+                      ? `Ended · PRO until ${formatDay(teamStatus.graceUntil)}`
+                      : teamStatus.state === "ended"
+                        ? "Ended · no PRO from this license"
+                        : "Not paid yet · no PRO from this license"}
+                </p>
+              </div>
+            )}
+            {/* In a new tab, so the workspace (and a connected board) stays as it is. */}
+            <a
+              href="/team"
+              target="_blank"
+              rel="noopener"
+              onClick={() => setIsMenuOpen(false)}
+              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition rounded-md mx-1"
+            >
+              <Users size={14} className="text-[var(--text-muted)]" />
+              {teamStatus ? (teamStatus.role === "admin" ? "Manage your team" : "Your team") : "Team & school licenses"}
+            </a>
             {canInstall && (
               <button
                 onClick={() => { setIsMenuOpen(false); installApp(); }}
