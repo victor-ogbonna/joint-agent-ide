@@ -3499,9 +3499,16 @@ export default function App() {
         <div className="relative h-12 px-2 sm:px-4 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
           {isNarrow && mobilePane === "files" ? (
-            // Workspace on a phone: the logo. The account row just below
-            // already shows the plan (PRO, or Upgrade to Pro).
-            <img src="/logo.png" alt="Joint-Agent IDE" className="w-7 h-7 rounded-lg shrink-0 shadow-md select-none" />
+            // Workspace on a phone: the logo and the name. The account row
+            // just below already shows the plan (PRO, or Upgrade to Pro).
+            // With a project open on a phone under 384 px wide, the logo
+            // alone, so the project's name beside it stays readable.
+            <div className="flex items-center gap-2 select-none" aria-label="Joint-Agent IDE">
+              <img src="/logo.png" alt="" className="w-7 h-7 rounded-lg shrink-0 shadow-md" />
+              <span className={`font-display font-bold text-[12px] text-[var(--text-main)] tracking-wide leading-tight whitespace-nowrap ${currentProjectId ? "hidden min-[384px]:inline" : ""}`}>
+                Joint-Agent <span className="gradient-text">IDE</span>
+              </span>
+            </div>
           ) : isNarrow ? (
             // On a phone's Agent and Code sections the plan takes the logo's
             // place: a way up for free accounts, a quiet badge for PRO ones —
@@ -3670,7 +3677,9 @@ export default function App() {
 
         {/* On a phone the modes get a row of their own: labelled, full width,
             and big enough to hit without aiming. */}
-        {isNarrow && <div className="px-2 pb-2">{modeSwitcher(true)}</div>}
+        {/* Sits right on the line under the header: its own bottom edge
+            overlaps that line (-mb-px), so the two read as one. */}
+        {isNarrow && <div className="px-2 -mb-px">{modeSwitcher(true)}</div>}
       </header>
 
       {/* A team or school license in its grace days: when PRO ends. */}

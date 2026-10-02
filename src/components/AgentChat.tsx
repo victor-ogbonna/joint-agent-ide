@@ -685,7 +685,10 @@ export default function AgentChat({
       {/* Message Feed Canvas */}
       <div className="flex-1 p-4 overflow-y-auto space-y-4 terminal-scrollbar bg-[var(--bg-panel)]">
         {messages.length === 0 ? (
-          <div className="h-full flex flex-col justify-center py-4">
+          // At least the panel's height, so it's centred when there's room;
+          // taller when it needs to be, so it scrolls with its space above
+          // and below intact instead of spilling over both edges.
+          <div className="min-h-full flex flex-col justify-center py-4">
             <div className="text-center space-y-4 mx-auto w-full">
               <div className="w-10 h-10 bg-[var(--bg-surface)] text-[var(--text-muted)] rounded-xl flex items-center justify-center mx-auto shadow-sm border border-[var(--border-light)]">
                 <Bot size={20} />
