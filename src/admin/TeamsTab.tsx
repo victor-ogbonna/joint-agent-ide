@@ -197,7 +197,7 @@ function TeamCard({ t, get, post, onChanged }: { t: TeamSummary; get: AdminGet; 
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   // Invoice
-  const [months, setMonths] = useState("4");
+  const [months, setMonths] = useState("1");
   const [invSeats, setInvSeats] = useState(String(t.seats));
   const [amount, setAmount] = useState("");
   const [invCurrency, setInvCurrency] = useState(t.currency);
@@ -217,7 +217,7 @@ function TeamCard({ t, get, post, onChanged }: { t: TeamSummary; get: AdminGet; 
     if (panel === which) { setPanel(null); return; }
     setError(null);
     setNote(null);
-    setMonths("4"); setInvSeats(String(t.seats)); setAmount(""); setInvCurrency(t.currency); setInvNote("");
+    setMonths("1"); setInvSeats(String(t.seats)); setAmount(""); setInvCurrency(t.currency); setInvNote("");
     setName(t.name); setSeats(String(t.seats)); setCurrency(t.currency);
     setPrice(t.customSeatPrice === null ? "" : (t.customSeatPrice / 100).toFixed(2));
     setPaidUntil(t.paidUntil ? new Date(t.paidUntil).toISOString().slice(0, 10) : "");
@@ -305,7 +305,6 @@ function TeamCard({ t, get, post, onChanged }: { t: TeamSummary; get: AdminGet; 
             <label htmlFor={`inv-months-${t.id}`} className={label}>Paid for</label>
             <select id={`inv-months-${t.id}`} className={input} value={months} onChange={(e) => setMonths(e.target.value)}>
               <option value="1">1 month</option>
-              <option value="4">1 term (4 months)</option>
               <option value="6">6 months</option>
               <option value="12">1 year</option>
             </select>

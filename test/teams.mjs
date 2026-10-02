@@ -9,7 +9,7 @@
  * uses (documents, merges, deletes, simple queries, transactions).
  */
 import {
-  DEFAULT_SEAT_PRICE, MIN_SEATS, MAX_SEATS, GRACE_MS, PERIODS, TEAM_KIND,
+  DEFAULT_SEAT_PRICE, DEFAULT_TEAM_CURRENCY, MIN_SEATS, MAX_SEATS, GRACE_MS, PERIODS, TEAM_KIND, isPeriod,
   validSeats, renewalPrice, addSeatsPrice, renewedUntil, licenseStanding, teamGivesPro, emailList,
   newJoinCode, normalizeJoinCode, teamMonthKey, nextTeamMonthStart, addMonths,
 } from "../server/teamRules.ts";
@@ -20,6 +20,8 @@ import {
 } from "../server/teams.ts";
 import { readUserDoc, tierOf, allowanceFor, tokenUsagePatch, onTeamPro, PAID_TOKEN_CAP } from "../server/quota.ts";
 import { planOf } from "../server/adminMetrics.ts";
+import { TEAM_PRICES, PERIOD_MONTHS, teamSavings, renewalPrice as shownRenewalPrice } from "../src/lib/teams.ts";
+import { PRO_PRICE, PRO_MONTHLY_PRICE } from "../src/lib/plans.ts";
 
 let bad = 0;
 const check = (cond, label, extra = "") => {
@@ -96,9 +98,10 @@ const random = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 2332
 
 console.log("Prices and seats");
 check(DEFAULT_SEAT_PRICE === 500 && MIN_SEATS === 5, "$5.00 a seat a month, at least 5 seats");
-check(renewalPrice(5, 500, "month") === 2500 && renewalPrice(5, 500, "term") === 10000 && renewalPrice(5, 500, "year") === 27500,
-  "5 seats: $25 a month, $100 a term (4 months), $275 a year (12 months for 11)");
-check(PERIODS.year.months === 12 && PERIODS.year.chargedMonths === 11 && PERIODS.term.months === 4, "a year is 12 months charged as 11; a term is 4");
+check(renewalPrice(5, 500, "month") === 2500 && renewalPrice(6, 500, "month") === 3000, "5 seats: $25 a month; 6 seats: $30");
+check(Object.keys(PERIODS).join() === "month" && PERIODS.month.months === 1 && PERIODS.month.chargedMonths === 1,
+  "paid a month at a time: no school term, no year");
+check(isPeriod("month") && !isPeriod("term") && !isPeriod("year") && !isPeriod(undefined), "only a month is a period");
 check(validSeats(5) === 5 && validSeats("30") === 30 && validSeats(4) === null && validSeats(MAX_SEATS + 1) === null && validSeats(5.5) === null && validSeats("x") === null,
   "seats: whole numbers from 5 to the most");
 check(validSeats(6, 8) === null && validSeats(8, 8) === 8, "never fewer seats than the team has members");
@@ -108,6 +111,20 @@ check(addSeatsPrice(2, 500, null, NOW) === 0 && addSeatsPrice(2, 500, NOW - DAY,
   "nothing to add for when nothing is paid");
 check(renewedUntil(NOW + 10 * DAY, NOW, 1) === addMonths(NOW + 10 * DAY, 1), "renewing early carries on from the current end");
 check(renewedUntil(NOW - 3 * DAY, NOW, 4) === addMonths(NOW, 4) && renewedUntil(null, NOW, 12) === addMonths(NOW, 12), "renewing late (or first) starts when paid");
+
+console.log("What the /team page shows");
+check(TEAM_PRICES.seatPrice === DEFAULT_SEAT_PRICE && TEAM_PRICES.currency === DEFAULT_TEAM_CURRENCY && TEAM_PRICES.minSeats === MIN_SEATS && TEAM_PRICES.maxSeats === MAX_SEATS,
+  "the prices shown before signing in are the server's");
+check(Object.keys(PERIOD_MONTHS).join() === Object.keys(PERIODS).join() && PERIOD_MONTHS.month.months === PERIODS.month.months && shownRenewalPrice(6, 500, "month") === renewalPrice(6, 500, "month"),
+  "and its monthly price is the server's");
+check(PRO_MONTHLY_PRICE.currency === "USD" && PRO_PRICE === `$${PRO_MONTHLY_PRICE.amount / 100}/month`, "PRO on your own: $7 a month, as the app lists it");
+const saved = teamSavings(5, 500, "USD", [null, PRO_MONTHLY_PRICE]);
+check(saved?.pro === 700 && saved.perSeat === 200 && saved.teamPays === 2500 && saved.onTheirOwn === 3500 && saved.saved === 1000,
+  "5 seats: $5 each instead of $7, $25 a month instead of $35: $10 saved");
+check(teamSavings(5, 500, "USD", [{ amount: 800, currency: "USD" }, PRO_MONTHLY_PRICE])?.perSeat === 300, "PRO's price from Paystack counts when it's in the team's currency");
+check(teamSavings(5, 500, "USD", [{ amount: 1000000, currency: "NGN" }, PRO_MONTHLY_PRICE])?.pro === 700, "in another currency, the listed $7 counts");
+check(teamSavings(5, 700, "USD", [null, PRO_MONTHLY_PRICE]) === null && teamSavings(5, 400000, "NGN", [null, PRO_MONTHLY_PRICE]) === null,
+  "nothing shown when a seat costs no less, or the prices can't be compared");
 
 console.log("The license's standing and the grace days");
 check(licenseStanding(null, NOW).state === "unpaid" && !teamGivesPro(null, NOW), "unpaid: no PRO");
@@ -202,28 +219,30 @@ check(!(await db.doc(`teamInvites/${inviteId(team.id, "dee@school.ng")}`).get())
 check(await throwsWith(() => cancelInvite(db, "ada", "dee@school.ng"), /isn't invited/), "and only once");
 
 console.log("Paying online");
-check(await throwsWith(() => quoteFor(db, "ben", { action: "renew", period: "term" }, NOW), /Only the team's admins/), "only an admin pays");
-check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "week" }, NOW), /month, a term or a year/), "a period is a month, a term or a year");
-check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "term", seats: 2 }, NOW), /5 to 2000 seats/), "never fewer than 5 seats");
+check(await throwsWith(() => quoteFor(db, "ben", { action: "renew", period: "month" }, NOW), /Only the team's admins/), "only an admin pays");
+check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "term" }, NOW), /a month at a time/), "a school term can't be bought (a page from before still open)");
+check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "year" }, NOW), /a month at a time/), "nor a year");
+check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "week" }, NOW), /a month at a time/), "nor anything else");
+check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "month", seats: 2 }, NOW), /5 to 2000 seats/), "never fewer than 5 seats");
 check(await throwsWith(() => quoteFor(db, "ada", { action: "add_seats", extra: 2 }, NOW), /while the license is paid/), "seats are added to a paid license only");
-const quote = await quoteFor(db, "ada", { action: "renew", period: "term", seats: 6 }, NOW);
-check(quote.amount === 12000 && quote.currency === "USD" && quote.seats === 6 && quote.paidUntilAfter === addMonths(NOW, 4), "a term for 6 seats: $120, paid for 4 months");
+const quote = await quoteFor(db, "ada", { action: "renew", period: "month", seats: 6 }, NOW);
+check(quote.amount === 3000 && quote.currency === "USD" && quote.seats === 6 && quote.months === 1 && quote.paidUntilAfter === addMonths(NOW, 1), "a month for 6 seats: $30, paid for 1 month");
 const payment = (over = {}) => ({
-  reference: "T-1", amount: 12000, currency: "USD", paid_at: new Date(NOW + 60000).toISOString(),
+  reference: "T-1", amount: 3000, currency: "USD", paid_at: new Date(NOW + 60000).toISOString(),
   customer: { email: "ada@school.ng" }, metadata: { uid: "ada", kind: TEAM_KIND, quoteId: quote.id }, ...over,
 });
 check(await throwsWith(() => applyTeamPayment(db, "ben", payment(), NOW), /doesn't belong/), "someone else's payment is refused");
-check(await throwsWith(() => applyTeamPayment(db, "ada", payment({ amount: 11999 }), NOW), /less than the price/), "less than the price is refused");
+check(await throwsWith(() => applyTeamPayment(db, "ada", payment({ amount: 2999 }), NOW), /less than the price/), "less than the price is refused");
 check(await throwsWith(() => applyTeamPayment(db, "ada", payment({ currency: "NGN" }), NOW), /wrong currency/), "another currency is refused");
 check(await throwsWith(() => applyTeamPayment(db, "ada", payment({ metadata: { uid: "ada", kind: TEAM_KIND, quoteId: "nope" } }), NOW), /couldn't find the price/), "an unknown price is refused");
 const applied = await applyTeamPayment(db, "ada", payment(), NOW);
-const paidUntil = addMonths(NOW + 60000, 4);
-check(applied.applied && applied.paidUntil === paidUntil && applied.seats === 6, "paid: 4 months from the payment, 6 seats");
+const paidUntil = addMonths(NOW + 60000, 1);
+check(applied.applied && applied.paidUntil === paidUntil && applied.seats === 6, "paid: a month from the payment, 6 seats");
 const again = await applyTeamPayment(db, "ada", payment(), NOW);
 check(again.already && !again.applied && again.paidUntil === paidUntil, "reported again (the app's check and the webhook): counted once");
 check(await throwsWith(() => applyTeamPayment(db, "ada", payment({ reference: "T-2" }), NOW), /paid already/), "one price can't be paid for twice");
 const rows = (await teamDetail(db, team.id, NOW)).payments;
-check(rows.length === 1 && rows[0].kind === "online" && rows[0].amount === 12000 && rows[0].period === "term", "the payment is listed");
+check(rows.length === 1 && rows[0].kind === "online" && rows[0].amount === 3000 && rows[0].period === "month" && rows[0].months === 1, "the payment is listed");
 
 console.log("Members have PRO");
 const benDoc = { ...readUserDoc((await db.doc("users/ben").get()).data()), teamPaidUntil: paidUntil };

@@ -11,6 +11,8 @@ export const PRO_MAX_REPLY_TOKENS = 40000;
 export const FREE_WINDOW_COMPILES = 8;
 export const FREE_DAILY_COMPILES = 25;
 export const PRO_PRICE = "$7/month";
+/** PRO_PRICE as an amount (cents), for sums such as what a team saves. */
+export const PRO_MONTHLY_PRICE = { amount: 700, currency: "USD" };
 /** Projects a Free account can have at once. Nothing is ever deleted to fit: past it, a new one waits for a free slot. */
 export const FREE_PROJECT_LIMIT = 5;
 

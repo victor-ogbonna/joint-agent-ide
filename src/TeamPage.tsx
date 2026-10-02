@@ -1,16 +1,16 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Users, Copy, Check, LogOut, Loader2, UserPlus, CreditCard, Link2, Mail, Shield, Trash2, RefreshCw, Pencil, X } from "lucide-react";
+import { Users, Copy, Check, LogOut, Loader2, UserPlus, CreditCard, Link2, Mail, Shield, Trash2, RefreshCw, Pencil, X, PiggyBank } from "lucide-react";
 import { useDocumentScroll } from "./useDocumentScroll";
 import { useAuth } from "./contexts/AuthContext";
 import GoogleSignInButton from "./components/GoogleSignInButton";
-import { formatMoney, formatDay } from "./lib/plans";
-import { PERIOD_MONTHS, renewalPrice, addSeatsPrice, daysLeft, stateLabel, type TeamPeriod, type LicenseState, type TeamRole, type TeamKind } from "./lib/teams";
+import { formatMoney, formatDay, PRO_MONTHLY_PRICE } from "./lib/plans";
+import { TEAM_PRICES, renewalPrice, addSeatsPrice, daysLeft, stateLabel, teamSavings, type TeamPeriod, type LicenseState, type TeamRole, type TeamKind } from "./lib/teams";
 
 /**
  * Team and school licenses (/team), by server/teams.ts. A team's admins pay
- * for its seats, invite people and manage who's on it; every member has PRO
- * while it's paid, and for 7 days after. Anyone signed in can start one, or
- * join one by its code or an invitation to their address.
+ * for its seats a month at a time, invite people and manage who's on it;
+ * every member has PRO while it's paid, and for 7 days after. Anyone signed
+ * in can start one, or join one by its code or an invitation to their address.
  */
 
 interface MemberRow { uid: string; email: string | null; emailVerified: boolean; role: TeamRole; joinedAt: number }
@@ -43,6 +43,7 @@ interface PageData {
   payments: boolean;
 }
 type Call = (path: string, body?: unknown) => Promise<{ ok: boolean; data: any }>;
+type ProPrice = { amount: number; currency: string };
 
 // Shown for paying by invoice or bank transfer instead (as on /privacy).
 const CONTACT_EMAIL = "victorogbonna313@gmail.com";
@@ -134,7 +135,6 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
   const seatPrice = team.seatPrice ?? prices.seatPrice;
   const currency = team.currency ?? prices.currency;
   const least = Math.max(prices.minSeats, team.memberCount);
-  const [period, setPeriod] = useState<TeamPeriod>("term");
   const [seats, setSeats] = useState(String(Math.max(team.seats, least)));
   // After a payment or a change of members, start from the team's new count.
   useEffect(() => { setSeats(String(Math.max(team.seats, least))); }, [team.seats, least]);
@@ -147,7 +147,7 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
   const seatsOk = Number.isInteger(seatCount) && seatCount >= least && seatCount <= prices.maxSeats;
   const extraCount = Number(extra);
   const extraOk = Number.isInteger(extraCount) && extraCount >= 1 && team.seats + extraCount <= prices.maxSeats;
-  const renewAmount = seatsOk ? renewalPrice(seatCount, seatPrice, period) : 0;
+  const renewAmount = seatsOk ? renewalPrice(seatCount, seatPrice, "month") : 0;
   const addAmount = extraOk ? addSeatsPrice(extraCount, seatPrice, team.paidUntil) : 0;
 
   const pay = async (what: string, body: Record<string, unknown>) => {
@@ -203,23 +203,12 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
     <section className={card}>
       <h2 className={heading}><CreditCard size={16} aria-hidden="true" /> {team.state === "unpaid" ? "Pay for the license" : "Renew"}</h2>
       <p className={`mt-1 ${small}`}>
-        {formatMoney(seatPrice, currency)} a seat a month, paid ahead. Nothing renews by itself: you renew here when it's due.
-        {team.state === "active" ? " Renewing now adds the time after the current end." : " It runs from the day you pay."}
+        {formatMoney(seatPrice, currency)} a seat a month, paid a month at a time. Nothing renews by itself: you renew here each month.
+        {team.state === "active" ? " Renewing now adds a month after the current end." : " It runs for a month from the day you pay."}
+        {" "}When a month ends unpaid, everyone keeps PRO for 7 more days.
       </p>
 
-      <fieldset className="mt-4">
-        <legend className="mb-2 text-[12px] font-medium text-[var(--text-muted)]">How long</legend>
-        <div className="grid gap-2 sm:grid-cols-3">
-          {(Object.keys(PERIOD_MONTHS) as TeamPeriod[]).map((p) => (
-            <label key={p} className={`flex min-h-[44px] cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-[13px] ${period === p ? "border-[var(--accent-primary)] bg-[var(--accent-primary-soft)]" : "border-[var(--border-main)]"}`}>
-              <input type="radio" name="period" value={p} checked={period === p} onChange={() => setPeriod(p)} className="accent-[var(--accent-primary)]" />
-              <span>{PERIOD_MONTHS[p].label}</span>
-            </label>
-          ))}
-        </div>
-      </fieldset>
-
-      <div className="mt-3 flex flex-wrap items-end gap-3">
+      <div className="mt-4 flex flex-wrap items-end gap-3">
         <div className="w-32">
           <label htmlFor="renew-seats" className="mb-1 block text-[12px] font-medium text-[var(--text-muted)]">Seats</label>
           <input id="renew-seats" className={input} inputMode="numeric" value={seats} onChange={(e) => setSeats(e.target.value.replace(/[^0-9]/g, ""))} />
@@ -229,10 +218,10 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
           className={primary}
           style={{ background: "var(--gradient-hero)" }}
           disabled={!paymentsOn || !seatsOk || paying !== null}
-          onClick={() => void pay("renew", { action: "renew", period, seats: seatCount })}
+          onClick={() => void pay("renew", { action: "renew", period: "month", seats: seatCount })}
         >
           {paying === "renew" ? <Loader2 size={16} className="animate-spin" /> : <CreditCard size={16} />}
-          {seatsOk ? `Pay ${formatMoney(renewAmount, currency)}` : "Pay"}
+          {seatsOk ? `Pay ${formatMoney(renewAmount, currency)} for 1 month` : "Pay"}
         </button>
       </div>
       {!seatsOk && <p className={`mt-1 ${small}`}>Choose {least} to {prices.maxSeats} seats{team.memberCount > prices.minSeats ? `: the team has ${team.memberCount} members` : ""}.</p>}
@@ -259,6 +248,24 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
         Paying by invoice or bank transfer? Email <a className="text-[var(--accent-primary)] hover:underline" href={`mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(`Team license: ${team.name}`)}`}>{CONTACT_EMAIL}</a> with your team's name and the seats you need.
       </p>
       <Notes error={error} note={note} />
+    </section>
+  );
+}
+
+/** What a team saves against everyone paying for PRO on their own, at the foot of the page. */
+function SavingsCard({ seats, seatPrice, currency, proMonthly }: { seats: number; seatPrice: number; currency: string; proMonthly: ProPrice | null }) {
+  const s = teamSavings(seats, seatPrice, currency, [proMonthly, PRO_MONTHLY_PRICE]);
+  if (!s) return null;
+  const money = (n: number) => formatMoney(n, currency);
+  return (
+    <section className={card} data-savings="">
+      <h2 className={heading}><PiggyBank size={16} className="text-[var(--accent-primary)]" aria-hidden="true" /> What you save</h2>
+      <p className="mt-2 text-[14px] text-[var(--text-main)]">
+        <strong>{money(seatPrice)}</strong> a seat a month, instead of {money(s.pro)} for PRO on your own: <strong className="text-[var(--accent-primary)]">{money(s.perSeat)} saved</strong> on every seat, every month.
+      </p>
+      <p className={`mt-1 ${small}`}>
+        {seats} seats: {money(s.teamPays)} a month instead of {money(s.onTheirOwn)}. That's {money(s.saved)} saved every month.
+      </p>
     </section>
   );
 }
@@ -473,7 +480,7 @@ function WaitingInvites({ data, call, reload }: { data: PageData; call: Call; re
   );
 }
 
-function NoTeam({ data, call, reload, joinFromLink }: { data: PageData; call: Call; reload: () => Promise<void>; joinFromLink: string }) {
+function NoTeam({ data, call, reload, joinFromLink, proMonthly }: { data: PageData; call: Call; reload: () => Promise<void>; joinFromLink: string; proMonthly: ProPrice | null }) {
   const join = useAction(call, reload);
   const create = useAction(call, reload);
   const [code, setCode] = useState(joinFromLink);
@@ -482,7 +489,8 @@ function NoTeam({ data, call, reload, joinFromLink }: { data: PageData; call: Ca
   const [seats, setSeats] = useState(String(data.prices.minSeats));
   const seatCount = Number(seats);
   const seatsOk = Number.isInteger(seatCount) && seatCount >= data.prices.minSeats && seatCount <= data.prices.maxSeats;
-  const price = (p: TeamPeriod) => formatMoney(renewalPrice(seatsOk ? seatCount : data.prices.minSeats, data.prices.seatPrice, p), data.prices.currency);
+  const shownSeats = seatsOk ? seatCount : data.prices.minSeats;
+  const price = (p: TeamPeriod) => formatMoney(renewalPrice(shownSeats, data.prices.seatPrice, p), data.prices.currency);
 
   return (
     <div className="space-y-4">
@@ -521,7 +529,7 @@ function NoTeam({ data, call, reload, joinFromLink }: { data: PageData; call: Ca
         <h2 className={heading}><Users size={16} aria-hidden="true" /> Start a school or team license</h2>
         <p className={`mt-1 ${small}`}>
           PRO for everyone on it: {formatMoney(data.prices.seatPrice, data.prices.currency)} a seat a month, at least {data.prices.minSeats} seats.
-          Pay for a month, a school term (4 months) or a year (12 months for the price of 11). When a license ends, everyone keeps PRO for 7 more days.
+          Paid a month at a time. When a license ends, everyone keeps PRO for 7 more days.
         </p>
         <form
           className="mt-4 space-y-3"
@@ -547,7 +555,7 @@ function NoTeam({ data, call, reload, joinFromLink }: { data: PageData; call: Ca
             <input id="new-team-seats" className={input} inputMode="numeric" value={seats} onChange={(e) => setSeats(e.target.value.replace(/[^0-9]/g, ""))} />
           </div>
           <p className={small}>
-            {seatsOk ? `${seatCount} seats: ` : `${data.prices.minSeats} seats: `}{price("month")} a month, {price("term")} a term, or {price("year")} a year. You pay on the next step; members get PRO once it's paid.
+            {shownSeats} seats: {price("month")} a month. You pay on the next step; members get PRO once it's paid.
           </p>
           <button type="submit" className={primary} style={{ background: "var(--gradient-hero)" }} disabled={create.busy !== null || name.trim().length < 2 || !seatsOk}>
             {create.busy ? <Loader2 size={16} className="animate-spin" /> : null} Start the license
@@ -555,6 +563,8 @@ function NoTeam({ data, call, reload, joinFromLink }: { data: PageData; call: Ca
         </form>
         <Notes error={create.error} note={create.note} />
       </section>
+
+      <SavingsCard seats={shownSeats} seatPrice={data.prices.seatPrice} currency={data.prices.currency} proMonthly={proMonthly} />
     </div>
   );
 }
@@ -596,6 +606,22 @@ export default function TeamPage() {
     void load();
   }, [user, load]);
 
+  // PRO's own monthly price from Paystack, for what a team saves (else the $7 the app lists).
+  const [proMonthly, setProMonthly] = useState<ProPrice | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/paystack/prices");
+        const m = (await res.json().catch(() => null))?.monthly;
+        if (!cancelled && res.ok && m && typeof m.amount === "number" && typeof m.currency === "string") setProMonthly({ amount: m.amount, currency: m.currency });
+      } catch {
+        // The listed $7 stands in.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   const team = data?.team ?? null;
 
   return (
@@ -604,7 +630,7 @@ export default function TeamPage() {
         <header className="mb-6 flex items-center justify-between gap-3">
           <a href="/" className="flex items-center gap-2.5">
             <img src="/logo.png" alt="" className="h-9 w-9 rounded-lg" />
-            <span className="font-display text-[15px] font-bold">Joint-Agent IDE</span>
+            <span className="font-display text-[15px] font-bold">Joint-Agent <span className="gradient-text">IDE</span></span>
           </a>
           {user && (
             <button type="button" onClick={() => void signOut()} className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg px-3 text-[13px] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]">
@@ -618,11 +644,14 @@ export default function TeamPage() {
         {loading ? (
           <p className="mt-6 flex items-center gap-2 text-[14px] text-[var(--text-muted)]"><Loader2 size={16} className="animate-spin" /> Loading…</p>
         ) : !user ? (
-          <div className={`mt-6 ${card}`}>
-            <p className="text-[14px] text-[var(--text-muted)]">
-              {joinFromLink ? "Sign in to join your team." : "Sign in to start a school or team license, or to join one."}
-            </p>
-            <GoogleSignInButton className={`mt-4 ${primary}`} style={{ background: "var(--gradient-hero)" }} />
+          <div className="mt-6 space-y-4">
+            <div className={card}>
+              <p className="text-[14px] text-[var(--text-muted)]">
+                {joinFromLink ? "Sign in to join your team." : "Sign in to start a school or team license, or to join one."}
+              </p>
+              <GoogleSignInButton className={`mt-4 ${primary}`} style={{ background: "var(--gradient-hero)" }} />
+            </div>
+            <SavingsCard seats={TEAM_PRICES.minSeats} seatPrice={TEAM_PRICES.seatPrice} currency={TEAM_PRICES.currency} proMonthly={proMonthly} />
           </div>
         ) : error && !data ? (
           <p role="alert" className="mt-6 text-[14px] text-red-500">{error}</p>
@@ -633,7 +662,7 @@ export default function TeamPage() {
             {error && <p role="alert" className="text-[14px] text-red-500">{error}</p>}
             <WaitingInvites data={data} call={call} reload={load} />
             {!team ? (
-              <NoTeam data={data} call={call} reload={load} joinFromLink={joinFromLink} />
+              <NoTeam data={data} call={call} reload={load} joinFromLink={joinFromLink} proMonthly={proMonthly} />
             ) : (
               <>
                 <Overview team={team} />
@@ -644,6 +673,7 @@ export default function TeamPage() {
                     <InviteCard team={team} call={call} reload={load} />
                     <MembersCard team={team} me={user.uid} call={call} reload={load} />
                     <PaymentsCard team={team} />
+                    <SavingsCard seats={team.seats} seatPrice={team.seatPrice ?? data.prices.seatPrice} currency={team.currency ?? data.prices.currency} proMonthly={proMonthly} />
                   </>
                 )}
                 <div className="flex flex-wrap items-start gap-2">

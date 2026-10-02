@@ -4,9 +4,9 @@
  *
  *   - A team pays per seat: DEFAULT_SEAT_PRICE a member a month unless the
  *     admin page sets a special price for it, at least MIN_SEATS seats.
- *   - It pays ahead for a month, a school term (4 months) or a year (12
- *     months for the price of 11). No card is charged by itself: the team's
- *     admin renews by paying again, or we record an invoice that was paid.
+ *   - It pays a month ahead at a time. No card is charged by itself: the
+ *     team's admin renews by paying again, or we record an invoice that was
+ *     paid.
  *   - Every member has PRO while the license is paid, and for GRACE_DAYS
  *     after it ends, which every member is shown counting down.
  *   - Seats added part-way through are charged for the days left.
@@ -27,16 +27,15 @@ export const MAX_INVITES_AT_ONCE = 400;
 /** Seats added part-way are charged per day, a month counting as this many. */
 const DAYS_PER_MONTH = 30;
 
-export type TeamPeriod = "month" | "term" | "year";
+/** Monthly only, for now. */
+export type TeamPeriod = "month";
 
 export const PERIODS: Record<TeamPeriod, { months: number; chargedMonths: number; label: string }> = {
   month: { months: 1, chargedMonths: 1, label: "1 month" },
-  term: { months: 4, chargedMonths: 4, label: "1 term (4 months)" },
-  year: { months: 12, chargedMonths: 11, label: "1 year (12 months for the price of 11)" },
 };
 
 export function isPeriod(v: unknown): v is TeamPeriod {
-  return v === "month" || v === "term" || v === "year";
+  return v === "month";
 }
 
 export function addMonths(ms: number, k: number): number {
