@@ -771,7 +771,7 @@ export default function AgentChat({
                       <button
                         type="button"
                         onClick={() => onRetryFailed(msg.id)}
-                        className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-md text-xs font-bold shadow-sm transition flex items-center gap-1.5"
+                        className="px-3 py-1.5 bg-[var(--accent-primary)] hover:opacity-90 text-white rounded-md text-xs font-bold shadow-sm transition flex items-center gap-1.5"
                       >
                         <RotateCcw size={13} /> Try again
                       </button>
@@ -796,7 +796,7 @@ export default function AgentChat({
                             onSendMessage(message, "implement");
                             setPendingAnswers({});
                           }}
-                          className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-md text-xs font-bold shadow-sm transition flex items-center gap-1.5"
+                          className="px-4 py-1.5 bg-[var(--accent-primary)] hover:opacity-90 text-white rounded-md text-xs font-bold shadow-sm transition flex items-center gap-1.5"
                         >
                           <Check size={14} /> Proceed to Implement
                         </button>
