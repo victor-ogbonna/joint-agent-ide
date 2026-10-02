@@ -563,9 +563,17 @@ export function registerTeamProjectRoutes(app: express.Express) {
     res.status(429).json({ error: "Too many tries. Wait a while, then try again." });
     return true;
   };
+  // Reads too: each reads team projects from the database (a list, up to
+  // 200), so a script can't run up the bill. The app asks once per project
+  // opened; a person stays far below this.
+  const readLimited = (req: express.Request, res: express.Response) => {
+    if (!tooMany(`teamprojects-read:${req.uid}`, 1200, Date.now())) return false;
+    res.status(429).json({ error: "Too many tries. Wait a while, then try again." });
+    return true;
+  };
   const get = (path: string, what: string, fn: (req: express.Request) => Promise<unknown>) =>
     app.get(path, requireFirebaseAuth, async (req, res) => {
-      if (!ready(res)) return;
+      if (!ready(res) || readLimited(req, res)) return;
       res.setHeader("Cache-Control", "no-store");
       try { res.json(await fn(req)); } catch (err) { sendError(res, err, what); }
     });

@@ -233,18 +233,45 @@ async function commission(uid: string, data: any) {
   }
 }
 
-export function registerPaystackRoutes(app: express.Express, requireAdmin: express.RequestHandler) {
+// Each of these asks Paystack with the secret key. Unlimited, one account
+// could have Paystack slow down every call made with the key, real payments'
+// checks included; so each is limited per account, an hour at a time.
+const calls = new Map<string, { count: number; start: number }>();
+function tooManyCalls(key: string, max: number, now = Date.now()): boolean {
+  const e = calls.get(key);
+  if (!e || now - e.start > 60 * 60 * 1000) {
+    calls.set(key, { count: 1, start: now });
+    if (calls.size > 20000) calls.delete(calls.keys().next().value as string);
+    return false;
+  }
+  e.count += 1;
+  return e.count > max;
+}
+/** A Paystack transaction reference: letters, digits, "-", ".", "=" (and "_"), as Paystack makes them. */
+export function isPaystackReference(v: unknown): v is string {
+  return typeof v === "string" && /^[A-Za-z0-9._=-]{1,200}$/.test(v);
+}
+
+/** The admin password typed again, checked by server.ts (with its limit on wrong tries). */
+export type ConfirmAdminPassword = (req: express.Request, password: unknown) => "ok" | "wrong" | "locked";
+
+export function registerPaystackRoutes(app: express.Express, requireAdmin: express.RequestHandler, confirmPassword: ConfirmAdminPassword) {
   // ---- Admin key/plan management (mirrors the Gemini key admin card) ----
   app.get("/api/admin/paystack-config", requireAdmin, (req, res) => {
     res.setHeader("Cache-Control", "no-store");
     res.json(paystackConfigView());
   });
 
-  // The secret key in full, only when the admin presses Show (it's never
-  // part of the page otherwise).
-  app.get("/api/admin/paystack-secret", requireAdmin, (req, res) => {
+  // The secret key in full, only when the admin presses Show and types the
+  // admin password again (it's never part of the page otherwise): with it,
+  // anyone could take money out of the Paystack account, so a stolen admin
+  // session alone must not be enough to read it.
+  app.post("/api/admin/paystack-secret", requireAdmin, (req, res) => {
     res.setHeader("Cache-Control", "no-store");
-    console.log("[Paystack] The secret key was shown on the admin page.");
+    const check = confirmPassword(req, req.body?.password);
+    if (check === "locked") return res.status(429).json({ error: "Too many wrong passwords. Try again in a few minutes." });
+    if (check !== "ok") return res.status(403).json({ error: "That isn't the admin password." });
+    console.log(`[Paystack] The secret key was shown on the admin page (from ${req.ip || "an unknown address"}).`);
     res.json({ secretKey: getPaystackConfig().secretKey });
   });
 
@@ -370,6 +397,12 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
     if (!reference || typeof reference !== "string") {
       return res.status(400).json({ error: "Transaction reference is required." });
     }
+    if (!isPaystackReference(reference)) {
+      return res.status(400).json({ error: "That isn't a Paystack transaction reference." });
+    }
+    if (tooManyCalls(`verify:${req.uid}`, 60)) {
+      return res.status(429).json({ error: "Too many checks. Wait a while, then try again." });
+    }
     const cfg = getPaystackConfig();
     if (!cfg.secretKey) {
       return res.status(503).json({ error: "Payments are not configured on the server yet." });
@@ -433,6 +466,9 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
 
   // ---- Self-serve cancel (called from the profile menu's "Cancel Subscription") ----
   app.post("/api/paystack/cancel", requireFirebaseAuth, async (req, res) => {
+    if (tooManyCalls(`cancel:${req.uid}`, 20)) {
+      return res.status(429).json({ error: "Too many tries. Wait a while, then try again." });
+    }
     const cfg = getPaystackConfig();
     if (!cfg.secretKey) {
       return res.status(503).json({ error: "Payments are not configured on the server yet." });

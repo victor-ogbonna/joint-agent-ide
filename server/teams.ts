@@ -945,7 +945,9 @@ export async function teamLicenseMap(db: Db): Promise<Map<string, { paidUntil: n
   return map;
 }
 
-// Starting or joining a team is cheap to try, so each is limited per account.
+// Every team action is cheap to try and costs database reads and writes, so
+// each is limited per account, an hour at a time: far above what a person
+// does, well below what a script could.
 const tries = new Map<string, { count: number; start: number }>();
 const TRY_WINDOW_MS = 60 * 60 * 1000;
 
@@ -953,6 +955,8 @@ function tooMany(key: string, max: number, now: number): boolean {
   const e = tries.get(key);
   if (!e || now - e.start > TRY_WINDOW_MS) {
     tries.set(key, { count: 1, start: now });
+    // Never grows without end: the oldest entry goes first.
+    if (tries.size > 20000) tries.delete(tries.keys().next().value as string);
     return false;
   }
   e.count += 1;
@@ -1013,6 +1017,12 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
     return false;
   };
 
+  const limited = (res: express.Response, key: string, max: number) => {
+    if (!tooMany(key, max, Date.now())) return false;
+    res.status(429).json({ error: "Too many tries. Wait a while, then try again." });
+    return true;
+  };
+
   if (isFirebaseAdminConfigured()) {
     backfillPaidFor(adminDb)
       .then((n) => { if (n) console.log(`[Teams] Recorded what ${n} team license(s) were paid for, for their grace days.`); })
@@ -1022,7 +1032,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   // ---- The /team page ----
 
   app.get("/api/team/me", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `me:${req.uid}`, 600)) return;
     res.setHeader("Cache-Control", "no-store");
     try {
       await getOrCreateUserDoc(req.uid!);
@@ -1071,7 +1081,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   });
 
   app.post("/api/team/leave", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `leave:${req.uid}`, 30)) return;
     try {
       await leaveTeam(adminDb, req.uid!);
       res.json({ ok: true });
@@ -1081,7 +1091,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   });
 
   app.post("/api/team/invites/decline", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `decline:${req.uid}`, 60)) return;
     try {
       await declineInvite(adminDb, whoOf(req), req.body?.teamId);
       res.json({ ok: true });
@@ -1093,7 +1103,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   // ---- A team's admins ----
 
   app.post("/api/team/settings", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `settings:${req.uid}`, 60)) return;
     try {
       const body = req.body || {};
       await updateTeamSettings(adminDb, req.uid!, { name: body.name, joinOpen: body.joinOpen, newCode: body.newCode });
@@ -1104,7 +1114,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   });
 
   app.post("/api/team/invites", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `invite:${req.uid}`, 60)) return;
     try {
       res.json({ ok: true, ...(await inviteEmails(adminDb, req.uid!, req.body?.emails, Date.now())) });
     } catch (err) {
@@ -1113,7 +1123,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   });
 
   app.post("/api/team/invites/cancel", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `uninvite:${req.uid}`, 200)) return;
     try {
       await cancelInvite(adminDb, req.uid!, req.body?.email);
       res.json({ ok: true });
@@ -1123,7 +1133,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   });
 
   app.post("/api/team/members/remove", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `remove:${req.uid}`, 200)) return;
     try {
       await removeMember(adminDb, req.uid!, req.body?.uid);
       res.json({ ok: true });
@@ -1133,7 +1143,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   });
 
   app.post("/api/team/members/role", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `role:${req.uid}`, 200)) return;
     try {
       await setRole(adminDb, req.uid!, req.body?.uid, req.body?.role);
       res.json({ ok: true });
@@ -1145,7 +1155,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   // The price to pay online, and what the checkout needs. The payment is
   // applied by /api/paystack/verify and the webhook (server/paystack.ts).
   app.post("/api/team/checkout", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `checkout:${req.uid}`, 30)) return;
     const publicKey = deps.paystackPublicKey();
     if (!publicKey) return res.status(503).json({ error: "Online payments aren't set up yet. Contact us to pay by invoice." });
     if (!req.email) return res.status(400).json({ error: "Your account needs an email address to pay online." });

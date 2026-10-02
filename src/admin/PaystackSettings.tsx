@@ -6,7 +6,9 @@ import { formatMoney } from "../lib/plans";
  * Paystack on the admin page (server/paystack.ts): the keys every payment
  * goes through (PRO monthly, PRO yearly, team licenses) and the two PRO
  * plans, each shown as it is and editable on its own. The secret key is
- * masked until Show; each plan is checked with Paystack, so the page says
+ * masked until Show, which asks for the admin password again (a stolen admin
+ * session alone can't read it), and hides it again after a minute; each
+ * plan is checked with Paystack, so the page says
  * what customers are really charged. Moving from test keys to live ones (or
  * back) changes both keys at once: the server refuses a test key beside a
  * live one, so a new key of the other kind asks for its partner too.
@@ -82,6 +84,15 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
   const [pair, setPair] = useState("");
   const [showTyped, setShowTyped] = useState(false);
   const [secret, setSecret] = useState<string | null>(null);
+  /** Show pressed: the admin password, asked again before the secret key is shown. */
+  const [askPassword, setAskPassword] = useState(false);
+  const [password, setPassword] = useState("");
+  // Shown for a minute at most, so it isn't left on the screen.
+  useEffect(() => {
+    if (!secret) return;
+    const t = setTimeout(() => setSecret(null), 60_000);
+    return () => clearTimeout(t);
+  }, [secret]);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -181,15 +192,29 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
     });
   };
 
-  const toggleSecret = async () => {
+  const toggleSecret = () => {
     if (secret) { setSecret(null); return; }
+    setMessage(null);
+    setPassword("");
+    setAskPassword((v) => !v);
+  };
+  const showSecret = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!password) { setMessage({ type: "error", text: "Type the admin password first." }); return; }
+    setBusy(true);
+    setMessage(null);
     try {
-      const res = await get("/api/admin/paystack-secret");
+      const res = await post("/api/admin/paystack-secret", { password });
       if (!res) return;
-      const data = await res.json();
-      if (res.ok && data.secretKey) setSecret(data.secretKey);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.secretKey) { setMessage({ type: "error", text: data.error || "The secret key couldn't be shown." }); return; }
+      setSecret(data.secretKey);
+      setAskPassword(false);
     } catch {
       setMessage({ type: "error", text: "Could not reach the server." });
+    } finally {
+      setPassword("");
+      setBusy(false);
     }
   };
   const copySecret = async () => {
@@ -208,7 +233,7 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
         {editing !== field && (
           <div className="flex shrink-0 flex-wrap gap-1.5">
             {field === "secretKey" && config?.hasSecretKey && (
-              <button type="button" className={smallButton} onClick={() => void toggleSecret()}>{secret ? <EyeOff size={11} /> : <Eye size={11} />} {secret ? "Hide" : "Show"}</button>
+              <button type="button" className={smallButton} onClick={toggleSecret}>{secret ? <EyeOff size={11} /> : <Eye size={11} />} {secret ? "Hide" : "Show"}</button>
             )}
             {field === "secretKey" && secret && (
               <button type="button" className={smallButton} onClick={() => void copySecret()}>{copied ? <Check size={11} /> : <Copy size={11} />} {copied ? "Copied" : "Copy"}</button>
@@ -222,6 +247,26 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
           </div>
         )}
       </div>
+      {field === "secretKey" && askPassword && !secret && editing !== field && (
+        <form onSubmit={showSecret} className="mt-2 flex flex-wrap items-center gap-2" data-paystack-password="">
+          <label htmlFor="paystack-admin-password" className="basis-full text-[11px] text-[var(--text-muted)]">Type the admin password again to show the secret key.</label>
+          <input
+            id="paystack-admin-password"
+            type="password"
+            autoFocus
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="current-password"
+            className={`${input} flex-1 basis-48`}
+          />
+          <button type="submit" disabled={busy} className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50">
+            {busy ? <Loader2 size={13} className="animate-spin" /> : <Eye size={13} />} Show
+          </button>
+          <button type="button" onClick={() => { setAskPassword(false); setPassword(""); }} className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-main)] px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)]">
+            <X size={13} /> Cancel
+          </button>
+        </form>
+      )}
       {editing === field ? (
         <form onSubmit={save} className="mt-2 flex flex-wrap items-center gap-2">
           <label htmlFor={`paystack-${field}`} className="sr-only">{HINTS[field].label}</label>

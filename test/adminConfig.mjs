@@ -34,7 +34,9 @@ const afterRemove = loadAdminConfig();
 check(!("paystackYearlyPlanCode" in afterRemove) && afterRemove.paystackPlanCode === "PLN_x", "the yearly plan can be removed, the monthly one stays");
 
 // Checking a plan with Paystack (server/paystack.ts), with Paystack stood in for.
-const { checkPlan } = await import("../server/paystack.ts");
+const { checkPlan, isPaystackReference } = await import("../server/paystack.ts");
+check(isPaystackReference("T685312322670591") && isPaystackReference("ref-2026.10=a_b") && !isPaystackReference("../transaction/list") && !isPaystackReference("a b")
+  && !isPaystackReference("x".repeat(201)) && !isPaystackReference(""), "a payment check takes only a Paystack reference (never a path or anything longer)");
 const reply = (status, body) => async () => ({ status, ok: status >= 200 && status < 300, json: async () => body });
 const yearly = await checkPlan("sk_live_x", "PLN_year", reply(200, { status: true, data: { name: "PRO yearly", amount: 8928000, currency: "NGN", interval: "annually" } }));
 check(yearly.ok && yearly.amount === 8928000 && yearly.currency === "NGN" && yearly.interval === "annually" && yearly.name === "PRO yearly", "a plan Paystack knows: its name, price and interval");
@@ -47,7 +49,7 @@ const express = (await import("express")).default;
 const { registerPaystackRoutes } = await import("../server/paystack.ts");
 const app = express();
 app.use(express.json());
-registerPaystackRoutes(app, (_req, _res, next) => next());
+registerPaystackRoutes(app, (_req, _res, next) => next(), (_req, password) => (password === "right-pass" ? "ok" : password === "locked" ? "locked" : "wrong"));
 const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
 const base = `http://127.0.0.1:${server.address().port}`;
 const call = async (method, p, body) => {
@@ -62,8 +64,16 @@ check(r.status === 200 && r.body.durable === true && r.body.publicKey === "pk_li
 r = await call("GET", "/api/admin/paystack-config");
 check(r.body.maskedSecretKey?.startsWith("sk_liv") && r.body.maskedSecretKey.endsWith("cret") && r.body.sources.secretKey === "admin" && r.body.sources.planCode === "admin",
   "the page shows the secret masked, and where each setting comes from");
-r = await call("GET", "/api/admin/paystack-secret");
-check(r.body.secretKey === "sk_live_abc123secret", "Show: the secret key in full, only when asked");
+const plainGet = await fetch(base + "/api/admin/paystack-secret");
+check(plainGet.status === 404 && !(await plainGet.text()).includes("abc123secret"), "the secret key can't be fetched with a plain GET any more");
+r = await call("POST", "/api/admin/paystack-secret", {});
+check(r.status === 403 && !JSON.stringify(r.body).includes("abc123secret"), "Show without the admin password: refused, the key not sent");
+r = await call("POST", "/api/admin/paystack-secret", { password: "wrong-pass" });
+check(r.status === 403 && /isn't the admin password/.test(r.body.error), "a wrong password: refused");
+r = await call("POST", "/api/admin/paystack-secret", { password: "locked" });
+check(r.status === 429, "too many wrong passwords: locked out for a while");
+r = await call("POST", "/api/admin/paystack-secret", { password: "right-pass" });
+check(r.status === 200 && r.body.secretKey === "sk_live_abc123secret", "Show with the admin password typed again: the secret key in full");
 r = await call("POST", "/api/admin/paystack-config", { clearYearlyPlanCode: true });
 check(r.status === 200 && r.body.yearlyPlanCode === null && r.body.planCode === "PLN_x", "Remove: the yearly plan goes, the monthly stays");
 r = await call("POST", "/api/admin/paystack-config", { planCode: "nope" });
