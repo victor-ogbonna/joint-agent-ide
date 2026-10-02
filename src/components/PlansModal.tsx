@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { X, Check, Minus, Rocket, Loader2, Gift, Clock } from "lucide-react";
 import {
   WINDOW_HOURS, FREE_WINDOW_TOKENS, PRO_WINDOW_TOKENS, FREE_MAX_REPLY_TOKENS, PRO_MAX_REPLY_TOKENS,
-  FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES, FREE_PROJECT_LIMIT, PRO_PRICE, formatDay, formatMoney,
+  FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES, FREE_PROJECT_LIMIT, PRO_PRICE, formatDay, formatMoney, showPrice, nairaNote,
 } from "../lib/plans";
 
 /** The first month at a discount, for an account that came by a creator code (server/paystack.ts). */
@@ -49,6 +49,11 @@ function Cell({ value, pro }: { value: boolean | string; pro: boolean }) {
     : <Minus size={22} strokeWidth={2.4} className="text-[var(--text-subtle)]" aria-label="Not included" />;
 }
 
+/** The naira Paystack charges, under a button that shows dollars. */
+function NairaNote({ text }: { text: string | null }) {
+  return text ? <p className="mt-1 text-center text-[11px] text-[var(--text-subtle)]" data-naira-note="">{text}</p> : null;
+}
+
 export interface PlanPriceView {
   /** In the currency's smallest unit. */
   amount: number;
@@ -83,7 +88,8 @@ export default function PlansModal({ onClose, onUpgrade, upgrading, prices = nul
   const savePct = monthly && yearly && monthly.currency === yearly.currency && monthly.amount > 0
     ? Math.round(100 - (yearly.amount / (monthly.amount * 12)) * 100)
     : null;
-  const monthlyLabel = monthly ? `${formatMoney(monthly.amount, monthly.currency)}/month` : PRO_PRICE;
+  // Shown in dollars; Paystack charges the naira amount, said under each button.
+  const monthlyLabel = monthly ? `${showPrice(monthly.amount, monthly.currency)}/month` : PRO_PRICE;
   const [codeOpen, setCodeOpen] = useState(false);
   const [code, setCode] = useState("");
   const [applying, setApplying] = useState(false);
@@ -194,11 +200,12 @@ export default function PlansModal({ onClose, onUpgrade, upgrading, prices = nul
                     style={{ background: "var(--gradient-hero)", boxShadow: "var(--shadow-glow)" }}
                   >
                     {upgrading ? <Loader2 size={17} className="animate-spin" /> : <Rocket size={17} />}
-                    {upgrading ? "Opening checkout…" : `Upgrade to PRO — ${formatMoney(yearly.amount, yearly.currency)}/year`}
+                    {upgrading ? "Opening checkout…" : `Upgrade to PRO — ${showPrice(yearly.amount, yearly.currency)}/year`}
                   </button>
                   <p className="mt-3 text-center text-[11px] text-[var(--text-muted)]">
                     {savePct !== null && savePct > 0 ? `${savePct}% less than paying monthly. ` : ""}Renews yearly. Cancel anytime.
                   </p>
+                  <NairaNote text={nairaNote(yearly.amount, yearly.currency, "a year")} />
                 </>
               ) : offerExpected && onUpgradeOffer ? (
                 offer ? (
@@ -210,11 +217,12 @@ export default function PlansModal({ onClose, onUpgrade, upgrading, prices = nul
                       style={{ background: "var(--gradient-hero)", boxShadow: "var(--shadow-glow)" }}
                     >
                       {upgrading ? <Loader2 size={17} className="animate-spin" /> : <Gift size={17} />}
-                      {upgrading ? "Opening checkout…" : `Get PRO — first month ${formatMoney(offer.amount, offer.currency)}`}
+                      {upgrading ? "Opening checkout…" : `Get PRO — first month ${showPrice(offer.amount, offer.currency)}`}
                     </button>
                     <p className="mt-3 text-center text-[11px] text-[var(--text-muted)]">
-                      {offer.discountPct}% off your first month, then {formatMoney(offer.fullAmount, offer.currency)}/month. Cancel anytime.
+                      {offer.discountPct}% off your first month, then {showPrice(offer.fullAmount, offer.currency)}/month. Cancel anytime.
                     </p>
+                    <NairaNote text={nairaNote(offer.amount, offer.currency, `for the first month, then ${formatMoney(offer.fullAmount, offer.currency)} a month`)} />
                     <p className="mt-1 text-center text-[10px] text-[var(--text-subtle)]">Offer ends {formatDay(offer.until)}</p>
                   </>
                 ) : offerLoading ? (
@@ -238,6 +246,7 @@ export default function PlansModal({ onClose, onUpgrade, upgrading, prices = nul
                     {upgrading ? "Opening checkout…" : `Upgrade to PRO — ${monthlyLabel}`}
                   </button>
                   <p className="mt-3 text-center text-[11px] text-[var(--text-muted)]">Renews monthly. Cancel anytime.</p>
+                  {monthly && <NairaNote text={nairaNote(monthly.amount, monthly.currency, "a month")} />}
                 </>
               )}
             </>

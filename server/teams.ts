@@ -45,7 +45,7 @@ const USERS = "users";
 type Db = any;
 
 /** Why a team action was refused, for code that needs to tell refusals apart. */
-export type TeamRefusal = "on_team" | "full" | "gone" | "not_admin" | "other";
+export type TeamRefusal = "on_team" | "full" | "gone" | "not_admin" | "unpaid" | "other";
 
 /** A refusal meant for the person: its message is shown as it is. */
 export class TeamError extends Error {
@@ -206,6 +206,16 @@ function seatsOrRefuse(raw: unknown, atLeast: number): number {
 const teamRef = (db: Db, id: string) => db.collection(TEAMS).doc(id);
 const memberRef = (db: Db, uid: string) => db.collection(MEMBERS).doc(uid);
 const userRef = (db: Db, uid: string) => db.collection(USERS).doc(uid);
+/**
+ * Whether the team's license is paid now, or in its grace days. Joining,
+ * invitations and team projects work only then: before the first payment,
+ * and after a license ends until it's renewed, they're locked.
+ */
+export function licensePaid(team: Pick<TeamRecord, "paidUntil" | "paidFor">, now: number): boolean {
+  const { state } = licenseStanding(team.paidUntil, now, team.paidFor);
+  return state === "active" || state === "grace";
+}
+
 /** An invite's id: the team, then the address (an address has no "/"). */
 export const inviteId = (teamId: string, email: string) => `${teamId}:${email}`;
 const inviteRef = (db: Db, teamId: string, email: string) => db.collection(INVITES).doc(inviteId(teamId, email));
@@ -309,8 +319,15 @@ async function joinTeam(db: Db, who: Who, teamId: string, via: { code?: string }
     } else if (!invite?.exists) {
       throw new TeamError("That invitation is no longer open.", 404, "gone");
     }
-    if (team.memberCount >= team.seats) throw new TeamError("This team is full. Ask its admin to add seats.", 409, "full");
     const role: TeamRole = invite?.exists && invite.data()?.role === "admin" ? "admin" : "member";
+    // Nobody joins a team that isn't paid, except an admin invited from the
+    // admin page: they join to pay for it.
+    if (role !== "admin" && !licensePaid(team, now)) {
+      throw new TeamError(team.paidUntil === null
+        ? "This team's license isn't paid yet, so nobody can join it. Ask its admin to pay for it first."
+        : "This team's license has ended, so nobody can join it until it's renewed. Ask its admin to renew it.", 402, "unpaid");
+    }
+    if (team.memberCount >= team.seats) throw new TeamError("This team is full. Ask its admin to add seats.", 409, "full");
     tx.set(memberRef(db, who.uid), { teamId, email: who.email ? who.email.trim().toLowerCase() : null, emailVerified: who.emailVerified, role, joinedAt: now });
     tx.set(userRef(db, who.uid), { teamId }, { merge: true });
     tx.set(teamRef(db, teamId), { memberCount: team.memberCount + 1 }, { merge: true });
@@ -349,8 +366,9 @@ async function invitesFor(db: Db, email: string): Promise<InviteRow[]> {
 
 /**
  * Take up the oldest invitation to the account's verified address, for an
- * account on no team. One for a full team waits until it has a free seat;
- * one for a team that's gone is cleared. The team joined, or null.
+ * account on no team. One for a full team waits until it has a free seat,
+ * and one for a team that isn't paid until it's paid; one for a team that's
+ * gone is cleared. The team joined, or null.
  */
 export async function acceptInvites(db: Db, who: Who, now: number): Promise<TeamRecord | null> {
   if (!who.emailVerified || !who.email) return null;
@@ -362,7 +380,7 @@ export async function acceptInvites(db: Db, who: Who, now: number): Promise<Team
       if (!(err instanceof TeamError)) throw err;
       if (err.reason === "on_team") return null;
       if (err.reason === "gone") await inviteRef(db, inv.teamId, email).delete().catch(() => {});
-      // Full: it waits for a seat. Anything else: try the next.
+      // Full or not paid: it waits. Anything else: try the next.
     }
   }
   return null;
@@ -458,6 +476,11 @@ export async function inviteEmails(db: Db, adminUid: string, text: unknown, now:
   return db.runTransaction(async (tx: any) => {
     const admin = await adminMembership(tx, db, adminUid);
     const team = await readTeam(tx, db, admin.teamId);
+    if (!licensePaid(team, now)) {
+      throw new TeamError(team.paidUntil === null
+        ? "Pay for the license first. Then you can invite people."
+        : "The license has ended. Renew it first, then invite people.", 402, "unpaid");
+    }
     const result = await addInvites(tx, db, team, emails, "member", now);
     return { ...result, invalid };
   });
@@ -799,16 +822,26 @@ export async function teamDetail(db: Db, rawTeamId: unknown, now: number): Promi
   };
 }
 
+/** An invitation to the person's address, waiting: for a free seat, or for the team's license to be paid (`state`). */
+export interface WaitingInvite {
+  teamId: string;
+  teamName: string;
+  role: TeamRole;
+  state: LicenseState;
+}
+
 /** The /team page: the person's team (and as an admin sees it, if they are one), and invitations waiting. */
-export async function teamPage(db: Db, who: Who, now: number): Promise<{ team: TeamView | TeamAdminView | null; invites: { teamId: string; teamName: string; role: TeamRole }[]; verified: boolean }> {
+export async function teamPage(db: Db, who: Who, now: number): Promise<{ team: TeamView | TeamAdminView | null; invites: WaitingInvite[]; verified: boolean }> {
   let mine = await memberRef(db, who.uid).get();
   if (!mine.exists && (await acceptInvites(db, who, now))) mine = await memberRef(db, who.uid).get();
   const email = who.emailVerified && who.email ? who.email.trim().toLowerCase() : null;
   const waiting = email ? await invitesFor(db, email) : [];
-  const invites: { teamId: string; teamName: string; role: TeamRole }[] = [];
+  const invites: WaitingInvite[] = [];
   for (const inv of waiting.slice(0, 10)) {
     const t = await teamRef(db, inv.teamId).get();
-    if (t.exists) invites.push({ teamId: inv.teamId, teamName: teamOf(inv.teamId, t.data()).name, role: inv.role });
+    if (!t.exists) continue;
+    const team = teamOf(inv.teamId, t.data());
+    invites.push({ teamId: inv.teamId, teamName: team.name, role: inv.role, state: licenseStanding(team.paidUntil, now, team.paidFor).state });
   }
   if (!mine.exists) return { team: null, invites, verified: who.emailVerified };
   const me = memberOf(who.uid, mine.data());

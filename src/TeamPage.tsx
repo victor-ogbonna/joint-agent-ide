@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Users, Copy, Check, LogOut, Loader2, UserPlus, CreditCard, Link2, Mail, Shield, Trash2, RefreshCw, Pencil, X, PiggyBank } from "lucide-react";
+import { Users, Copy, Check, LogOut, Loader2, UserPlus, CreditCard, Link2, Mail, Shield, Trash2, RefreshCw, Pencil, X, PiggyBank, Lock } from "lucide-react";
 import { useDocumentScroll } from "./useDocumentScroll";
 import { useAuth } from "./contexts/AuthContext";
 import GoogleSignInButton from "./components/GoogleSignInButton";
-import { formatMoney, formatDay, PRO_MONTHLY_PRICES } from "./lib/plans";
+import { formatMoney, formatDay, nairaToDollars, PRO_MONTHLY } from "./lib/plans";
 import { loadPaystack } from "./lib/paystackScript";
 import { ConsentCard, MemberProjects, TeamProjectsCard } from "./components/TeamProjects";
-import { TEAM_PRICES, PERIOD_MONTHS, renewalPrice, addSeatsPrice, daysLeft, stateLabel, teamSavings, type TeamPeriod, type LicenseState, type TeamRole, type TeamKind } from "./lib/teams";
+import { TEAM_PRICES, PERIOD_MONTHS, renewalPrice, addSeatsPrice, daysLeft, stateLabel, teamSavings, teamMoney, lockOf, type TeamLock, type TeamPeriod, type LicenseState, type TeamRole, type TeamKind } from "./lib/teams";
 
 /**
  * Team and school licenses (/team), by server/teams.ts. A team's admins pay
@@ -14,6 +14,9 @@ import { TEAM_PRICES, PERIOD_MONTHS, renewalPrice, addSeatsPrice, daysLeft, stat
  * every member has PRO while it's paid, and for its grace days after (2 after
  * a month, 30 after a year). Anyone signed
  * in can start one, or join one by its code or an invitation to their address.
+ * Joining, invitations and team projects open once the license is paid, and
+ * lock again if it ends without being renewed (lockOf). Prices are shown in
+ * dollars; Paystack charges them in naira, said under each pay button.
  */
 
 interface MemberRow { uid: string; email: string | null; emailVerified: boolean; role: TeamRole; joinedAt: number; adminsCanView: boolean }
@@ -42,7 +45,7 @@ interface TeamView {
 }
 interface PageData {
   team: TeamView | null;
-  invites: { teamId: string; teamName: string; role: TeamRole }[];
+  invites: { teamId: string; teamName: string; role: TeamRole; state?: LicenseState }[];
   verified: boolean;
   prices: { seatPrice: number; currency: string; minSeats: number; maxSeats: number };
   payments: boolean;
@@ -67,6 +70,34 @@ function Notes({ error, note }: { error: string | null; note: string | null }) {
       {note && <p role="status" className="mt-2 text-[13px] text-green-500">{note}</p>}
     </>
   );
+}
+
+/**
+ * The message for a locked join link, invitation box or team projects: pay
+ * first (or renew), with a button to the Pay card for an admin.
+ */
+function PayFirst({ text, admin, lock }: { text: string; admin: boolean; lock: TeamLock }) {
+  const toPay = () => {
+    const el = document.getElementById("pay");
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    el.querySelector<HTMLElement>("input[type=radio]:checked, button")?.focus({ preventScroll: true });
+  };
+  return (
+    <div role="alert" data-pay-first="" className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-orange-400/40 bg-orange-500/10 px-3 py-2 text-[13px] text-[var(--text-main)]">
+      <span className="flex min-w-0 flex-1 items-start gap-2"><Lock size={14} className="mt-0.5 shrink-0 text-orange-400" aria-hidden="true" /> <span className="min-w-0">{text}</span></span>
+      {admin && (
+        <button type="button" onClick={toPay} className="shrink-0 font-semibold text-[var(--accent-primary)] underline underline-offset-2">
+          {lock === "ended" ? "Renew now" : "Pay now"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** What Paystack charges, in naira, under a pay button that shows dollars. */
+function NairaLine({ naira }: { naira: string | null }) {
+  return naira ? <p className={`mt-1 ${small}`} data-naira-note="">Charged in naira at checkout: {naira}.</p> : null;
 }
 
 /** Runs one request at a time for a card, with its own error and note. */
@@ -139,6 +170,7 @@ function Overview({ team }: { team: TeamView }) {
 function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; call: Call; reload: () => Promise<void>; paymentsOn: boolean; prices: PageData["prices"] }) {
   const seatPrice = team.seatPrice ?? prices.seatPrice;
   const currency = team.currency ?? prices.currency;
+  const money = teamMoney(seatPrice, currency);
   const least = Math.max(prices.minSeats, team.memberCount);
   const [period, setPeriod] = useState<TeamPeriod>("month");
   const [seats, setSeats] = useState(String(Math.max(team.seats, least)));
@@ -206,10 +238,10 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
   };
 
   return (
-    <section className={card}>
+    <section className={`${card} scroll-mt-4`} id="pay">
       <h2 className={heading}><CreditCard size={16} aria-hidden="true" /> {team.state === "unpaid" ? "Pay for the license" : "Renew"}</h2>
       <p className={`mt-1 ${small}`}>
-        {formatMoney(seatPrice, currency)} a seat a month, paid ahead for a month, or for a year at 12 months for the price of 11. Nothing renews by itself: you renew here when it's due.
+        {money.show(seatPrice)} a seat a month, paid ahead for a month, or for a year at 12 months for the price of 11. Nothing renews by itself: you renew here when it's due.
         {team.state === "active" ? " Renewing now adds the time after the current end." : " It runs from the day you pay."}
         {" "}If it isn't renewed, everyone keeps PRO for 2 more days after a month, or 30 more days after a year.
       </p>
@@ -239,9 +271,10 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
           onClick={() => void pay("renew", { action: "renew", period, seats: seatCount })}
         >
           {paying === "renew" ? <Loader2 size={16} className="animate-spin" /> : <CreditCard size={16} />}
-          {seatsOk ? `Pay ${formatMoney(renewAmount, currency)} for ${PERIOD_MONTHS[period].label}` : "Pay"}
+          {seatsOk ? `Pay ${money.show(renewAmount)} for ${PERIOD_MONTHS[period].label}` : "Pay"}
         </button>
       </div>
+      {seatsOk && <NairaLine naira={money.naira(renewAmount)} />}
       {!seatsOk && <p className={`mt-1 ${small}`}>Choose {least} to {prices.maxSeats} seats{team.memberCount > prices.minSeats ? `: the team has ${team.memberCount} members` : ""}.</p>}
 
       {team.state === "active" && team.paidUntil !== null && (
@@ -255,9 +288,10 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
             </div>
             <button type="button" className={button} disabled={!paymentsOn || !extraOk || paying !== null} onClick={() => void pay("add", { action: "add_seats", extra: extraCount })}>
               {paying === "add" ? <Loader2 size={14} className="animate-spin" /> : <UserPlus size={14} />}
-              {extraOk ? `Add ${extraCount} seat${extraCount === 1 ? "" : "s"}: ${formatMoney(addAmount, currency)}` : "Add seats"}
+              {extraOk ? `Add ${extraCount} seat${extraCount === 1 ? "" : "s"}: ${money.show(addAmount)}` : "Add seats"}
             </button>
           </div>
+          {extraOk && <NairaLine naira={money.naira(addAmount)} />}
         </div>
       )}
 
@@ -272,14 +306,17 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
 
 /** What a team saves against everyone paying for PRO on their own, at the foot of the page. */
 function SavingsCard({ seats, seatPrice, currency, proMonthly }: { seats: number; seatPrice: number; currency: string; proMonthly: ProPrice | null }) {
-  const s = teamSavings(seats, seatPrice, currency, [proMonthly, ...PRO_MONTHLY_PRICES]);
+  const shown = teamMoney(seatPrice, currency);
+  // PRO on your own as the app shows it, in dollars: Paystack's monthly price, else the listed $7.
+  const pro = proMonthly && proMonthly.currency.toUpperCase() === "NGN" ? { amount: nairaToDollars(proMonthly.amount), currency: "USD" } : proMonthly;
+  const s = teamSavings(seats, shown.seat, shown.currency, [pro, { amount: PRO_MONTHLY.cents, currency: "USD" }]);
   if (!s) return null;
-  const money = (n: number) => formatMoney(n, currency);
+  const money = (n: number) => formatMoney(n, shown.currency);
   return (
     <section className={card} data-savings="">
       <h2 className={heading}><PiggyBank size={16} className="text-[var(--accent-primary)]" aria-hidden="true" /> What you save</h2>
       <p className="mt-2 text-[14px] text-[var(--text-main)]">
-        <strong>{money(seatPrice)}</strong> a seat a month, instead of {money(s.pro)} for PRO on your own: <strong className="text-[var(--accent-primary)]">{money(s.perSeat)} saved</strong> on every seat, every month.
+        <strong>{money(shown.seat)}</strong> a seat a month, instead of {money(s.pro)} for PRO on your own: <strong className="text-[var(--accent-primary)]">{money(s.perSeat)} saved</strong> on every seat, every month.
       </p>
       <p className={`mt-1 ${small}`}>
         {seats} seats: {money(s.teamPays)} a month instead of {money(s.onTheirOwn)}. That's {money(s.saved)} saved every month.
@@ -289,13 +326,46 @@ function SavingsCard({ seats, seatPrice, currency, proMonthly }: { seats: number
   );
 }
 
+/** Before the license is paid, or once it has ended: why the join link and invitations are locked. */
+const joinLockText = (lock: TeamLock, what: string) => (lock === "ended"
+  ? `The license has ended. Renew it first, then ${what}.`
+  : `Pay for the license first. Then ${what}.`);
+
+/** Why team projects, and seeing members' projects, are locked: as the server says it. */
+const teamProjectsLockText = (lock: TeamLock, admin: boolean) => (lock === "ended"
+  ? (admin ? "The license has ended. Renew it to use team projects again. Everyone's own projects are kept." : "Your team's license has ended. Team projects come back once an admin renews it. Your own projects are kept.")
+  : (admin ? "Team projects start once the license is paid." : "Team projects start once your team's license is paid. Ask an admin to pay for it."));
+
 function JoinLinkCard({ team, call, reload }: { team: TeamView; call: Call; reload: () => Promise<void> }) {
   const { busy, error, note, run } = useAction(call, reload);
   const [copied, setCopied] = useState(false);
+  const [askedLocked, setAskedLocked] = useState(false);
+  const lock = lockOf(team.state);
+  // The new state after a payment: unlocked, with nothing left to say.
+  useEffect(() => { if (!lock) setAskedLocked(false); }, [lock]);
   const link = `${window.location.origin}/team?join=${encodeURIComponent(team.joinCode ?? "")}`;
   const copy = async () => {
+    if (lock) { setAskedLocked(true); return; }
     try { await navigator.clipboard.writeText(link); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard blocked */ }
   };
+  if (lock) {
+    // Unclickable until it's paid: the code is hidden, and a press says why.
+    return (
+      <section className={card} data-join-link="locked">
+        <h2 className={heading}><Link2 size={16} aria-hidden="true" /> Join link <Lock size={13} className="text-[var(--text-muted)]" aria-label="Locked" /></h2>
+        <p className={`mt-1 ${small}`}>Anyone signed in with this link or code joins, while seats are free. It works once the license is paid.</p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button type="button" aria-disabled="true" onClick={() => setAskedLocked(true)} className="min-w-0 flex-1 cursor-not-allowed break-all rounded-lg bg-[var(--bg-surface)] px-3 py-2 text-left font-mono text-[13px] text-[var(--text-subtle)]">
+            {window.location.origin}/team?join=••••••••
+          </button>
+          <button type="button" aria-disabled="true" onClick={() => void copy()} className={`${button} cursor-not-allowed opacity-50`}>
+            <Copy size={14} /> Copy
+          </button>
+        </div>
+        {askedLocked && <PayFirst text={joinLockText(lock, "share the join link")} admin lock={lock} />}
+      </section>
+    );
+  }
   const newCode = () => {
     if (!window.confirm("Make a new join code? The current link and code stop working.")) return;
     void run("code", "/api/team/settings", { newCode: true }, () => "New code made. Share the new link.");
@@ -327,10 +397,14 @@ function JoinLinkCard({ team, call, reload }: { team: TeamView; call: Call; relo
 function InviteCard({ team, call, reload }: { team: TeamView; call: Call; reload: () => Promise<void> }) {
   const { busy, error, note, run } = useAction(call, reload);
   const [emails, setEmails] = useState("");
+  const [askedLocked, setAskedLocked] = useState(false);
+  const lock = lockOf(team.state);
+  useEffect(() => { if (!lock) setAskedLocked(false); }, [lock]);
   const invites = team.invites ?? [];
   const free = team.seats - team.memberCount - invites.length;
   const send = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (lock) { setAskedLocked(true); return; }
     const ok = await run("invite", "/api/team/invites", { emails }, (d) => {
       const parts = [`Invited ${d.invited.length}.`];
       if (d.already.length) parts.push(`${d.already.length} already on the team or invited.`);
@@ -341,15 +415,33 @@ function InviteCard({ team, call, reload }: { team: TeamView; call: Call; reload
   };
   return (
     <section className={card}>
-      <h2 className={heading}><Mail size={16} aria-hidden="true" /> Invite by email</h2>
-      <p className={`mt-1 ${small}`}>Paste addresses, separated by commas or new lines. Each person joins the next time they open Joint-Agent signed in with that address. {free > 0 ? `${free} seat${free === 1 ? " is" : "s are"} free to invite.` : "Every seat is taken or invited."}</p>
-      <form onSubmit={send} className="mt-3">
+      <h2 className={heading}><Mail size={16} aria-hidden="true" /> Invite by email {lock && <Lock size={13} className="text-[var(--text-muted)]" aria-label="Locked" />}</h2>
+      <p className={`mt-1 ${small}`}>
+        Paste addresses, separated by commas or new lines. Each person joins the next time they open Joint-Agent signed in with that address.{" "}
+        {lock ? "It works once the license is paid." : free > 0 ? `${free} seat${free === 1 ? " is" : "s are"} free to invite.` : "Every seat is taken or invited."}
+      </p>
+      <form onSubmit={send} className="mt-3" data-invite-form={lock ? "locked" : ""}>
         <label htmlFor="invite-emails" className="sr-only">Email addresses</label>
-        <textarea id="invite-emails" className={`${input} min-h-[96px]`} value={emails} onChange={(e) => setEmails(e.target.value)} placeholder={"ada@school.edu\nben@school.edu"} />
-        <button type="submit" className={`${button} mt-2`} disabled={busy !== null || !emails.trim()}>
-          {busy === "invite" ? <Loader2 size={14} className="animate-spin" /> : <UserPlus size={14} />} Invite
-        </button>
+        {lock ? (
+          // Unclickable until it's paid: a press, or a tab into it, says why.
+          <textarea
+            id="invite-emails" readOnly aria-disabled="true" value="" onClick={() => setAskedLocked(true)} onFocus={() => setAskedLocked(true)}
+            className={`${input} min-h-[96px] cursor-not-allowed opacity-50`} placeholder={"ada@school.edu\nben@school.edu"}
+          />
+        ) : (
+          <textarea id="invite-emails" className={`${input} min-h-[96px]`} value={emails} onChange={(e) => setEmails(e.target.value)} placeholder={"ada@school.edu\nben@school.edu"} />
+        )}
+        {lock ? (
+          <button type="submit" aria-disabled="true" className={`${button} mt-2 cursor-not-allowed opacity-50`}>
+            <UserPlus size={14} /> Invite
+          </button>
+        ) : (
+          <button type="submit" className={`${button} mt-2`} disabled={busy !== null || !emails.trim()}>
+            {busy === "invite" ? <Loader2 size={14} className="animate-spin" /> : <UserPlus size={14} />} Invite
+          </button>
+        )}
       </form>
+      {lock && askedLocked && <PayFirst text={joinLockText(lock, "invite people")} admin lock={lock} />}
       <Notes error={error} note={note} />
       {invites.length > 0 && (
         <div className="mt-4">
@@ -373,6 +465,7 @@ function InviteCard({ team, call, reload }: { team: TeamView; call: Call; reload
 function MembersCard({ team, me, call, reload }: { team: TeamView; me: string; call: Call; reload: () => Promise<void> }) {
   const { busy, error, note, run } = useAction(call, reload);
   const members = team.members ?? [];
+  const lock = lockOf(team.state);
   const remove = (m: MemberRow) => {
     if (!window.confirm(`Remove ${m.email || "this member"} from ${team.name}?\n\nThey keep their projects, and go back to the Free plan unless they pay for PRO themselves.`)) return;
     void run(`rm:${m.uid}`, "/api/team/members/remove", { uid: m.uid }, () => `Removed ${m.email || "the member"}.`);
@@ -405,7 +498,7 @@ function MembersCard({ team, me, call, reload }: { team: TeamView; me: string; c
               </div>
             )}
             {/* Only those who chose to let admins see their projects. */}
-            {m.uid !== me && m.adminsCanView && <MemberProjects uid={m.uid} email={m.email} call={call} />}
+            {m.uid !== me && m.adminsCanView && <MemberProjects uid={m.uid} email={m.email} call={call} locked={lock ? <PayFirst text={joinLockText(lock, "see the projects of members who allow it")} admin lock={lock} /> : null} />}
           </li>
         ))}
       </ul>
@@ -414,9 +507,18 @@ function MembersCard({ team, me, call, reload }: { team: TeamView; me: string; c
   );
 }
 
-function PaymentsCard({ team }: { team: TeamView }) {
+function PaymentsCard({ team, prices }: { team: TeamView; prices: PageData["prices"] }) {
   const payments = team.payments ?? [];
   if (!payments.length) return null;
+  const currency = team.currency ?? prices.currency;
+  const money = teamMoney(team.seatPrice ?? prices.seatPrice, currency);
+  // In dollars, as every price is shown, with the naira Paystack charged beside it.
+  const amount = (p: PaymentRow) => {
+    if (p.amount <= 0) return "—";
+    if (p.currency.toUpperCase() !== currency.toUpperCase()) return formatMoney(p.amount, p.currency);
+    const naira = money.naira(p.amount);
+    return <>{money.show(p.amount)}{naira && <>{" "}<span className="text-[11px] font-normal text-[var(--text-subtle)]">({naira})</span></>}</>;
+  };
   return (
     <section className={card}>
       <h2 className={heading}><CreditCard size={16} aria-hidden="true" /> Payments</h2>
@@ -427,7 +529,7 @@ function PaymentsCard({ team }: { team: TeamView }) {
               {formatDay(p.paidAt)} · {p.action === "add_seats" ? `${p.extra} seat${p.extra === 1 ? "" : "s"} added` : `${p.months} month${p.months === 1 ? "" : "s"}, ${p.seats} seats`}
               {p.kind === "invoice" ? " · by invoice" : ""}
             </span>
-            <span className="font-semibold tabular-nums">{p.amount > 0 ? formatMoney(p.amount, p.currency) : "—"}</span>
+            <span className="font-semibold tabular-nums">{amount(p)}</span>
           </li>
         ))}
       </ul>
@@ -488,7 +590,15 @@ function WaitingInvites({ data, call, reload }: { data: PageData; call: Call; re
           <li key={i.teamId} className="flex flex-wrap items-center justify-between gap-2 py-2">
             <span className="min-w-0">
               <strong>{i.teamName}</strong> invited you{i.role === "admin" ? " as its admin" : ""}.{" "}
-              <span className="text-[var(--text-muted)]">{data.team ? "Leave your current team to join it." : "It's waiting for a free seat."}</span>
+              <span className="text-[var(--text-muted)]">
+                {data.team
+                  ? "Leave your current team to join it."
+                  : i.role !== "admin" && i.state === "unpaid"
+                    ? "It's waiting for the team's license to be paid."
+                    : i.role !== "admin" && i.state === "ended"
+                      ? "It's waiting for the team's license to be renewed."
+                      : "It's waiting for a free seat."}
+              </span>
             </span>
             <button type="button" className={button} disabled={busy !== null} onClick={() => void run(`d:${i.teamId}`, "/api/team/invites/decline", { teamId: i.teamId }, () => `Declined ${i.teamName}'s invitation.`)}>
               {busy === `d:${i.teamId}` ? <Loader2 size={14} className="animate-spin" /> : <X size={14} />} Decline
@@ -511,7 +621,9 @@ function NoTeam({ data, call, reload, joinFromLink, proMonthly }: { data: PageDa
   const seatCount = Number(seats);
   const seatsOk = Number.isInteger(seatCount) && seatCount >= data.prices.minSeats && seatCount <= data.prices.maxSeats;
   const shownSeats = seatsOk ? seatCount : data.prices.minSeats;
-  const price = (p: TeamPeriod) => formatMoney(renewalPrice(shownSeats, data.prices.seatPrice, p), data.prices.currency);
+  const money = teamMoney(data.prices.seatPrice, data.prices.currency);
+  const price = (p: TeamPeriod) => money.show(renewalPrice(shownSeats, data.prices.seatPrice, p));
+  const naira = (p: TeamPeriod) => money.naira(renewalPrice(shownSeats, data.prices.seatPrice, p));
 
   return (
     <div className="space-y-4">
@@ -549,7 +661,7 @@ function NoTeam({ data, call, reload, joinFromLink, proMonthly }: { data: PageDa
       <section className={card}>
         <h2 className={heading}><Users size={16} aria-hidden="true" /> Start a school or team license</h2>
         <p className={`mt-1 ${small}`}>
-          PRO for everyone on it: {formatMoney(data.prices.seatPrice, data.prices.currency)} a seat a month, at least {data.prices.minSeats} seats.
+          PRO for everyone on it: {money.show(data.prices.seatPrice)} a seat a month, at least {data.prices.minSeats} seats.
           Pay for a month, or for a year at 12 months for the price of 11. When a license ends, everyone keeps PRO for 2 more days after a month, or 30 more days after a year.
         </p>
         <form
@@ -576,7 +688,8 @@ function NoTeam({ data, call, reload, joinFromLink, proMonthly }: { data: PageDa
             <input id="new-team-seats" className={input} inputMode="numeric" value={seats} onChange={(e) => setSeats(e.target.value.replace(/[^0-9]/g, ""))} />
           </div>
           <p className={small}>
-            {shownSeats} seats: {price("month")} a month, or {price("year")} a year. You pay on the next step; members get PRO once it's paid.
+            {shownSeats} seats: {price("month")} a month, or {price("year")} a year. You pay on the next step; members get PRO, and the join link and invitations work, once it's paid.
+            {naira("month") && <> Charged in naira at checkout: {naira("month")} a month, or {naira("year")} a year.</>}
           </p>
           <button type="submit" className={primary} style={{ background: "var(--gradient-hero)" }} disabled={create.busy !== null || name.trim().length < 2 || !seatsOk}>
             {create.busy ? <Loader2 size={16} className="animate-spin" /> : null} Start the license
@@ -644,6 +757,7 @@ export default function TeamPage() {
   }, []);
 
   const team = data?.team ?? null;
+  const lock = team ? lockOf(team.state) : null;
 
   return (
     <div className="min-h-full w-full bg-[var(--bg-root)] text-[var(--text-main)] px-4 py-10 sm:px-6">
@@ -688,14 +802,17 @@ export default function TeamPage() {
               <>
                 <Overview team={team} />
                 {team.role === "admin" && <PayCard team={team} call={call} reload={load} paymentsOn={data.payments} prices={data.prices} />}
-                <TeamProjectsCard teamName={team.name} call={call} />
+                <TeamProjectsCard
+                  teamName={team.name} call={call}
+                  locked={lock ? <PayFirst text={teamProjectsLockText(lock, team.role === "admin")} admin={team.role === "admin"} lock={lock} /> : null}
+                />
                 <ConsentCard teamName={team.name} allowed={team.adminsCanView} call={call} reload={load} />
                 {team.role === "admin" && (
                   <>
                     <JoinLinkCard team={team} call={call} reload={load} />
                     <InviteCard team={team} call={call} reload={load} />
                     <MembersCard team={team} me={user.uid} call={call} reload={load} />
-                    <PaymentsCard team={team} />
+                    <PaymentsCard team={team} prices={data.prices} />
                     <SavingsCard seats={team.seats} seatPrice={team.seatPrice ?? data.prices.seatPrice} currency={team.currency ?? data.prices.currency} proMonthly={proMonthly} />
                   </>
                 )}

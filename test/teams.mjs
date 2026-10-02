@@ -21,8 +21,8 @@ import {
 } from "../server/teams.ts";
 import { readUserDoc, tierOf, allowanceFor, tokenUsagePatch, onTeamPro, PAID_TOKEN_CAP } from "../server/quota.ts";
 import { planOf } from "../server/adminMetrics.ts";
-import { TEAM_PRICES, PERIOD_MONTHS, teamSavings, renewalPrice as shownRenewalPrice } from "../src/lib/teams.ts";
-import { PRO_PRICE, PRO_MONTHLY_PRICES } from "../src/lib/plans.ts";
+import { TEAM_PRICES, PERIOD_MONTHS, teamSavings, teamMoney, lockOf, renewalPrice as shownRenewalPrice, addSeatsPrice as shownAddSeatsPrice } from "../src/lib/teams.ts";
+import { PRO_PRICE, PRO_MONTHLY, formatMoney, nairaToDollars, showPrice, nairaNote } from "../src/lib/plans.ts";
 
 let bad = 0;
 const check = (cond, label, extra = "") => {
@@ -123,16 +123,40 @@ check(Object.keys(PERIOD_MONTHS).join() === Object.keys(PERIODS).join()
   && Object.keys(PERIODS).every((k) => PERIOD_MONTHS[k].months === PERIODS[k].months && PERIOD_MONTHS[k].chargedMonths === PERIODS[k].chargedMonths)
   && shownRenewalPrice(6, 500, "month") === renewalPrice(6, 500, "month") && shownRenewalPrice(6, 500, "year") === renewalPrice(6, 500, "year"),
   "and its month and year prices are the server's");
-check(PRO_MONTHLY_PRICES[0].amount === 930000 && PRO_MONTHLY_PRICES[0].currency === "NGN" && PRO_MONTHLY_PRICES[1].currency === "USD" && PRO_PRICE === `$${PRO_MONTHLY_PRICES[1].amount / 100}/month`,
-  "PRO on your own: ₦9,300 a month on Paystack, the $7 the app lists");
-const saved = teamSavings(5, 664300, "NGN", [null, ...PRO_MONTHLY_PRICES]);
-check(saved?.pro === 930000 && saved.perSeat === 265700 && saved.teamPays === 3321500 && saved.onTheirOwn === 4650000 && saved.saved === 1328500,
-  "5 seats: ₦6,643 each instead of ₦9,300, ₦33,215 a month instead of ₦46,500: ₦13,285 saved");
-check(teamSavings(5, 664300, "NGN", [{ amount: 1000000, currency: "NGN" }, ...PRO_MONTHLY_PRICES])?.pro === 1000000, "PRO's price from Paystack counts when it's in the team's currency");
-check(teamSavings(5, 664300, "NGN", [{ amount: 800, currency: "USD" }, ...PRO_MONTHLY_PRICES])?.pro === 930000, "in another currency, the listed ₦9,300 counts");
-check(teamSavings(5, 500, "USD", [null, ...PRO_MONTHLY_PRICES])?.saved === 1000, "a team priced in dollars: against $7");
-check(teamSavings(5, 930000, "NGN", [null, ...PRO_MONTHLY_PRICES]) === null && teamSavings(5, 400000, "GHS", [null, ...PRO_MONTHLY_PRICES]) === null,
+check(PRO_MONTHLY.kobo === 930000 && PRO_MONTHLY.cents === 700 && PRO_PRICE === `$${PRO_MONTHLY.cents / 100}/month`,
+  "PRO on your own: the $7 the app lists, ₦9,300 a month on Paystack");
+
+console.log("Prices shown in dollars, charged in naira");
+const usd = (c) => formatMoney(c, "USD");
+check(nairaToDollars(930000) === 700 && nairaToDollars(8928000) === 6720 && nairaToDollars(744000) === 560 && nairaToDollars(664300) === 500,
+  "₦9,300 is $7; the yearly ₦89,280 is $67.20; the first month at 20% off, ₦7,440, is $5.60; a ₦6,643 seat is $5");
+check(showPrice(930000, "NGN") === usd(700) && showPrice(930000, "ngn") === usd(700) && showPrice(700, "USD") === usd(700) && showPrice(400000, "GHS") === formatMoney(400000, "GHS"),
+  "a naira price shows in dollars; a dollar price as it is; another currency as it is");
+check(nairaNote(930000, "NGN", "a month") === `Charged in naira at checkout: ${formatMoney(930000, "NGN")} a month.` && nairaNote(700, "USD") === null,
+  "the line under a pay button says the naira Paystack charges (none for a price in dollars)");
+const m = teamMoney(664300, "NGN");
+const exact = [];
+for (let seats = 5; seats <= 2000; seats++) for (const p of ["month", "year"]) {
+  if (m.show(shownRenewalPrice(seats, 664300, p)) !== usd(shownRenewalPrice(seats, 500, p))) exact.push(`${seats}/${p}`);
+}
+check(m.seat === 500 && m.currency === "USD" && m.show(664300) === usd(500) && exact.length === 0,
+  "a team: $5 a seat, and every month or year total from 5 to 2,000 seats exactly $5 a seat (6 seats for a year: $330, not $330.01)", exact.slice(0, 5).join(" "));
+check(m.naira(shownRenewalPrice(6, 664300, "month")) === formatMoney(3985800, "NGN") && m.naira(shownRenewalPrice(6, 664300, "year")) === formatMoney(43843800, "NGN"),
+  "and what Paystack charges: ₦39,858 for 6 seats a month, ₦438,438 for a year");
+const extraNaira = shownAddSeatsPrice(2, 664300, NOW + 10 * DAY, NOW);
+check(m.show(extraNaira) === usd(Math.round((extraNaira * 500) / 664300)), "added seats for the days left: the naira price in proportion to the seat");
+const dollarTeam = teamMoney(500, "USD");
+check(dollarTeam.show(3000) === usd(3000) && dollarTeam.naira(3000) === null && teamMoney(400000, "GHS").show(400000) === formatMoney(400000, "GHS"),
+  "a team priced in dollars (or with a special price in another currency): as it is, with no naira line");
+const saved = teamSavings(5, m.seat, m.currency, [null, { amount: PRO_MONTHLY.cents, currency: "USD" }]);
+check(saved?.pro === 700 && saved.perSeat === 200 && saved.teamPays === 2500 && saved.onTheirOwn === 3500 && saved.saved === 1000,
+  "5 seats: $5 each instead of $7, $25 a month instead of $35: $10 saved");
+check(teamSavings(5, 500, "USD", [{ amount: nairaToDollars(1000000), currency: "USD" }, { amount: 700, currency: "USD" }])?.pro === 753, "PRO's price from Paystack counts (in dollars: ₦10,000 is $7.53) when it can be read");
+check(teamSavings(5, 500, "USD", [{ amount: 800, currency: "GHS" }, { amount: 700, currency: "USD" }])?.pro === 700, "in another currency, the listed $7 counts");
+check(teamSavings(5, 700, "USD", [null, { amount: 700, currency: "USD" }]) === null && teamSavings(5, 400000, "GHS", [null, { amount: 700, currency: "USD" }]) === null,
   "nothing shown when a seat costs no less, or the prices can't be compared");
+check(lockOf("unpaid") === "unpaid" && lockOf("ended") === "ended" && lockOf("active") === null && lockOf("grace") === null,
+  "the join link, invitations and team projects: locked before the first payment and after a license ends; open while paid or in grace");
 
 console.log("The license's standing and the grace days");
 check(licenseStanding(null, NOW).state === "unpaid" && !teamGivesPro(null, NOW), "unpaid: no PRO");
@@ -203,6 +227,18 @@ check((await db.doc(`teamMembers/ada`).get()).data().role === "admin" && (await 
 check(normalizeJoinCode(team.joinCode) === team.joinCode, "it has a join code");
 check(await throwsWith(() => createTeam(db, ada, { name: "Second", seats: 5 }, NOW, random), /already on a team/, "on_team"), "one team per account");
 
+console.log("Joining and invitations: only while the license is paid");
+const license = (paidUntil, paidFor = null) => db.doc(`teams/${team.id}`).set({ paidUntil, paidFor }, { merge: true });
+check(await throwsWith(() => joinByCode(db, ben, team.joinCode, NOW), /license isn't paid yet, so nobody can join it\. Ask its admin to pay for it first\./, "unpaid"), "nobody joins by code before the first payment");
+check(await throwsWith(() => inviteEmails(db, "ada", "chi@school.ng", NOW), /^Pay for the license first\. Then you can invite people\.$/, "unpaid"), "nor is anyone invited");
+await license(NOW - 3 * DAY, "month");
+check(await throwsWith(() => joinByCode(db, ben, team.joinCode, NOW), /license has ended, so nobody can join it until it's renewed/, "unpaid")
+  && await throwsWith(() => inviteEmails(db, "ada", "chi@school.ng", NOW), /^The license has ended\. Renew it first, then invite people\.$/, "unpaid"),
+  "nor once a license has ended, until it's renewed");
+check(!(await db.doc("teamMembers/ben").get()).exists && (await db.doc(`teams/${team.id}`).get()).data().memberCount === 1, "nothing changed");
+// In its grace days (1 day after a month ended): open, as below.
+await license(NOW - DAY, "month");
+
 console.log("Joining by code");
 check(await throwsWith(() => joinByCode(db, ben, "ZZZZZZZZ", NOW), /isn't valid/), "an unknown code is refused");
 check(await throwsWith(() => joinByCode(db, ben, "nope", NOW), /8 letters/), "a malformed code is refused");
@@ -232,6 +268,20 @@ check(!(await db.doc(`teamInvites/${inviteId(team.id, "chi@school.ng")}`).get())
 await cancelInvite(db, "ada", "dee@school.ng");
 check(!(await db.doc(`teamInvites/${inviteId(team.id, "dee@school.ng")}`).get()).exists, "an invitation can be withdrawn");
 check(await throwsWith(() => cancelInvite(db, "ada", "dee@school.ng"), /isn't invited/), "and only once");
+const eve = { uid: "eve", email: "eve@school.ng", emailVerified: true };
+await db.doc("users/eve").set({ subscriptionStatus: "none" });
+await inviteEmails(db, "ada", "eve@school.ng", NOW);
+await license(NOW - 3 * DAY, "month");
+check((await acceptInvites(db, eve, NOW)) === null && (await db.doc(`teamInvites/${inviteId(team.id, "eve@school.ng")}`).get()).exists && !(await db.doc("teamMembers/eve").get()).exists,
+  "an invitation to a team whose license has ended waits, kept, until it's renewed");
+const evePage = await teamPage(db, eve, NOW);
+check(evePage.team === null && evePage.invites.length === 1 && evePage.invites[0].teamId === team.id && evePage.invites[0].state === "ended",
+  "and Eve's Team page says what it waits for");
+await license(NOW - DAY, "month");
+check((await teamPage(db, eve, NOW)).team?.id === team.id, "renewed (here, back in its grace days): she's on the team");
+await leaveTeam(db, "eve");
+// Unpaid again, for paying for it below.
+await license(null);
 
 console.log("Paying online");
 check(await throwsWith(() => quoteFor(db, "ben", { action: "renew", period: "month" }, NOW), /Only the team's admins/), "only an admin pays");
