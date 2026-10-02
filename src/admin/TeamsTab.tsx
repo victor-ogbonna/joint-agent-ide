@@ -86,7 +86,7 @@ function AddTeam({ post, defaults, onAdded }: { post: AdminPost; defaults: Teams
     try {
       const { ok, body } = await answer(await post("/api/admin/teams", { name, kind, ownerEmail, seats, seatPrice, currency }));
       if (!ok) { setError(body.error || "Couldn't add the team."); return; }
-      setDone(`Added ${body.team.name}. ${body.team.ownerEmail} becomes its admin when they next sign in. Record their payment below once it arrives.`);
+      setDone(`Added ${body.team.name}. ${body.team.ownerEmail} sees the invitation to be its admin on their Team page (/team), and becomes its admin when they accept it. Record their payment below once it arrives.`);
       setName(""); setOwnerEmail(""); setPrice("");
       onAdded();
     } catch {

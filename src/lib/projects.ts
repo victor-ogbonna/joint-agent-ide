@@ -1,5 +1,5 @@
 import {
-  collection, doc, addDoc, getDoc, getDocs, updateDoc, deleteDoc, deleteField,
+  collection, doc, addDoc, getDoc, getDocsFromServer, updateDoc, deleteDoc, deleteField,
   query, orderBy, serverTimestamp, Timestamp
 } from "firebase/firestore";
 import { db } from "./firestore";
@@ -64,9 +64,31 @@ export async function createProject(uid: string, name: string, defaults: Pick<Pr
   return ref.id;
 }
 
+/**
+ * The project list couldn't come from the database: no connection, or one
+ * that blocks it. (Asked the usual way, Firestore would then answer from its
+ * own memory, which on a freshly opened page is empty: "no projects", as if
+ * they were gone. So the list is only ever asked of the database itself.)
+ * They're safe; the app tries again, and says so meanwhile.
+ */
+export class ProjectsUnreachableError extends Error {
+  readonly code = "unavailable";
+  constructor() {
+    super("Couldn't reach your saved projects just now. They're safe: check your connection, then try again.");
+    this.name = "ProjectsUnreachableError";
+  }
+}
+
 async function listAll(uid: string): Promise<ProjectSummary[]> {
   const q = query(projectsCol(uid), orderBy("updatedAt", "desc"));
-  const snap = await getDocs(q);
+  let snap;
+  try {
+    snap = await getDocsFromServer(q);
+  } catch (err: any) {
+    // No connection: not "no projects" (above). Anything else, as it is.
+    if (err?.code === "unavailable") throw new ProjectsUnreachableError();
+    throw err;
+  }
   return snap.docs.map(d => {
     const data = d.data();
     const mcu: MCUType = data.mcu || "esp32";
@@ -82,16 +104,26 @@ async function listAll(uid: string): Promise<ProjectSummary[]> {
   });
 }
 
+/**
+ * The account's projects, from one read: the live ones (most recently
+ * updated first), and the ones in Trash (most recently deleted first).
+ */
+export async function listProjectsAndTrash(uid: string): Promise<{ live: ProjectSummary[]; trashed: ProjectSummary[] }> {
+  const all = await listAll(uid);
+  return {
+    live: all.filter((p) => !p.deletedAt),
+    trashed: all.filter((p) => p.deletedAt).sort((a, b) => millis(b.deletedAt) - millis(a.deletedAt)),
+  };
+}
+
 /** The account's projects, not counting the ones in Trash. */
 export async function listProjects(uid: string): Promise<ProjectSummary[]> {
-  return (await listAll(uid)).filter((p) => !p.deletedAt);
+  return (await listProjectsAndTrash(uid)).live;
 }
 
 /** Projects in Trash, most recently deleted first. */
 export async function listTrashedProjects(uid: string): Promise<ProjectSummary[]> {
-  return (await listAll(uid))
-    .filter((p) => p.deletedAt)
-    .sort((a, b) => millis(b.deletedAt) - millis(a.deletedAt));
+  return (await listProjectsAndTrash(uid)).trashed;
 }
 
 function millis(ts: any): number {
@@ -139,10 +171,11 @@ export async function restoreProject(uid: string, projectId: string): Promise<vo
 
 /**
  * Deletes for good the projects that have been in Trash longer than
- * TRASH_DAYS days. Run when the app opens; returns how many went.
+ * TRASH_DAYS days. Run when the app opens, on the Trash it has just listed
+ * (`trashed`), or read here; returns how many went.
  */
-export async function purgeExpiredTrash(uid: string, now = Date.now()): Promise<number> {
-  const expired = (await listAll(uid)).filter((p) => p.deletedAt && trashExpiresAt(p.deletedAt) <= now);
+export async function purgeExpiredTrash(uid: string, now = Date.now(), trashed?: ProjectSummary[]): Promise<number> {
+  const expired = (trashed ?? (await listAll(uid))).filter((p) => p.deletedAt && trashExpiresAt(p.deletedAt) <= now);
   for (const p of expired) await deleteDoc(projectDoc(uid, p.id));
   return expired.length;
 }

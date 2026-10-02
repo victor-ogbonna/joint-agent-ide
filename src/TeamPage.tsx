@@ -45,13 +45,18 @@ interface TeamView {
 }
 interface PageData {
   team: TeamView | null;
-  invites: { teamId: string; teamName: string; role: TeamRole; state?: LicenseState }[];
+  /** `blocked`: why the server would refuse it now (server/teams.ts inviteBlock). */
+  invites: { teamId: string; teamName: string; role: TeamRole; state?: LicenseState; blocked?: InviteBlock | null }[];
   verified: boolean;
   prices: { seatPrice: number; currency: string; minSeats: number; maxSeats: number };
   payments: boolean;
 }
 type Call = (path: string, body?: unknown) => Promise<{ ok: boolean; data: any }>;
 type ProPrice = { amount: number; currency: string };
+/** Why an invitation can't be accepted yet (server/teams.ts InviteBlock). */
+type InviteBlock = "on_team" | "unpaid" | "ended" | "full";
+/** Someone joined a team, by an invitation or a code. */
+type OnJoined = (teamId: string, teamName: string) => void;
 
 // Shown for paying by invoice or bank transfer instead (as on /privacy).
 const CONTACT_EMAIL = "victorogbonna313@gmail.com";
@@ -417,7 +422,7 @@ function InviteCard({ team, call, reload }: { team: TeamView; call: Call; reload
     <section className={card}>
       <h2 className={heading}><Mail size={16} aria-hidden="true" /> Invite by email {lock && <Lock size={13} className="text-[var(--text-muted)]" aria-label="Locked" />}</h2>
       <p className={`mt-1 ${small}`}>
-        Paste addresses, separated by commas or new lines. Each person joins the next time they open Joint-Agent signed in with that address.{" "}
+        Paste addresses, separated by commas or new lines. Each person sees the invitation on their Team page, signed in with that address, and joins when they accept it.{" "}
         {lock ? "It works once the license is paid." : free > 0 ? `${free} seat${free === 1 ? " is" : "s are"} free to invite.` : "Every seat is taken or invited."}
       </p>
       <form onSubmit={send} className="mt-3" data-invite-form={lock ? "locked" : ""}>
@@ -579,39 +584,58 @@ function LeaveButton({ team, call, reload }: { team: TeamView; call: Call; reloa
   );
 }
 
-function WaitingInvites({ data, call, reload }: { data: PageData; call: Call; reload: () => Promise<void> }) {
+/** Why an invitation can't be accepted yet, as the server says. */
+const BLOCKED_TEXT: Record<InviteBlock, string> = {
+  on_team: "Leave your current team to join it.",
+  unpaid: "It can be accepted once the team's license is paid.",
+  ended: "It can be accepted once the team's license is renewed.",
+  full: "Every seat is taken: it can be accepted once its admin adds seats.",
+};
+
+/**
+ * Invitations to the person's address. Nobody is put on a team without
+ * saying so: Accept joins it (with PRO while it's paid), Decline turns it
+ * down. One that can't be accepted yet says why.
+ */
+function WaitingInvites({ data, call, reload, onJoined }: { data: PageData; call: Call; reload: () => Promise<void>; onJoined: OnJoined }) {
   const { busy, error, note, run } = useAction(call, reload);
   if (!data.invites.length) return null;
   return (
-    <section className={card}>
+    <section className={card} data-invitations="">
       <h2 className={heading}><Mail size={16} aria-hidden="true" /> Invitations</h2>
       <ul className="mt-2 divide-y divide-[var(--border-main)] text-[13px]">
-        {data.invites.map((i) => (
-          <li key={i.teamId} className="flex flex-wrap items-center justify-between gap-2 py-2">
-            <span className="min-w-0">
-              <strong>{i.teamName}</strong> invited you{i.role === "admin" ? " as its admin" : ""}.{" "}
-              <span className="text-[var(--text-muted)]">
-                {data.team
-                  ? "Leave your current team to join it."
-                  : i.role !== "admin" && i.state === "unpaid"
-                    ? "It's waiting for the team's license to be paid."
-                    : i.role !== "admin" && i.state === "ended"
-                      ? "It's waiting for the team's license to be renewed."
-                      : "It's waiting for a free seat."}
-              </span>
-            </span>
-            <button type="button" className={button} disabled={busy !== null} onClick={() => void run(`d:${i.teamId}`, "/api/team/invites/decline", { teamId: i.teamId }, () => `Declined ${i.teamName}'s invitation.`)}>
-              {busy === `d:${i.teamId}` ? <Loader2 size={14} className="animate-spin" /> : <X size={14} />} Decline
-            </button>
-          </li>
-        ))}
+        {data.invites.map((i) => {
+          // Why it can't be accepted now, if it can't.
+          const blocked = (i.blocked && BLOCKED_TEXT[i.blocked]) || null;
+          return (
+            <li key={i.teamId} className="py-3" data-invitation={i.teamId}>
+              <p className="min-w-0">
+                <strong>{i.teamName}</strong> invited you to its {i.role === "admin" ? "license, as its admin" : "license"}.{" "}
+                <span className="text-[var(--text-muted)]">{blocked ?? (i.role === "admin" ? "Accept to join and manage it." : "Accept to join: everyone on it has PRO while it's paid.")}</span>
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {!blocked && (
+                  <button
+                    type="button" className={primary} style={{ background: "var(--gradient-hero)" }} disabled={busy !== null}
+                    onClick={() => void run(`a:${i.teamId}`, "/api/team/invites/accept", { teamId: i.teamId }, () => { onJoined(i.teamId, i.teamName); return null; })}
+                  >
+                    {busy === `a:${i.teamId}` ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />} Accept
+                  </button>
+                )}
+                <button type="button" className={button} disabled={busy !== null} onClick={() => void run(`d:${i.teamId}`, "/api/team/invites/decline", { teamId: i.teamId }, () => `Declined ${i.teamName}'s invitation.`)}>
+                  {busy === `d:${i.teamId}` ? <Loader2 size={14} className="animate-spin" /> : <X size={14} />} Decline
+                </button>
+              </div>
+            </li>
+          );
+        })}
       </ul>
       <Notes error={error} note={note} />
     </section>
   );
 }
 
-function NoTeam({ data, call, reload, joinFromLink, proMonthly }: { data: PageData; call: Call; reload: () => Promise<void>; joinFromLink: string; proMonthly: ProPrice | null }) {
+function NoTeam({ data, call, reload, joinFromLink, proMonthly, onJoined }: { data: PageData; call: Call; reload: () => Promise<void>; joinFromLink: string; proMonthly: ProPrice | null; onJoined: OnJoined }) {
   const join = useAction(call, reload);
   const create = useAction(call, reload);
   const [code, setCode] = useState(joinFromLink);
@@ -641,7 +665,8 @@ function NoTeam({ data, call, reload, joinFromLink, proMonthly }: { data: PageDa
               const url = new URL(window.location.href);
               url.searchParams.delete("join");
               window.history.replaceState(null, "", url.toString());
-              return `You joined ${d.name}.`;
+              onJoined(d.teamId, d.name);
+              return null;
             });
           }}
         >
@@ -758,6 +783,10 @@ export default function TeamPage() {
 
   const team = data?.team ?? null;
   const lock = team ? lockOf(team.state) : null;
+  // "You joined …", shown above the team joined (the card it was pressed in
+  // goes once the page shows it), and only that team: not one made later.
+  const [joined, setJoined] = useState<{ teamId: string; text: string } | null>(null);
+  const onJoined = useCallback<OnJoined>((teamId, teamName) => setJoined({ teamId, text: `You joined ${teamName}.` }), []);
 
   return (
     <div className="min-h-full w-full bg-[var(--bg-root)] text-[var(--text-main)] px-4 py-10 sm:px-6">
@@ -795,9 +824,10 @@ export default function TeamPage() {
         ) : (
           <div className="mt-6 space-y-4">
             {error && <p role="alert" className="text-[14px] text-red-500">{error}</p>}
-            <WaitingInvites data={data} call={call} reload={load} />
+            {joined && team && team.id === joined.teamId && <p role="status" className="text-[14px] font-medium text-green-500" data-joined="">{joined.text}</p>}
+            <WaitingInvites data={data} call={call} reload={load} onJoined={onJoined} />
             {!team ? (
-              <NoTeam data={data} call={call} reload={load} joinFromLink={joinFromLink} proMonthly={proMonthly} />
+              <NoTeam data={data} call={call} reload={load} joinFromLink={joinFromLink} proMonthly={proMonthly} onJoined={onJoined} />
             ) : (
               <>
                 <Overview team={team} />
