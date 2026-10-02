@@ -788,6 +788,15 @@ export default function App() {
   // the build (ready). Opening a saved project instead, or closing the menu,
   // drops it.
   const [pendingBuild, setPendingBuild] = useState<{ build: PendingBuild; ready: boolean } | null>(null);
+  // The project just picked in Recent, highlighted while it opens
+  // (handleOpenRecent); openRecentRef tells a newer pick from an older one.
+  const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
+  const openRecentRef = useRef(0);
+  // The sidebar's scrolling part, and whether the project in hand still has
+  // to be brought into view there (opening Workspace on a phone).
+  const sidebarScrollRef = useRef<HTMLDivElement>(null);
+  const revealCurrentRef = useRef(false);
+  const lastPaneRef = useRef<MobilePane | null>(null);
   // The walk-through: automatic on a first-time account's first visit, and
   // on request from the profile menu. Seen once per account on this device.
   const [tourOpen, setTourOpen] = useState(false);
@@ -3292,14 +3301,48 @@ export default function App() {
   /**
    * A project picked in Recents opens on its conversation, in the Agent
    * section: Agent-Mode, and on a phone the Agent tab. Picking the project
-   * already open just goes there.
+   * already open just goes there. It turns orange the moment it's picked and
+   * stays so for at least PICK_HIGHLIGHT_MS, so the choice is seen before the
+   * Agent section takes over.
    */
+  const PICK_HIGHLIGHT_MS = 450;
   const handleOpenRecent = async (projectId: string) => {
+    const ticket = ++openRecentRef.current;
+    const pickedAt = Date.now();
+    const paneAtPick = mobilePaneRef.current;
+    setOpeningProjectId(projectId);
     const opened = projectId === currentProjectIdRef.current || await handleOpenProject(projectId);
-    if (!opened) return;
-    if (appMode !== "agentic") setAppMode("agentic");
-    if (isNarrowRef.current) slideToPane("agent");
+    if (ticket !== openRecentRef.current) return; // another project was picked since
+    if (!opened) {
+      setOpeningProjectId(null);
+      return;
+    }
+    const rest = PICK_HIGHLIGHT_MS - (Date.now() - pickedAt);
+    if (rest > 0) await new Promise((r) => setTimeout(r, rest));
+    if (ticket !== openRecentRef.current) return;
+    setOpeningProjectId(null);
+    setAppMode("agentic");
+    // Unless they went somewhere else themselves in the meantime.
+    if (isNarrowRef.current && mobilePaneRef.current === paneAtPick) slideToPane("agent");
   };
+
+  // Opening Workspace on a phone: the project in hand (orange in Recent) is
+  // brought into view if it's below the fold. Only the sidebar's own list
+  // scrolls; if Recent hasn't loaded yet, this waits until it has.
+  useLayoutEffect(() => {
+    const onWorkspace = isNarrow && mobilePane === "files";
+    if (onWorkspace && lastPaneRef.current !== "files") revealCurrentRef.current = true;
+    lastPaneRef.current = isNarrow ? mobilePane : null;
+    if (!onWorkspace || !revealCurrentRef.current) return;
+    const box = sidebarScrollRef.current;
+    const row = box?.querySelector<HTMLElement>("[data-current-project]");
+    if (!box || !row) return;
+    revealCurrentRef.current = false;
+    const shown = box.getBoundingClientRect();
+    const at = row.getBoundingClientRect();
+    if (at.bottom > shown.bottom) box.scrollTop += at.bottom - shown.bottom + 12;
+    else if (at.top < shown.top) box.scrollTop -= shown.top - at.top + 12;
+  }, [isNarrow, mobilePane, recentProjects, currentProjectId]);
 
   const handleRenameProject = async (newName: string) => {
     const trimmed = newName.trim() || "Untitled Project";
@@ -3439,10 +3482,10 @@ export default function App() {
           onClick={() => setAppMode(mode)}
           aria-pressed={appMode === mode}
           className={`flex items-center justify-center gap-1.5 rounded-md font-semibold tracking-wide transition-all duration-200 ${
-            fullWidth ? "flex-1 min-h-[40px] text-[13px]" : "px-4 min-h-[32px] text-[12px]"
+            fullWidth ? "flex-1 min-h-[34px] text-[12px]" : "px-4 min-h-[32px] text-[12px]"
           } ${appMode === mode ? `${on} shadow-sm` : "text-[var(--text-muted)] hover:text-[var(--text-main)]"}`}
         >
-          <Icon size={fullWidth ? 16 : 14} />
+          <Icon size={14} />
           {label}
         </button>
       ))}
@@ -3453,12 +3496,17 @@ export default function App() {
     <div className="app-shell h-full bg-[var(--bg-root)] text-[var(--text-main)] flex flex-col antialiased overflow-hidden">
       {/* Universal Header — Glassmorphism */}
       <header className="border-b border-[var(--border-main)] header-glass shrink-0 z-30">
-        <div className="h-12 px-2 sm:px-4 flex items-center justify-between gap-2">
+        <div className="relative h-12 px-2 sm:px-4 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
-          {isNarrow ? (
-            // On a phone the plan takes the logo's place: a way up for free
-            // accounts, a quiet badge for PRO ones — and nothing until the
-            // server has said which, so PRO never flashes an upgrade.
+          {isNarrow && mobilePane === "files" ? (
+            // Workspace on a phone: the logo. The account row just below
+            // already shows the plan (PRO, or Upgrade to Pro).
+            <img src="/logo.png" alt="Joint-Agent IDE" className="w-7 h-7 rounded-lg shrink-0 shadow-md select-none" />
+          ) : isNarrow ? (
+            // On a phone's Agent and Code sections the plan takes the logo's
+            // place: a way up for free accounts, a quiet badge for PRO ones —
+            // and nothing until the server has said which, so PRO never
+            // flashes an upgrade.
             accountTier === null ? null : isPro ? (
               <span className="pro-badge h-9 px-1 text-[15px] select-none" title={trialActive && trialEndsAt !== null ? `Free PRO trial, ends ${formatDay(trialEndsAt)}` : teamStatus && (teamStatus.state === "active" || teamStatus.state === "grace") ? `PRO through ${teamStatus.name}` : "You're on PRO"}>
                 <Zap size={16} fill="currentColor" strokeWidth={1.5} aria-hidden="true" />
@@ -3474,24 +3522,24 @@ export default function App() {
               </button>
             )
           ) : (
-            <div className="flex items-center gap-2.5 logo-accent cursor-default select-none">
-              <img src="/logo.png" alt="Joint-Agent IDE" className="w-7 h-7 rounded-lg shrink-0 shadow-md" />
-              <div className="flex flex-col">
-                <h1 className="font-display font-bold text-[13px] text-[var(--text-main)] tracking-wide leading-tight flex items-center gap-1.5">
-                  Joint-Agent <span className="gradient-text">IDE</span>
-                  <span className="text-[8px] font-mono font-semibold text-[var(--text-subtle)] bg-[var(--bg-surface)] border border-[var(--border-main)] rounded px-1 py-px leading-none">
-                    v1.0
-                  </span>
-                </h1>
-                <p className="text-[8px] text-[var(--text-subtle)] font-mono tracking-[0.2em] uppercase">IoT · Blockchain · AI</p>
-              </div>
-            </div>
+            modeSwitcher(false)
           )}
-
-          {!isNarrow && <div className="h-5 w-px bg-[var(--border-main)] mx-1"></div>}
-
-          {!isNarrow && modeSwitcher(false)}
         </div>
+
+        {/* Desktop: the logo with the name beside it, in the middle of the
+            bar (beside rather than beneath, so it fits the bar's height and
+            the name stays readable). Held at the centre of the whole bar,
+            whatever is either side of it. */}
+        {!isNarrow && (
+          <div className="absolute left-1/2 top-1/2" style={{ transform: "translate(-50%, -50%)" }}>
+            <div className="flex items-center gap-2 logo-accent cursor-default select-none">
+              <img src="/logo.png" alt="" className="w-7 h-7 rounded-lg shrink-0 shadow-md" />
+              <h1 className="font-display font-bold text-[12px] text-[var(--text-main)] tracking-wide leading-tight whitespace-nowrap">
+                Joint-Agent <span className="gradient-text">IDE</span>
+              </h1>
+            </div>
+          </div>
+        )}
 
         {/* Global Controls */}
         <div className="flex items-center gap-2 min-w-0">
@@ -3703,7 +3751,7 @@ export default function App() {
                 </div>
               )}
 
-              <div className="flex-1 overflow-y-auto terminal-scrollbar">
+              <div ref={sidebarScrollRef} className="flex-1 overflow-y-auto terminal-scrollbar">
               <div className="px-3 py-2.5 text-[9px] uppercase text-[var(--text-subtle)] font-bold tracking-[0.2em] border-b border-[var(--border-main)]">
                 Projects
               </div>
@@ -3824,18 +3872,30 @@ export default function App() {
                     </p>
                   )}
 
-                  {recentProjects.slice(0, 12).map((p) => {
-                    const isOpen = p.id === currentProjectId;
+                  {/* The project in hand is always listed, even when it's older
+                      than the twelve shown, so it can be seen highlighted. */}
+                  {(() => {
+                    const shown = recentProjects.slice(0, 12);
+                    const inHand = recentProjects.find((p) => p.id === currentProjectId);
+                    return inHand && !shown.includes(inHand) ? [...shown, inHand] : shown;
+                  })().map((p) => {
+                    // Orange: the project just picked (while it opens), or
+                    // else the one open now.
+                    const isOpen = p.id === (openingProjectId ?? currentProjectId);
+                    const isOpening = p.id === openingProjectId && p.id !== currentProjectId;
                     return (
                       <div key={p.id} className="relative group flex items-center">
                       <button
                         onClick={() => void handleOpenRecent(p.id)}
                         title={`${p.name} — ${boardNames.get(p.boardId) || (p.mcu || "").toUpperCase()}`}
+                        aria-current={isOpen ? "true" : undefined}
+                        data-current-project={p.id === currentProjectId ? "" : undefined}
                         className={`w-[calc(100%-0.75rem)] text-left mx-1.5 px-2 py-1.5 flex items-center gap-2 text-[11px] rounded-md transition ${
                           isOpen
-                            ? "bg-[var(--bg-hover)] text-[var(--text-main)]"
+                            ? "bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium"
                             : "text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] cursor-pointer"
                         }`}
+                        style={isOpen ? { boxShadow: "inset 0 0 0 1px var(--accent-primary)" } : undefined}
                       >
                         <FileCode
                           size={13}
@@ -3850,7 +3910,9 @@ export default function App() {
                             {boardNames.get(p.boardId) || (p.mcu || "").toUpperCase()}
                           </span>
                         </span>
-                        {isOpen && (
+                        {isOpening ? (
+                          <Loader2 size={11} className="animate-spin text-[var(--accent-primary)] shrink-0 mr-5" />
+                        ) : isOpen && (
                           <span className="text-[8px] uppercase tracking-wider text-[var(--accent-primary)] shrink-0 mr-5">
                             open
                           </span>

@@ -56,12 +56,14 @@ export default function Web3Panel({ walletState, setWalletState }: Web3PanelProp
         {!walletState.connected ? (
           <div className="text-center space-y-3 mt-4">
             <p className="text-xs text-[var(--text-muted)]">Connect MetaMask to send microcontroller sensor data to any Ethereum-compatible network.</p>
-            <button 
-              onClick={handleConnect}
-              disabled={walletState.authenticating}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium text-xs transition disabled:opacity-50"
+            {/* Not open for use yet: shown, but it can't be pressed. */}
+            <button
+              type="button"
+              disabled
+              aria-disabled="true"
+              className="px-4 py-2 bg-blue-600 text-white rounded font-medium text-xs opacity-50 cursor-not-allowed"
             >
-              {walletState.authenticating ? "Connecting..." : "Connect MetaMask"}
+              Connect MetaMask
             </button>
           </div>
         ) : (
