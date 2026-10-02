@@ -1,5 +1,5 @@
 import {
-  collection, doc, addDoc, getDoc, getDocs, updateDoc, deleteDoc, deleteField,
+  collection, doc, addDoc, getDoc, getDocsFromServer, updateDoc, deleteDoc, deleteField,
   query, orderBy, serverTimestamp, Timestamp
 } from "firebase/firestore";
 import { db } from "./firestore";
@@ -66,12 +66,13 @@ export async function createProject(uid: string, name: string, defaults: Pick<Pr
 
 /**
  * The project list couldn't come from the database: no connection, or one
- * that blocks it. Firestore then answers from its own memory instead, which
- * on a freshly opened page is empty, so it would read as "no projects" and
- * look as if they were gone. They aren't: the list just has to be asked
- * again (the app retries, and says so meanwhile).
+ * that blocks it. (Asked the usual way, Firestore would then answer from its
+ * own memory, which on a freshly opened page is empty: "no projects", as if
+ * they were gone. So the list is only ever asked of the database itself.)
+ * They're safe; the app tries again, and says so meanwhile.
  */
 export class ProjectsUnreachableError extends Error {
+  readonly code = "unavailable";
   constructor() {
     super("Couldn't reach your saved projects just now. They're safe: check your connection, then try again.");
     this.name = "ProjectsUnreachableError";
@@ -80,9 +81,14 @@ export class ProjectsUnreachableError extends Error {
 
 async function listAll(uid: string): Promise<ProjectSummary[]> {
   const q = query(projectsCol(uid), orderBy("updatedAt", "desc"));
-  const snap = await getDocs(q);
-  // From Firestore's memory, not the database: not the real list (above).
-  if (snap.metadata?.fromCache === true) throw new ProjectsUnreachableError();
+  let snap;
+  try {
+    snap = await getDocsFromServer(q);
+  } catch (err: any) {
+    // No connection: not "no projects" (above). Anything else, as it is.
+    if (err?.code === "unavailable") throw new ProjectsUnreachableError();
+    throw err;
+  }
   return snap.docs.map(d => {
     const data = d.data();
     const mcu: MCUType = data.mcu || "esp32";

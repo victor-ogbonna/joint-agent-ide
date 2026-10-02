@@ -393,11 +393,12 @@ export async function acceptInvite(db: Db, who: Who, rawTeamId: unknown, now: nu
 /** The oldest invitation waiting for the account's verified address, for the app to point to; null when none. */
 export async function invitationFor(db: Db, who: Who, now: number): Promise<WaitingInvite | null> {
   if (!who.emailVerified || !who.email) return null;
-  for (const inv of await invitesFor(db, who.email.trim().toLowerCase())) {
+  const email = who.email.trim().toLowerCase();
+  for (const inv of await invitesFor(db, email)) {
     const t = await teamRef(db, inv.teamId).get();
-    if (!t.exists) continue;
-    const team = teamOf(inv.teamId, t.data());
-    return { teamId: inv.teamId, teamName: team.name, role: inv.role, state: licenseStanding(team.paidUntil, now, team.paidFor).state };
+    // A team that's gone: its invitation is cleared, so it isn't read again.
+    if (!t.exists) { await inviteRef(db, inv.teamId, email).delete().catch(() => {}); continue; }
+    return waitingInvite(inv, teamOf(inv.teamId, t.data()), now);
   }
   return null;
 }
@@ -841,13 +842,24 @@ export async function teamDetail(db: Db, rawTeamId: unknown, now: number): Promi
   };
 }
 
-/** An invitation to the person's address, waiting: for a free seat, or for the team's license to be paid (`state`). */
+/** An invitation to the person's address, waiting for them to accept it; `state` and `full` say if it can't be yet. */
 export interface WaitingInvite {
   teamId: string;
   teamName: string;
   role: TeamRole;
   state: LicenseState;
+  /** Every seat is taken: it can be accepted once the team has a free one. */
+  full: boolean;
 }
+
+/** An invitation as the person's Team page and the app show it. */
+const waitingInvite = (inv: InviteRow, team: TeamRecord, now: number): WaitingInvite => ({
+  teamId: inv.teamId,
+  teamName: team.name,
+  role: inv.role,
+  state: licenseStanding(team.paidUntil, now, team.paidFor).state,
+  full: team.memberCount >= team.seats,
+});
 
 /** The /team page: the person's team (and as an admin sees it, if they are one), and invitations waiting. */
 export async function teamPage(db: Db, who: Who, now: number): Promise<{ team: TeamView | TeamAdminView | null; invites: WaitingInvite[]; verified: boolean }> {
@@ -859,8 +871,7 @@ export async function teamPage(db: Db, who: Who, now: number): Promise<{ team: T
     const t = await teamRef(db, inv.teamId).get();
     // A team that's gone: its invitation is cleared.
     if (!t.exists) { await inviteRef(db, inv.teamId, email!).delete().catch(() => {}); continue; }
-    const team = teamOf(inv.teamId, t.data());
-    invites.push({ teamId: inv.teamId, teamName: team.name, role: inv.role, state: licenseStanding(team.paidUntil, now, team.paidFor).state });
+    invites.push(waitingInvite(inv, teamOf(inv.teamId, t.data()), now));
   }
   if (!mine.exists) return { team: null, invites, verified: who.emailVerified };
   const me = memberOf(who.uid, mine.data());

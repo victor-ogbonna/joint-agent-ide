@@ -45,7 +45,7 @@ import { WINDOW_HOURS, FREE_WINDOW_TOKENS, PRO_WINDOW_TOKENS, FREE_PROJECT_LIMIT
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
 import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts, describeVisibleUsbDevices } from "./lib/webusbSerial";
-import { createProject, getProject, updateProject, renameProject, listProjects, trashProject, purgeExpiredTrash, ProjectSummary, trimMessagesForStorage, TRASH_DAYS } from "./lib/projects";
+import { createProject, getProject, updateProject, renameProject, listProjects, trashProject, purgeExpiredTrash, ProjectSummary, ProjectsUnreachableError, trimMessagesForStorage, TRASH_DAYS } from "./lib/projects";
 import { sketchBaudRate, sketchOpensSerial, sketchSerial } from "./lib/sketchBaud";
 import { usbChipName } from "./lib/usbChips";
 import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlock, primeLastKnownBlock, QuotaBlockedInfo } from "./lib/aiClient";
@@ -825,9 +825,17 @@ export default function App() {
   const [recentFetched, setRecentFetched] = useState(false);
   const welcomeShownForRef = useRef<string | null>(null);
   const [loadingRecent, setLoadingRecent] = useState(false);
-  // Loads in a row that couldn't reach the database (no connection): never
-  // shown as "no projects", and tried again, sooner first.
+  // The list couldn't load: "offline" (no connection: tried again by
+  // itself, sooner first, counted in recentFailures) or "refused" (the
+  // database said no: tried again only on Try again). Never shown as "no
+  // projects".
+  const [recentFailed, setRecentFailed] = useState<null | "offline" | "refused">(null);
   const [recentFailures, setRecentFailures] = useState(0);
+  // Which request's answer counts: a newer one, or a change of account,
+  // makes an older answer stale, and it's dropped.
+  const recentRequestRef = useRef(0);
+  // The account whose list has loaded once this sign-in.
+  const recentLoadedForRef = useRef<string | null>(null);
   const [showNewProjectModal, setShowNewProjectModal] = useState(false);
   const [importedFileCode, setImportedFileCode] = useState<string | null>(null);
   const [importedFileName, setImportedFileName] = useState<string>("");
@@ -949,6 +957,21 @@ export default function App() {
       // Non-fatal: the next status check catches up.
     }
   };
+
+  // An invitation is accepted on the Team page, which opens in another tab:
+  // back here, the account is asked again, so the team (and its PRO) show
+  // straight away, and the invitation's notice goes.
+  useEffect(() => {
+    if (!user || !teamInvitation) return;
+    const again = () => { if (document.visibilityState === "visible") void refreshPlanStatus(); };
+    window.addEventListener("focus", again);
+    document.addEventListener("visibilitychange", again);
+    return () => {
+      window.removeEventListener("focus", again);
+      document.removeEventListener("visibilitychange", again);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, teamInvitation?.teamId]);
 
   /**
    * Put a creator's code on this account: 7 days of PRO, free. From a
@@ -3185,20 +3208,41 @@ export default function App() {
   }, [user]);
 
   const refreshRecentProjects = React.useCallback(async () => {
-    if (!user) { setRecentProjects([]); setRecentFailures(0); return; }
+    const ticket = ++recentRequestRef.current;
+    if (!user) {
+      setRecentProjects([]);
+      setRecentFailed(null);
+      setRecentFailures(0);
+      setLoadingRecent(false);
+      recentLoadedForRef.current = null;
+      return;
+    }
     setLoadingRecent(true);
     try {
-      setRecentProjects(await listProjects(user.uid));
+      const list = await listProjects(user.uid);
+      if (ticket !== recentRequestRef.current) return;
+      setRecentProjects(list);
+      setRecentFailed(null);
       setRecentFailures(0);
+      recentLoadedForRef.current = user.uid;
       setRecentFetched(true);
     } catch (err: any) {
-      // Not loaded (no connection): the list on screen stays as it was, and
-      // Recent says it couldn't load rather than "no projects". The reason
-      // goes to the console (no connection, or the database refusing).
+      if (ticket !== recentRequestRef.current) return;
+      // Not loaded: the list on screen stays as it was, and Recent says it
+      // couldn't load rather than "no projects". The reason goes to the
+      // console (no connection, or the database refusing).
       console.warn("[Projects] Couldn't load the project list:", err?.code || "", err?.message || err);
-      setRecentFailures((n) => n + 1);
+      // The first load of this sign-in failed: the welcome box and the tour
+      // don't pop up later, mid-work, when it does load.
+      if (recentLoadedForRef.current !== user.uid) welcomeShownForRef.current = user.uid;
+      if (err instanceof ProjectsUnreachableError) {
+        setRecentFailed("offline");
+        setRecentFailures((n) => n + 1);
+      } else {
+        setRecentFailed("refused");
+      }
     } finally {
-      setLoadingRecent(false);
+      if (ticket === recentRequestRef.current) setLoadingRecent(false);
     }
   }, [user]);
 
@@ -3206,15 +3250,16 @@ export default function App() {
   // moment a project is created, renamed or saved, so this covers all of them.
   useEffect(() => { refreshRecentProjects(); }, [refreshRecentProjects, currentProjectId]);
 
-  // Couldn't load: tried again by itself (after 5 s, then longer, up to a
-  // minute), and straight away when the connection comes back.
+  // No connection: tried again by itself (after 5 s, then longer, up to a
+  // minute), and straight away when the connection comes back. (Refused by
+  // the database: only on Try again, as trying again wouldn't change it.)
   useEffect(() => {
-    if (!user || recentFailures === 0) return;
+    if (!user || recentFailed !== "offline" || recentFailures === 0) return;
     const again = () => { void refreshRecentProjects(); };
     const t = setTimeout(again, Math.min(60_000, 5_000 * recentFailures));
     window.addEventListener("online", again);
     return () => { clearTimeout(t); window.removeEventListener("online", again); };
-  }, [user, recentFailures, refreshRecentProjects]);
+  }, [user, recentFailed, recentFailures, refreshRecentProjects]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3237,6 +3282,7 @@ export default function App() {
     if (!user) {
       welcomeShownForRef.current = null;
       setRecentFetched(false);
+      setRecentFailed(null);
       setRecentFailures(0);
       setShowWelcome(false);
       return;
@@ -3982,15 +4028,17 @@ export default function App() {
                     Recent
                   </div>
 
-                  {loadingRecent && recentProjects.length === 0 && (
+                  {loadingRecent && !recentFailed && recentProjects.length === 0 && (
                     <div className="px-3.5 py-1.5 text-[11px] text-[var(--text-subtle)]">Loading…</div>
                   )}
 
                   {/* Couldn't reach the database: say so, never "none yet". */}
-                  {recentFailures > 0 && (
+                  {recentFailed && (
                     <div className="px-3.5 py-1.5 text-[10px] leading-relaxed text-[var(--text-subtle)]" role="status" data-recent-failed="">
                       {recentProjects.length === 0
-                        ? "Couldn't load your projects just now. They're safe: check your connection."
+                        ? recentFailed === "offline"
+                          ? "Couldn't load your projects just now. They're safe: check your connection."
+                          : "Couldn't load your projects just now. They're safe: try again in a moment."
                         : "Couldn't refresh this list just now."}{" "}
                       <button
                         type="button"
@@ -4003,7 +4051,7 @@ export default function App() {
                     </div>
                   )}
 
-                  {!loadingRecent && recentFailures === 0 && recentFetched && recentProjects.length === 0 && (
+                  {!loadingRecent && !recentFailed && recentFetched && recentProjects.length === 0 && (
                     <p className="px-3.5 py-1.5 text-[10px] leading-relaxed text-[var(--text-subtle)]">
                       Projects you save appear here.
                     </p>
@@ -4781,7 +4829,7 @@ export default function App() {
           displayName={user.displayName?.split(" ")[0] || ""}
           projects={recentProjects}
           loading={loadingRecent}
-          failed={recentFailures > 0 && recentProjects.length === 0}
+          failed={!!recentFailed && recentProjects.length === 0}
           onRetry={() => void refreshRecentProjects()}
           forBuild={pendingBuild !== null}
           onNewProject={() => { setShowWelcome(false); void openNewProject(); }}

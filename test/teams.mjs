@@ -392,6 +392,7 @@ const small = await createTeam(db, null, { name: "Tiny Team", seats: 5, ownerEma
 await db.doc(`teams/${small.id}`).set({ memberCount: 5 }, { merge: true });
 const busy = { uid: "busy", email: "boss@tiny.io", emailVerified: true };
 await db.doc("users/busy").set({ subscriptionStatus: "none" });
+check((await teamPage(db, busy, NOW)).invites[0]?.full === true && (await invitationFor(db, busy, NOW))?.full === true, "the Team page and the app know the team is full (no Accept to press in vain)");
 check(await throwsWith(() => acceptInvite(db, busy, small.id, NOW), /full/, "full") && (await db.doc(`teamInvites/${inviteId(small.id, "boss@tiny.io")}`).get()).exists, "for a full team: refused, the invitation kept");
 await db.doc(`teams/${small.id}`).set({ memberCount: 0 }, { merge: true });
 await acceptInvite(db, busy, small.id, NOW);
@@ -400,6 +401,8 @@ await db.doc(`teamInvites/${inviteId("gone", "lost@x.io")}`).set({ teamId: "gone
 const lost = { uid: "lost", email: "lost@x.io", emailVerified: true };
 check((await teamPage(db, lost, NOW)).invites.length === 0 && !(await db.doc(`teamInvites/${inviteId("gone", "lost@x.io")}`).get()).exists && (await invitationFor(db, lost, NOW)) === null,
   "one for a team that's gone isn't listed, and is cleared");
+await db.doc(`teamInvites/${inviteId("gone2", "lost@x.io")}`).set({ teamId: "gone2", email: "lost@x.io", role: "member", invitedAt: NOW });
+check((await invitationFor(db, lost, NOW)) === null && !(await db.doc(`teamInvites/${inviteId("gone2", "lost@x.io")}`).get()).exists, "the app's check clears it too, so it isn't read again");
 await db.doc(`teamInvites/${inviteId(school.id, "nah@x.io")}`).set({ teamId: school.id, email: "nah@x.io", role: "member", invitedAt: NOW });
 await declineInvite(db, { uid: "nah", email: "nah@x.io", emailVerified: true }, school.id);
 check(!(await db.doc(`teamInvites/${inviteId(school.id, "nah@x.io")}`).get()).exists, "an invitation can be turned down");

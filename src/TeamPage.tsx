@@ -45,7 +45,7 @@ interface TeamView {
 }
 interface PageData {
   team: TeamView | null;
-  invites: { teamId: string; teamName: string; role: TeamRole; state?: LicenseState }[];
+  invites: { teamId: string; teamName: string; role: TeamRole; state?: LicenseState; full?: boolean }[];
   verified: boolean;
   prices: { seatPrice: number; currency: string; minSeats: number; maxSeats: number };
   payments: boolean;
@@ -584,7 +584,7 @@ function LeaveButton({ team, call, reload }: { team: TeamView; call: Call; reloa
  * saying so: Accept joins it (with PRO while it's paid), Decline turns it
  * down. One that can't be accepted yet says why.
  */
-function WaitingInvites({ data, call, reload }: { data: PageData; call: Call; reload: () => Promise<void> }) {
+function WaitingInvites({ data, call, reload, onJoined }: { data: PageData; call: Call; reload: () => Promise<void>; onJoined: (teamName: string) => void }) {
   const { busy, error, note, run } = useAction(call, reload);
   if (!data.invites.length) return null;
   return (
@@ -599,7 +599,9 @@ function WaitingInvites({ data, call, reload }: { data: PageData; call: Call; re
               ? "It can be accepted once the team's license is paid."
               : i.role !== "admin" && i.state === "ended"
                 ? "It can be accepted once the team's license is renewed."
-                : null;
+                : i.full
+                  ? "Every seat is taken: it can be accepted once its admin adds seats."
+                  : null;
           return (
             <li key={i.teamId} className="py-3" data-invitation={i.teamId}>
               <p className="min-w-0">
@@ -610,7 +612,7 @@ function WaitingInvites({ data, call, reload }: { data: PageData; call: Call; re
                 {!blocked && (
                   <button
                     type="button" className={primary} style={{ background: "var(--gradient-hero)" }} disabled={busy !== null}
-                    onClick={() => void run(`a:${i.teamId}`, "/api/team/invites/accept", { teamId: i.teamId }, () => `You joined ${i.teamName}.`)}
+                    onClick={() => void run(`a:${i.teamId}`, "/api/team/invites/accept", { teamId: i.teamId }, () => { onJoined(i.teamName); return null; })}
                   >
                     {busy === `a:${i.teamId}` ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />} Accept
                   </button>
@@ -628,7 +630,7 @@ function WaitingInvites({ data, call, reload }: { data: PageData; call: Call; re
   );
 }
 
-function NoTeam({ data, call, reload, joinFromLink, proMonthly }: { data: PageData; call: Call; reload: () => Promise<void>; joinFromLink: string; proMonthly: ProPrice | null }) {
+function NoTeam({ data, call, reload, joinFromLink, proMonthly, onJoined }: { data: PageData; call: Call; reload: () => Promise<void>; joinFromLink: string; proMonthly: ProPrice | null; onJoined: (teamName: string) => void }) {
   const join = useAction(call, reload);
   const create = useAction(call, reload);
   const [code, setCode] = useState(joinFromLink);
@@ -658,7 +660,8 @@ function NoTeam({ data, call, reload, joinFromLink, proMonthly }: { data: PageDa
               const url = new URL(window.location.href);
               url.searchParams.delete("join");
               window.history.replaceState(null, "", url.toString());
-              return `You joined ${d.name}.`;
+              onJoined(d.name);
+              return null;
             });
           }}
         >
@@ -775,6 +778,10 @@ export default function TeamPage() {
 
   const team = data?.team ?? null;
   const lock = team ? lockOf(team.state) : null;
+  // "You joined …", shown above the team: the card it was pressed in goes
+  // once the page shows the team.
+  const [joined, setJoined] = useState<string | null>(null);
+  const onJoined = useCallback((teamName: string) => setJoined(`You joined ${teamName}.`), []);
 
   return (
     <div className="min-h-full w-full bg-[var(--bg-root)] text-[var(--text-main)] px-4 py-10 sm:px-6">
@@ -812,9 +819,10 @@ export default function TeamPage() {
         ) : (
           <div className="mt-6 space-y-4">
             {error && <p role="alert" className="text-[14px] text-red-500">{error}</p>}
-            <WaitingInvites data={data} call={call} reload={load} />
+            {joined && team && <p role="status" className="text-[14px] font-medium text-green-500" data-joined="">{joined}</p>}
+            <WaitingInvites data={data} call={call} reload={load} onJoined={onJoined} />
             {!team ? (
-              <NoTeam data={data} call={call} reload={load} joinFromLink={joinFromLink} proMonthly={proMonthly} />
+              <NoTeam data={data} call={call} reload={load} joinFromLink={joinFromLink} proMonthly={proMonthly} onJoined={onJoined} />
             ) : (
               <>
                 <Overview team={team} />
