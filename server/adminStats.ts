@@ -10,7 +10,7 @@ import { buildCacheStatus } from "./buildCache";
 import { STATS_COLLECTION, liveToday, unflushed, lastHour, utcDay as todayUtc } from "./stats";
 import { librariesDirectory } from "./libraries";
 import { paystackSecretKey } from "./paystack";
-import { teamPaidUntilMap } from "./teams";
+import { teamLicenseMap } from "./teams";
 import { getBoardById } from "./boards";
 import {
   buildUserRows, summarizeUsers, dayRange, buildSeries, totals, boardTotals, addStats, paymentRows, summarizePayments,
@@ -76,9 +76,9 @@ async function userDocs(fresh: boolean): Promise<Map<string, UserDocSummary>> {
       .select("subscriptionStatus", "currentPeriodEnd", "lastPaymentAt", "pastDueAt", "lastActiveAt", "compilesTotal", "aiMessagesTotal", "trialEndsAt", "referralCode", "teamId")
       .get();
     // Only for the plan column: without it, team members just read as Free.
-    const teams = await teamPaidUntilMap(adminDb).catch((err: any) => {
+    const teams = await teamLicenseMap(adminDb).catch((err: any) => {
       console.error("[Admin] Reading teams for the plan column failed:", err?.message || err);
-      return new Map<string, number | null>();
+      return new Map<string, { paidUntil: number | null; paidFor: "month" | "year" | null }>();
     });
     const map = new Map<string, UserDocSummary>();
     for (const d of snap.docs) {
@@ -94,7 +94,8 @@ async function userDocs(fresh: boolean): Promise<Map<string, UserDocSummary>> {
         trialEndsAt: ms(x.trialEndsAt),
         referralCode: typeof x.referralCode === "string" ? x.referralCode : null,
         teamId: typeof x.teamId === "string" && x.teamId ? x.teamId : null,
-        teamPaidUntil: typeof x.teamId === "string" && x.teamId ? teams.get(x.teamId) ?? null : null,
+        teamPaidUntil: typeof x.teamId === "string" && x.teamId ? teams.get(x.teamId)?.paidUntil ?? null : null,
+        teamPaidFor: typeof x.teamId === "string" && x.teamId ? teams.get(x.teamId)?.paidFor ?? null : null,
       });
     }
     return map;

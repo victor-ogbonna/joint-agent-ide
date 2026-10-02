@@ -42,6 +42,64 @@ function getPaystackConfig() {
   };
 }
 
+/** Where each setting comes from: saved on the admin page, the server's .env file, or nowhere. */
+function paystackSources() {
+  const stored = loadAdminConfig();
+  const from = (saved: string | undefined, env: string | undefined) => (saved ? "admin" : env ? "server" : null);
+  return {
+    secretKey: from(stored.paystackSecretKey, process.env.PAYSTACK_SECRET_KEY),
+    publicKey: from(stored.paystackPublicKey, process.env.PAYSTACK_PUBLIC_KEY),
+    planCode: from(stored.paystackPlanCode, process.env.PAYSTACK_PLAN_CODE),
+    yearlyPlanCode: from(stored.paystackYearlyPlanCode, process.env.PAYSTACK_YEARLY_PLAN_CODE),
+  };
+}
+
+/** What the admin page shows: everything but the secret key in full. */
+function paystackConfigView() {
+  const cfg = getPaystackConfig();
+  return {
+    hasSecretKey: !!cfg.secretKey,
+    maskedSecretKey: maskSecret(cfg.secretKey),
+    publicKey: cfg.publicKey,
+    planCode: cfg.planCode,
+    yearlyPlanCode: cfg.yearlyPlanCode,
+    sources: paystackSources(),
+  };
+}
+
+/** "test" or "live", from a key's prefix (sk_test_, pk_live_...). */
+const keyMode = (key: string | null) => (key ? (/^[sp]k_test_/.test(key) ? "test" : /^[sp]k_live_/.test(key) ? "live" : null) : null);
+
+/** A plan as Paystack has it, for the admin page to show: its name, price and how often it charges. */
+export type PlanCheck =
+  | { ok: true; name: string; amount: number; currency: string; interval: string }
+  | { ok: false; error: string };
+
+export async function checkPlan(secretKey: string, code: string, fetchImpl: typeof fetch = fetch): Promise<PlanCheck> {
+  try {
+    const res = await fetchImpl(`https://api.paystack.co/plan/${encodeURIComponent(code)}`, {
+      headers: { Authorization: `Bearer ${secretKey}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const body: any = await res.json().catch(() => ({}));
+    if (res.status === 401) return { ok: false, error: "Paystack refused the secret key." };
+    if (!res.ok || !body?.status || !body?.data) {
+      return { ok: false, error: "Paystack doesn't know this plan. Check the code, and that it was made with the same Paystack account and mode (test or live) as the secret key." };
+    }
+    const d = body.data;
+    const amount = Number(d.amount);
+    return {
+      ok: true,
+      name: typeof d.name === "string" ? d.name : "",
+      amount: Number.isFinite(amount) ? Math.round(amount) : 0,
+      currency: typeof d.currency === "string" ? d.currency.toUpperCase() : "",
+      interval: typeof d.interval === "string" ? d.interval : "",
+    };
+  } catch {
+    return { ok: false, error: "Couldn't reach Paystack just now. Try again in a moment." };
+  }
+}
+
 /** The plans a payment for PRO may be for: monthly, and yearly when set. */
 function proPlans(cfg: { planCode: string | null; yearlyPlanCode: string | null }): (string | null)[] {
   return [cfg.planCode, cfg.yearlyPlanCode];
@@ -178,19 +236,33 @@ async function commission(uid: string, data: any) {
 export function registerPaystackRoutes(app: express.Express, requireAdmin: express.RequestHandler) {
   // ---- Admin key/plan management (mirrors the Gemini key admin card) ----
   app.get("/api/admin/paystack-config", requireAdmin, (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.json(paystackConfigView());
+  });
+
+  // The secret key in full, only when the admin presses Show (it's never
+  // part of the page otherwise).
+  app.get("/api/admin/paystack-secret", requireAdmin, (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    console.log("[Paystack] The secret key was shown on the admin page.");
+    res.json({ secretKey: getPaystackConfig().secretKey });
+  });
+
+  // Each PRO plan as Paystack has it (name, price, how often), so the admin
+  // page shows what customers are really charged.
+  app.get("/api/admin/paystack-check", requireAdmin, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
     const cfg = getPaystackConfig();
-    res.json({
-      hasSecretKey: !!cfg.secretKey,
-      maskedSecretKey: maskSecret(cfg.secretKey),
-      publicKey: cfg.publicKey,
-      planCode: cfg.planCode,
-      yearlyPlanCode: cfg.yearlyPlanCode,
-    });
+    const pk = keyMode(cfg.publicKey);
+    const sk = keyMode(cfg.secretKey);
+    const check = (code: string | null) => (cfg.secretKey && code ? checkPlan(cfg.secretKey, code) : Promise.resolve(null));
+    const [monthly, yearly] = await Promise.all([check(cfg.planCode), check(cfg.yearlyPlanCode)]);
+    res.json({ mode: sk, keysMatch: pk && sk ? pk === sk : null, monthly, yearly });
   });
 
   app.post("/api/admin/paystack-config", requireAdmin, async (req, res) => {
-    const { secretKey, publicKey, planCode, yearlyPlanCode } = req.body || {};
-    const patch: Record<string, string> = {};
+    const { secretKey, publicKey, planCode, yearlyPlanCode, clearYearlyPlanCode } = req.body || {};
+    const patch: Record<string, string | undefined> = {};
 
     // Shape checks, because a wrong value here fails silently: the config still
     // reads as "configured", checkout still opens, and every call to Paystack
@@ -215,13 +287,22 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
     if (pk) patch.paystackPublicKey = pk;
     if (pl) patch.paystackPlanCode = pl;
     if (yl) patch.paystackYearlyPlanCode = yl;
+    // Removing the yearly plan: the Plans page then offers monthly only.
+    if (clearYearlyPlanCode === true && !yl) patch.paystackYearlyPlanCode = undefined;
     if (Object.keys(patch).length === 0) {
       return res.status(400).json({ error: "Provide at least one of secretKey, publicKey, planCode, yearlyPlanCode." });
     }
+    // A test public key with a live secret key (or the other way round) opens
+    // a checkout that can never be confirmed.
+    const before = getPaystackConfig();
+    const pkMode = keyMode(pk || before.publicKey);
+    const skMode = keyMode(sk || before.secretKey);
+    if (pkMode && skMode && pkMode !== skMode) {
+      return res.status(400).json({ error: `The public key is a ${pkMode} key but the secret key is a ${skMode} key. Use both test keys or both live keys, from the same Paystack account.` });
+    }
     const { durable } = await saveAdminConfig(patch);
     console.log(`Paystack config updated via admin page (${durable ? "durable" : "local-only"}).`);
-    const cfg = getPaystackConfig();
-    res.json({ success: true, hasSecretKey: !!cfg.secretKey, maskedSecretKey: maskSecret(cfg.secretKey), publicKey: cfg.publicKey, planCode: cfg.planCode, yearlyPlanCode: cfg.yearlyPlanCode, durable });
+    res.json({ success: true, ...paystackConfigView(), durable });
   });
 
   // ---- Public config the main app needs to open the checkout popup ----

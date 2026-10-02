@@ -4,7 +4,6 @@ import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Sq
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
 import { ChatMessage, MCUType, SchematicComponent, SchematicConnection } from "../types";
 import { callAiEndpoint, QuotaBlockedInfo } from "../lib/aiClient";
 
@@ -294,6 +293,24 @@ function PlanQuestionItem({
 }
 
 
+// KaTeX, which draws maths ($...$, $$...$$), is a large download; it loads
+// the first time a message has a "$" in it, instead of with the app. Until
+// then the maths shows as typed.
+type RehypePlugin = typeof import("rehype-katex").default;
+let rehypeKatexLoaded: RehypePlugin | null = null;
+let rehypeKatexLoading: Promise<RehypePlugin | null> | null = null;
+function loadRehypeKatex(): Promise<RehypePlugin | null> {
+  if (!rehypeKatexLoading) {
+    rehypeKatexLoading = import("rehype-katex")
+      .then((m) => (rehypeKatexLoaded = m.default))
+      .catch(() => {
+        rehypeKatexLoading = null;
+        return null;
+      });
+  }
+  return rehypeKatexLoading;
+}
+
 // Memoised so a streaming reply does not re-parse every OTHER message.
 // The list previously re-rendered in full on every token — with ReactMarkdown +
 // KaTeX on each message that is thousands of markdown parses for one reply,
@@ -307,10 +324,18 @@ const MessageMarkdown = React.memo(function MessageMarkdown({
   pendingAnswers: Record<string, string>;
   onSaveAnswer: (question: string, answer: string) => void;
 }) {
+  const hasMaths = content.includes("$");
+  const [rehypeKatex, setRehypeKatex] = useState<{ plugin: RehypePlugin | null }>({ plugin: rehypeKatexLoaded });
+  useEffect(() => {
+    if (!hasMaths || rehypeKatex.plugin) return;
+    let live = true;
+    void loadRehypeKatex().then((plugin) => { if (live && plugin) setRehypeKatex({ plugin }); });
+    return () => { live = false; };
+  }, [hasMaths, rehypeKatex.plugin]);
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm, remarkMath]}
-      rehypePlugins={[rehypeKatex]}
+      rehypePlugins={rehypeKatex.plugin ? [rehypeKatex.plugin] : []}
       components={{
         li({ node, children, ...props }: any) {
           const extractText = (nodes: any): string => {
@@ -655,18 +680,10 @@ export default function AgentChat({
 
   return (
     <div id="ai-chat-panel" className="bg-[var(--bg-panel)] flex flex-col h-full w-full">
-      {/* Header */}
-      <div className="bg-[var(--bg-panel)] border-b border-[var(--border-main)] px-4 py-2 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-2">
-          <div className="p-1.5 bg-orange-500/10 rounded-md text-orange-600">
-            <Bot size={14} className={isLoading ? "animate-pulse" : ""} />
-          </div>
-          <div>
-            <h2 className="font-display font-bold text-xs text-[var(--text-main)] tracking-wide uppercase flex items-center gap-1.5">
-              Joint-Agent
-            </h2>
-          </div>
-        </div>
+      {/* Header: Smart Flash (and the context meter) at the right, no title.
+          The line under it only from 1024 px (the desktop layout, App's
+          NARROW_QUERY), where it lines up with the editor's tab bar. */}
+      <div className="bg-[var(--bg-panel)] min-[1024px]:border-b border-[var(--border-main)] px-4 py-2 flex items-center justify-end shrink-0">
         <div className="flex items-center gap-3 shrink-0">
         {contextUsage && <ContextMeter used={contextUsage.used} limit={contextUsage.limit} />}
         <button
@@ -685,7 +702,10 @@ export default function AgentChat({
       {/* Message Feed Canvas */}
       <div className="flex-1 p-4 overflow-y-auto space-y-4 terminal-scrollbar bg-[var(--bg-panel)]">
         {messages.length === 0 ? (
-          <div className="h-full flex flex-col justify-center py-4">
+          // At least the panel's height, so it's centred when there's room;
+          // taller when it needs to be, so it scrolls with its space above
+          // and below intact instead of spilling over both edges.
+          <div className="min-h-full flex flex-col justify-center py-4">
             <div className="text-center space-y-4 mx-auto w-full">
               <div className="w-10 h-10 bg-[var(--bg-surface)] text-[var(--text-muted)] rounded-xl flex items-center justify-center mx-auto shadow-sm border border-[var(--border-light)]">
                 <Bot size={20} />

@@ -39,9 +39,10 @@ export interface UserDocSummary {
   /** A creator code's free PRO trial (server/creators.ts). */
   trialEndsAt?: number | null;
   referralCode?: string | null;
-  /** The team or school license the account is on (server/teams.ts), and when that's paid until. */
+  /** The team or school license the account is on (server/teams.ts), when that's paid until, and what for (its grace days). */
   teamId?: string | null;
   teamPaidUntil?: number | null;
+  teamPaidFor?: "month" | "year" | null;
 }
 
 export interface AccessLists {
@@ -98,7 +99,7 @@ export function planOf(user: Pick<AuthUser, "email" | "verified">, doc: UserDocS
   if (email && lists.ownerEmails.map(norm).includes(email)) return "owner";
   if (hasPaidPro(billingOf(doc), now)) return "pro";
   if (email && lists.proAccessEmails.map(norm).includes(email)) return "granted";
-  if (doc?.teamId && teamGivesPro(doc.teamPaidUntil ?? null, now)) return "team";
+  if (doc?.teamId && teamGivesPro(doc.teamPaidUntil ?? null, now, doc.teamPaidFor ?? null)) return "team";
   if (typeof doc?.trialEndsAt === "number" && doc.trialEndsAt > now) return "trial";
   return "free";
 }

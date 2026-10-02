@@ -67,8 +67,19 @@
       }
     }
     </script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css" />
-    <script src="https://js.paystack.co/v1/inline.js"></script>
+    <!-- Fonts and the maths styles (KaTeX) load alongside the page instead of
+         holding it up: media="print" doesn't block drawing the page, and onload
+         switches them on once they arrive. The fonts swap in by themselves
+         (display=swap); maths only appears in agent replies, later. Paystack's
+         checkout script loads once the page is up (src/lib/paystackScript.ts). -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" media="print" onload="this.media='all'" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css" media="print" onload="this.media='all'" />
+    <noscript>
+      <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" />
+      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css" />
+    </noscript>
   </head>
   <body>
     <div id="root"></div>

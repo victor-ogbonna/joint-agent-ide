@@ -8,7 +8,8 @@ const DAY = 24 * 60 * 60 * 1000;
 export type LicenseState = "unpaid" | "active" | "grace" | "ended";
 export type TeamRole = "admin" | "member";
 export type TeamKind = "school" | "team";
-export type TeamPeriod = "month" | "term" | "year";
+/** A month, or a year (12 months for the price of 11). */
+export type TeamPeriod = "month" | "year";
 
 /** What /api/quota/status says about the account's team. */
 export interface TeamStatusView {
@@ -44,9 +45,15 @@ export function daysLeft(at: number, now = Date.now()): number {
 
 export const PERIOD_MONTHS: Record<TeamPeriod, { months: number; chargedMonths: number; label: string; short: string }> = {
   month: { months: 1, chargedMonths: 1, label: "1 month", short: "a month" },
-  term: { months: 4, chargedMonths: 4, label: "1 term (4 months)", short: "a term" },
-  year: { months: 12, chargedMonths: 11, label: "1 year (12 months for the price of 11)", short: "a year" },
+  year: { months: 12, chargedMonths: 11, label: "1 year", short: "a year" },
 };
+
+/**
+ * The normal team prices, for a visitor not signed in yet (signed in, the
+ * page shows the server's). Mirrors server/teamRules.ts: test/teams.mjs
+ * fails if the two ever disagree.
+ */
+export const TEAM_PRICES = { seatPrice: 664_300, currency: "NGN", minSeats: 5, maxSeats: 2000 };
 
 export function renewalPrice(seats: number, seatPrice: number, period: TeamPeriod): number {
   return seats * seatPrice * PERIOD_MONTHS[period].chargedMonths;
@@ -56,6 +63,28 @@ export function renewalPrice(seats: number, seatPrice: number, period: TeamPerio
 export function addSeatsPrice(extra: number, seatPrice: number, paidUntil: number | null, now = Date.now()): number {
   if (extra <= 0 || paidUntil === null || paidUntil <= now) return 0;
   return Math.ceil((extra * seatPrice * daysLeft(paidUntil, now)) / 30);
+}
+
+export interface TeamSavings {
+  /** PRO a month for one person on their own. */
+  pro: number;
+  perSeat: number;
+  teamPays: number;
+  onTheirOwn: number;
+  saved: number;
+}
+
+/**
+ * What a team saves a month against everyone paying for PRO on their own.
+ * `pro` is PRO's monthly price, tried in order (from Paystack, then the
+ * listed ₦9,300 and $7); the first in the team's currency counts. Null when
+ * none is, or a seat costs no less.
+ */
+export function teamSavings(seats: number, seatPrice: number, currency: string, pro: ({ amount: number; currency: string } | null)[]): TeamSavings | null {
+  const match = pro.find((p) => p && Number.isFinite(p.amount) && p.amount > 0 && p.currency.toUpperCase() === currency.toUpperCase());
+  if (!match || !Number.isInteger(seats) || seats < 1 || seatPrice >= match.amount) return null;
+  const perSeat = match.amount - seatPrice;
+  return { pro: match.amount, perSeat, teamPays: seats * seatPrice, onTheirOwn: seats * match.amount, saved: seats * perSeat };
 }
 
 /** The license in a few words, for a badge. */

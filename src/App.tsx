@@ -1,8 +1,7 @@
-import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, Suspense } from "react";
 import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass, Share2, Users} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip } from "recharts";
 import {
   MCUType,
   SchematicComponent,
@@ -14,10 +13,8 @@ import {
   BoardInfo
 } from "./types";
 import CodeEditor, { AskAiRequest } from "./components/CodeEditor";
-import SchematicViewer from "./components/SchematicViewer";
 import Terminal from "./components/Terminal";
 import AgentChat from "./components/AgentChat";
-import Web3Panel from "./components/Web3Panel";
 import ProjectsBrowser from "./components/ProjectsBrowser";
 import ShareDialog from "./components/ShareDialog";
 import NewProjectModal from "./components/NewProjectModal";
@@ -27,7 +24,16 @@ import GithubPanel from "./components/GithubPanel";
 import WebPreviewPanel from "./components/WebPreviewPanel";
 import PlansModal, { type FirstMonthOffer, type PlanPriceView, type BillingPeriod } from "./components/PlansModal";
 import { storedRef, clearStoredRef } from "./lib/referral";
+import { loadPaystack } from "./lib/paystackScript";
+import { lazyPart, PartLoading } from "./components/LazyPart";
+
+// Downloaded when they first show rather than with the app (LazyPart.tsx):
+// together they were over half of the app's download.
+const SchematicViewer = lazyPart(() => import("./components/SchematicViewer"));
+const Web3Panel = lazyPart(() => import("./components/Web3Panel"));
+const SerialPlotterChart = lazyPart(() => import("./components/SerialPlotterChart"));
 import TeamLicenseBanner from "./components/TeamLicenseBanner";
+import TeamCopyBanner, { type TeamCopyInfo } from "./components/TeamCopyBanner";
 import { readTeamStatus, stateLabel, type TeamStatusView } from "./lib/teams";
 import LibrariesModal from "./components/LibrariesModal";
 import OnboardingTour, { TourStep } from "./components/OnboardingTour";
@@ -1013,11 +1019,12 @@ export default function App() {
   /** The discounted first month: a one-off Paystack payment, checked by the server. */
   const handleSubscribeOffer = async () => {
     if (!user?.email || !offer) return;
-    if (!window.PaystackPop) {
-      logToTerminal("[BILLING] Payments aren't configured yet. Check back soon.", "error");
+    setIsSubscribing(true);
+    if (!(await loadPaystack()) || !window.PaystackPop) {
+      logToTerminal("[BILLING] The payment window couldn't load. Check your connection, then try again.", "error");
+      setIsSubscribing(false);
       return;
     }
-    setIsSubscribing(true);
     try {
       window.PaystackPop.setup({
         key: offer.publicKey,
@@ -3326,6 +3333,19 @@ export default function App() {
     if (isNarrowRef.current && mobilePaneRef.current === paneAtPick) slideToPane("agent");
   };
 
+  // The Team page's Edit opens the working copy here, /?open=<project id>:
+  // one of the person's own projects, opened as from Recents.
+  useEffect(() => {
+    if (!user) return;
+    const id = new URLSearchParams(window.location.search).get("open");
+    if (!id) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("open");
+    window.history.replaceState(null, "", url.toString());
+    if (/^[A-Za-z0-9]{1,64}$/.test(id)) void handleOpenRecent(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
+
   // Opening Workspace on a phone: the project in hand (orange in Recent) is
   // brought into view if it's below the fold. Only the sidebar's own list
   // scrolls; if Recent hasn't loaded yet, this waits until it has.
@@ -3388,14 +3408,70 @@ export default function App() {
     // history the user wants back, and without this it was never written.
   }, [code, description, components, connections, mcu, chatMessages, currentProjectId, user]);
 
+  // A working copy of a team project (server/teamProjects.ts): the banner
+  // saying so, and its Send. Asked of the server for each project opened,
+  // while the account is on a team.
+  const [teamCopy, setTeamCopy] = useState<{ projectId: string; info: TeamCopyInfo } | null>(null);
+  const [teamCopySending, setTeamCopySending] = useState(false);
+  const [teamCopyNote, setTeamCopyNote] = useState<{ ok: boolean; text: string } | null>(null);
+  useEffect(() => {
+    setTeamCopyNote(null);
+    if (!user || !currentProjectId || !teamStatus) { setTeamCopy(null); return; }
+    let live = true;
+    const projectId = currentProjectId;
+    (async () => {
+      try {
+        const res = await authedApiRequest(`/api/team/copy/${encodeURIComponent(projectId)}`);
+        const body = await res.json().catch(() => null);
+        if (live) setTeamCopy(res.ok && body?.copy ? { projectId, info: body.copy as TeamCopyInfo } : null);
+      } catch {
+        if (live) setTeamCopy(null);
+      }
+    })();
+    return () => { live = false; };
+  }, [user, currentProjectId, teamStatus?.id]);
+
+  /** Makes this working copy the team's copy: saved first, as autosave waits 1.5 s after the last change. */
+  const sendTeamCopy = async () => {
+    if (!user || !teamCopy || teamCopy.projectId !== currentProjectId || teamCopySending) return;
+    const { projectId, info } = teamCopy;
+    setTeamCopySending(true);
+    setTeamCopyNote(null);
+    try {
+      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+      await updateProject(user.uid, projectId, {
+        code, description, components, connections, mcu,
+        messages: trimMessagesForStorage(chatMessages as any),
+      });
+      setSaveStatus("saved");
+      const res = await authedApiRequest(`/api/team/projects/${encodeURIComponent(info.teamProjectId)}/send`, { method: "POST", body: {} });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setTeamCopy({ projectId, info: { ...info, editing: false, editingBy: null } });
+        setTeamCopyNote({ ok: true, text: "Sent. Your version is now the team's copy." });
+      } else {
+        setTeamCopyNote({ ok: false, text: body.error || "Your changes couldn't be sent. Try again." });
+      }
+    } catch {
+      setTeamCopyNote({ ok: false, text: "Your changes couldn't be sent. Check your connection, then try again." });
+    } finally {
+      setTeamCopySending(false);
+    }
+  };
+
   const handleSubscribe = async (period: BillingPeriod = "monthly") => {
     if (!user?.email) return;
     setIsSubscribing(true);
     try {
       const cfgRes = await fetch("/api/paystack/public-config");
       const cfg = await cfgRes.json();
-      if (!cfg.configured || !window.PaystackPop) {
+      if (!cfg.configured) {
         logToTerminal("[BILLING] Payments aren't configured yet. Check back soon.", "error");
+        setIsSubscribing(false);
+        return;
+      }
+      if (!(await loadPaystack()) || !window.PaystackPop) {
+        logToTerminal("[BILLING] The payment window couldn't load. Check your connection, then try again.", "error");
         setIsSubscribing(false);
         return;
       }
@@ -3499,9 +3575,15 @@ export default function App() {
         <div className="relative h-12 px-2 sm:px-4 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
           {isNarrow && mobilePane === "files" ? (
-            // Workspace on a phone: the logo. The account row just below
-            // already shows the plan (PRO, or Upgrade to Pro).
-            <img src="/logo.png" alt="Joint-Agent IDE" className="w-7 h-7 rounded-lg shrink-0 shadow-md select-none" />
+            // Workspace on a phone: the logo with the name beneath it, small,
+            // so it takes little of the bar's width. The account row just
+            // below already shows the plan (PRO, or Upgrade to Pro).
+            <div className="flex flex-col items-center gap-0.5 select-none" aria-label="Joint-Agent IDE">
+              <img src="/logo.png" alt="" className="w-7 h-7 rounded-lg shrink-0 shadow-md" />
+              <span className="font-display font-bold text-[9px] max-[359px]:text-[8px] text-[var(--text-main)] tracking-wide leading-none whitespace-nowrap">
+                Joint-Agent <span className="gradient-text">IDE</span>
+              </span>
+            </div>
           ) : isNarrow ? (
             // On a phone's Agent and Code sections the plan takes the logo's
             // place: a way up for free accounts, a quiet badge for PRO ones —
@@ -3670,11 +3752,17 @@ export default function App() {
 
         {/* On a phone the modes get a row of their own: labelled, full width,
             and big enough to hit without aiming. */}
-        {isNarrow && <div className="px-2 pb-2">{modeSwitcher(true)}</div>}
+        {/* Sits right on the line under the header: its own bottom edge
+            overlaps that line (-mb-px), so the two read as one. */}
+        {isNarrow && <div className="px-2 -mb-px">{modeSwitcher(true)}</div>}
       </header>
 
       {/* A team or school license in its grace days: when PRO ends. */}
       <TeamLicenseBanner team={teamStatus} />
+      {/* A working copy of a team project: whose it is, and Send. */}
+      {teamCopy && teamCopy.projectId === currentProjectId && (
+        <TeamCopyBanner info={teamCopy.info} sending={teamCopySending} note={teamCopyNote} onSend={() => void sendTeamCopy()} />
+      )}
 
       {/* Main Workspace Layout with Resizable Panels */}
       <main
@@ -4050,17 +4138,19 @@ export default function App() {
                       />
                     </div>
                     <div className={`absolute inset-0 ${activeTab === "schematic" ? "z-10" : "z-0 opacity-0 pointer-events-none"}`}>
-                      <SchematicViewer
-                        mcu={mcu}
-                        components={components}
-                        connections={connections}
-                        isSimulationActive={isSimulationActive}
-                        isCompiling={isCompiling}
-                        isFlashing={isFlashing}
-                        appMode={appMode}
-                        setComponents={setComponents}
-                        setConnections={setConnections}
-                      />
+                      <Suspense fallback={<PartLoading label="Loading the circuit…" />}>
+                        <SchematicViewer
+                          mcu={mcu}
+                          components={components}
+                          connections={connections}
+                          isSimulationActive={isSimulationActive}
+                          isCompiling={isCompiling}
+                          isFlashing={isFlashing}
+                          appMode={appMode}
+                          setComponents={setComponents}
+                          setConnections={setConnections}
+                        />
+                      </Suspense>
                     </div>
                   </div>
                 </div>
@@ -4182,18 +4272,9 @@ export default function App() {
                                 No numeric serial data found. Try printing numbers.
                               </div>
                             ) : (
-                              <ResponsiveContainer width="100%" height="100%">
-                                <LineChart data={plotterData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border-light)" vertical={false} />
-                                  <XAxis dataKey="index" tick={{ fontSize: 10, fill: 'var(--text-muted)' }} stroke="var(--border-main)" />
-                                  <YAxis tick={{ fontSize: 10, fill: 'var(--text-muted)' }} stroke="var(--border-main)" />
-                                  <Tooltip
-                                    contentStyle={{ backgroundColor: 'var(--bg-panel)', border: '1px solid var(--border-main)', borderRadius: '4px', fontSize: '12px', color: 'var(--text-main)' }}
-                                    itemStyle={{ color: '#a855f7' }}
-                                  />
-                                  <Line type="monotone" dataKey="value" stroke="#a855f7" strokeWidth={2} dot={false} isAnimationActive={false} />
-                                </LineChart>
-                              </ResponsiveContainer>
+                              <Suspense fallback={<PartLoading label="Loading the plotter…" />}>
+                                <SerialPlotterChart data={plotterData} />
+                              </Suspense>
                             )}
                           </div>
                         </div>
@@ -4496,7 +4577,9 @@ export default function App() {
               </button>
             </div>
             <div className="flex-1 overflow-y-auto">
-              <Web3Panel walletState={walletState} setWalletState={setWalletState} />
+              <Suspense fallback={<PartLoading />}>
+                <Web3Panel walletState={walletState} setWalletState={setWalletState} />
+              </Suspense>
             </div>
           </div>
         </div>

@@ -1,22 +1,15 @@
 // First, before anything else runs: stand-ins for newer browser functions
 // that older browsers (old laptops' Chrome) lack.
 import './lib/polyfills.ts';
-import {StrictMode, useEffect, useState} from 'react';
+import {StrictMode, Suspense, lazy, useEffect, useState, type ComponentType} from 'react';
 import {createRoot} from 'react-dom/client';
-import App from './App.tsx';
-import AdminPage from './AdminPage.tsx';
-import HomePage from './HomePage.tsx';
-import PrivacyPage from './PrivacyPage.tsx';
-import ThanksPage from './ThanksPage.tsx';
-import SharePage from './SharePage.tsx';
-import CreatorPage from './CreatorPage.tsx';
-import TeamPage from './TeamPage.tsx';
 import { AuthProvider, useAuth } from './contexts/AuthContext.tsx';
 import type { User } from 'firebase/auth';
 import VerifyEmailScreen from './components/VerifyEmailScreen.tsx';
 import './index.css';
 import { startInstallSupport } from './lib/installApp.ts';
 import { captureRefFromUrl } from './lib/referral.ts';
+import { warmPaystack } from './lib/paystackScript.ts';
 
 // Caught before anything renders: Chrome's install offer can arrive while the
 // launch screen is still up.
@@ -45,6 +38,68 @@ const isTeamRoute = currentPath === '/team';
 // A shared project's read-only page (server/share.ts). Public like /privacy:
 // people opening a link someone sent them mostly have no account.
 const shareId = /^\/share\/([A-Za-z0-9_-]{22})$/.exec(currentPath)?.[1] ?? null;
+
+// Paystack's checkout script, fetched once the page is up, where a payment
+// can start (the app's Plans page, /team).
+if (!isAdminRoute && !shareId && !isPrivacyRoute && !isThanksRoute && !isWaitlistRoute && !isCreatorRoute) warmPaystack();
+
+// Each page is its own download, so a visit fetches only the page it shows:
+// the home page no longer carries the whole app, and the app downloads while
+// the launch screen runs instead of before it. A download that fails is tried
+// once more after a moment; after that the page asks for a reload.
+type Page = ComponentType<any>;
+function pageLoader(load: () => Promise<{ default: Page }>): () => Promise<Page | null> {
+  let page: Promise<Page | null> | null = null;
+  return () => {
+    if (!page) {
+      page = load()
+        .catch(() => new Promise((resolve) => setTimeout(resolve, 1500)).then(load))
+        .then((m) => m.default)
+        .catch(() => null);
+    }
+    return page;
+  };
+}
+const loadApp = pageLoader(() => import('./App.tsx'));
+const loadHome = pageLoader(() => import('./HomePage.tsx'));
+function lazyPage(load: () => Promise<Page | null>) {
+  return lazy(async () => ({ default: (await load()) ?? LoadFailed }));
+}
+const HomePageForWaitlist = lazyPage(loadHome);
+const AdminPage = lazyPage(pageLoader(() => import('./AdminPage.tsx')));
+const PrivacyPage = lazyPage(pageLoader(() => import('./PrivacyPage.tsx')));
+const ThanksPage = lazyPage(pageLoader(() => import('./ThanksPage.tsx')));
+const SharePage = lazyPage(pageLoader(() => import('./SharePage.tsx')));
+const CreatorPage = lazyPage(pageLoader(() => import('./CreatorPage.tsx')));
+const TeamPage = lazyPage(pageLoader(() => import('./TeamPage.tsx')));
+
+/** The page once downloaded; null while it downloads (or isn't wanted yet); "failed" if it couldn't download. */
+function usePage(load: () => Promise<Page | null>, wanted: boolean): Page | null | 'failed' {
+  const [state, setState] = useState<{ page: Page | null | 'failed' }>({ page: null });
+  useEffect(() => {
+    if (!wanted) return;
+    let live = true;
+    void load().then((page) => { if (live) setState({ page: page ?? 'failed' }); });
+    return () => { live = false; };
+  }, [load, wanted]);
+  return state.page;
+}
+
+/** A page that couldn't download: the connection dropped, or a new version of the site replaced it. */
+function LoadFailed() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-[var(--bg-root)] text-[var(--text-main)] p-6">
+      <div className="max-w-sm rounded-2xl border border-[var(--border-main)] bg-[var(--bg-panel)] p-6 text-center">
+        <img src="/logo.png" alt="" className="mx-auto h-10 w-10 rounded-lg" />
+        <h1 className="mt-3 text-[17px] font-bold">Joint-Agent IDE couldn't finish loading</h1>
+        <p className="mt-2 text-[14px] text-[var(--text-muted)]">Check your internet connection, then reload the page.</p>
+        <button type="button" onClick={() => window.location.reload()} className="mt-4 inline-flex min-h-[44px] items-center justify-center rounded-full px-5 text-[14px] font-bold text-white" style={{ background: 'var(--gradient-hero)' }}>
+          Reload
+        </button>
+      </div>
+    </div>
+  );
+}
 
 // Auth usually resolves in a few hundred ms — too fast for the power-on to
 // register as intentional rather than as a flicker. Long enough to land, short
@@ -132,12 +187,18 @@ function RootRoute() {
       setDecidedFor(user);
     };
     (async () => {
+      // Asked straight away, alongside the sign-in check below rather than
+      // after it.
+      const status: Promise<{ launchLocked?: boolean }> = fetch('/api/launch-status').then((r) => r.json());
+      status.catch(() => { /* handled where it's awaited */ });
       try {
         // An email-and-password account is used once its address is
         // verified; the server refuses it until then (server/quota.ts).
         // Google accounts come verified. Decided by how this session signed
-        // in, as the server decides it.
-        if (user) {
+        // in, as the server decides it; an account with no password can't
+        // have signed in with one, so it skips the token (which, an hour
+        // after the last, Google has to renew first).
+        if (user && user.providerData.some((p) => p.providerId === 'password')) {
           const token = await user.getIdTokenResult();
           if (cancelled) return;
           if (token.signInProvider === 'password') {
@@ -149,8 +210,7 @@ function RootRoute() {
           }
         }
 
-        const res = await fetch('/api/launch-status');
-        const { launchLocked } = await res.json();
+        const { launchLocked } = await status;
         if (cancelled) return;
         if (!launchLocked) return decide('open');
         if (!user) return decide('locked');
@@ -181,6 +241,11 @@ function RootRoute() {
     return () => { cancelled = true; };
   }, [user, signOut, recheck]);
 
+  // The app as soon as an account is known, the home page otherwise:
+  // downloading while the launch screen runs.
+  const app = usePage(loadApp, !loading && !!user);
+  const home = usePage(loadHome, !loading && (!user || access === 'locked'));
+
   if (loading || holding || access === 'checking') return <LaunchScreen />;
   if (maybeUnverified(user) && decidedFor !== user) return <LaunchScreen />;
 
@@ -204,13 +269,19 @@ function RootRoute() {
   // Locked: everyone without a grant sees the waitlist page. inviteSignIn keeps
   // a sign-in door open for accounts that have been granted access — without it
   // a granted VC could never get in, which would make the grant meaningless.
-  if (access === 'locked') return <HomePage waitlistMode inviteSignIn accessDenied={accessDenied} />;
+  const page = access === 'locked' || !user ? home : app;
+  if (page === 'failed') return <LoadFailed />;
+  // Still downloading: the launch screen stays (the same one, still running).
+  if (!page) return <LaunchScreen />;
+  const Page = page;
+  if (access === 'locked') return <Page waitlistMode inviteSignIn accessDenied={accessDenied} />;
 
-  return user ? <App /> : <HomePage />;
+  return <Page />;
 }
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
+    <Suspense fallback={<LaunchScreen />}>
     {isAdminRoute ? (
       <AdminPage />
     ) : shareId ? (
@@ -230,11 +301,12 @@ createRoot(document.getElementById('root')!).render(
     ) : isWaitlistRoute ? (
       // Same marketing page, product doors removed. Rendered outside
       // AuthProvider deliberately — nothing on it touches auth.
-      <HomePage waitlistMode />
+      <HomePageForWaitlist waitlistMode />
     ) : (
       <AuthProvider>
         <RootRoute />
       </AuthProvider>
     )}
+    </Suspense>
   </StrictMode>,
 );

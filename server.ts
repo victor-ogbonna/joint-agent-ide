@@ -27,6 +27,7 @@ import { registerWaitlistRoutes } from './server/waitlist';
 import { registerFeedbackRoutes } from './server/feedback';
 import { registerCreatorRoutes } from './server/creators';
 import { registerTeamRoutes, teamForStatus, type TeamStatus } from './server/teams';
+import { registerTeamProjectRoutes } from './server/teamProjects';
 import { canUseCode, firstMonthOfferUntil, firstMonthOfferOpensAt } from './server/referrals';
 import { registerGithubRoutes } from './server/github';
 import { registerFirebaseAuthProxy } from './server/firebaseAuthProxy';
@@ -383,6 +384,7 @@ registerWaitlistRoutes(app, requireAdmin);
 registerFeedbackRoutes(app, requireFirebaseAuth, requireAdmin);
 registerCreatorRoutes(app, requireAdmin);
 registerTeamRoutes(app, requireAdmin, { paystackPublicKey });
+registerTeamProjectRoutes(app);
 registerGithubRoutes(app, requireFirebaseAuth);
 registerLibraryRoutes(app, requireFirebaseAuth);
 // Read-only links to a project's code and circuit, secrets hidden.
