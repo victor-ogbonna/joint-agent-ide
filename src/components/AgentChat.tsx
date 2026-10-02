@@ -63,6 +63,15 @@ interface AgentChatProps {
   onRetryFailed?: (messageId: string) => void;
 }
 
+/**
+ * A line the person started with Enter stays its own line in their message.
+ * Markdown joins single line breaks into one line; two spaces before a break
+ * keep it. Only how it's shown: the agent gets the text as typed.
+ */
+function keepLineBreaks(text: string): string {
+  return text.replace(/\r?\n/g, "  \n");
+}
+
 /** Images per message, and the longest side they are scaled down to. A phone
  *  photo is 12+ megapixels; the model reads a 1600px image just as well, and
  *  the upload is a fraction of the size. */
@@ -749,7 +758,7 @@ export default function AgentChat({
                   {/* Normal Text Content */}
                   <div className="prose prose-sm dark:prose-invert max-w-none break-words chat-prose">
                     <MessageMarkdown
-                      content={msg.content}
+                      content={msg.role === "user" ? keepLineBreaks(msg.content) : msg.content}
                       chatMode={chatMode}
                       pendingAnswers={pendingAnswers}
                       onSaveAnswer={(question, answer) => setPendingAnswers((prev) => ({ ...prev, [question]: answer }))}
@@ -959,16 +968,12 @@ export default function AgentChat({
           {imageError && <p className="mb-1 text-[10px] text-red-500">{imageError}</p>}
           {/* One line when empty; grows with the text to its limit, then
               scrolls (fitInput, above). */}
+          {/* Enter starts a new line, as in any text box; the Send button
+              sends. (A textarea never submits its form on Enter.) */}
           <textarea
             ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSubmit(e);
-              }
-            }}
             disabled={isLoading || isTranscribing}
             rows={1}
             className="block w-full bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-md px-3 py-2 text-xs leading-4 text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-orange-500 transition-colors resize-none terminal-scrollbar overflow-hidden"
