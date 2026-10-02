@@ -655,18 +655,10 @@ export default function AgentChat({
 
   return (
     <div id="ai-chat-panel" className="bg-[var(--bg-panel)] flex flex-col h-full w-full">
-      {/* Header */}
-      <div className="bg-[var(--bg-panel)] border-b border-[var(--border-main)] px-4 py-2 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-2">
-          <div className="p-1.5 bg-orange-500/10 rounded-md text-orange-600">
-            <Bot size={14} className={isLoading ? "animate-pulse" : ""} />
-          </div>
-          <div>
-            <h2 className="font-display font-bold text-xs text-[var(--text-main)] tracking-wide uppercase flex items-center gap-1.5">
-              Joint-Agent
-            </h2>
-          </div>
-        </div>
+      {/* Header: Smart Flash (and the context meter) at the right, no title.
+          The line under it only from 1024 px (the desktop layout, App's
+          NARROW_QUERY), where it lines up with the editor's tab bar. */}
+      <div className="bg-[var(--bg-panel)] min-[1024px]:border-b border-[var(--border-main)] px-4 py-2 flex items-center justify-end shrink-0">
         <div className="flex items-center gap-3 shrink-0">
         {contextUsage && <ContextMeter used={contextUsage.used} limit={contextUsage.limit} />}
         <button

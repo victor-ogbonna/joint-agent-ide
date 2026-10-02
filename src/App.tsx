@@ -3499,13 +3499,12 @@ export default function App() {
         <div className="relative h-12 px-2 sm:px-4 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
           {isNarrow && mobilePane === "files" ? (
-            // Workspace on a phone: the logo and the name. The account row
-            // just below already shows the plan (PRO, or Upgrade to Pro).
-            // With a project open on a phone under 384 px wide, the logo
-            // alone, so the project's name beside it stays readable.
-            <div className="flex items-center gap-2 select-none" aria-label="Joint-Agent IDE">
+            // Workspace on a phone: the logo with the name beneath it, small,
+            // so it takes little of the bar's width. The account row just
+            // below already shows the plan (PRO, or Upgrade to Pro).
+            <div className="flex flex-col items-center gap-0.5 select-none" aria-label="Joint-Agent IDE">
               <img src="/logo.png" alt="" className="w-7 h-7 rounded-lg shrink-0 shadow-md" />
-              <span className={`font-display font-bold text-[12px] text-[var(--text-main)] tracking-wide leading-tight whitespace-nowrap ${currentProjectId ? "hidden min-[384px]:inline" : ""}`}>
+              <span className="font-display font-bold text-[9px] max-[359px]:text-[8px] text-[var(--text-main)] tracking-wide leading-none whitespace-nowrap">
                 Joint-Agent <span className="gradient-text">IDE</span>
               </span>
             </div>
