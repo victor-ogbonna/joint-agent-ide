@@ -74,6 +74,11 @@ r = await call("POST", "/api/admin/paystack-config", { secretKey: "sk_test_abc12
 check(r.status === 200 && r.body.publicKey === "pk_test_abc" && r.body.maskedSecretKey?.startsWith("sk_tes"), "both keys together: live to test works (the admin card asks for both)");
 r = await call("POST", "/api/admin/paystack-config", { secretKey: "sk_live_abc123secret", publicKey: "pk_live_abc" });
 check(r.status === 200 && r.body.publicKey === "pk_live_abc" && r.body.maskedSecretKey?.startsWith("sk_liv"), "and test back to live");
+// Keys of different kinds already (one from the server's .env file, say): a plan code can still be saved.
+await saveAdminConfig({ paystackPublicKey: "pk_test_fromenv" });
+r = await call("POST", "/api/admin/paystack-config", { planCode: "PLN_newmonth" });
+check(r.status === 200 && r.body.planCode === "PLN_newmonth", "with the keys mismatched, a plan code still saves (only a key change is checked)");
+await saveAdminConfig({ paystackPublicKey: "pk_live_abc", paystackPlanCode: "PLN_x" });
 await new Promise((resolve) => server.close(resolve));
 
 // On Render, a setting is also kept in Render's own settings; one removed here goes from there too.

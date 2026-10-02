@@ -55,6 +55,8 @@ class Query {
     if (op !== "==") throw new Error("only == in the stand-in");
     return new Query(this.db, this.col, [...this.filters, [field, value]]);
   }
+  // The fields asked for: the stand-in returns them all, as a superset.
+  select() { this.selected = true; this.db.selects = (this.db.selects ?? 0) + 1; return this; }
   _snap() {
     const docs = [];
     for (const [key, d] of this.db.store) {
@@ -195,7 +197,10 @@ check(await throwsWith(() => freeTeamProject(db, ben, tp), /Only the team's admi
 await freeTeamProject(db, ada, tp);
 check(read(`${TEAM_PROJECTS}/${tp}`).editor === null, "Ada (admin) ends Chi's turn");
 await editTeamProject(db, chi, tp, NOW + 7000 + EDIT_HOLD_MS);
+check((await listTeamProjects(db, ben, NOW + 7001 + EDIT_HOLD_MS))[0].editing?.by === "chi@school.ng", "while Chi is on the team, Ben sees her editing it");
 db.store.delete("teamMembers/chi");
+const afterLeaving = (await listTeamProjects(db, ben, NOW + 7001 + EDIT_HOLD_MS))[0];
+check(afterLeaving.editing === null, "once she has left, it shows as free to edit (Edit isn't held back)");
 check((await editTeamProject(db, ben, tp, NOW + 7001 + EDIT_HOLD_MS)).copyId.length > 0, "someone who left the team doesn't keep a turn");
 db.doc("teamMembers/chi")._write({ teamId: "T1", role: "member", email: "chi@school.ng", emailVerified: true, joinedAt: NOW });
 const benCopyId = read(`${TEAM_PROJECTS}/${tp}`).editor.copyId;
@@ -243,6 +248,13 @@ check(await throwsWith(() => listTeamProjects(db, ada, NOW), /Team projects star
 try { await listTeamProjects(db, chi, NOW); } catch (e) { check(e.status === 402 && e.reason === "unpaid", "refused as unpaid (402)"); }
 license(paidT1, null);
 check((await listTeamProjects(db, chi, NOW)).some((r) => r.id === tp), "paid again: everything is back");
+
+console.log("Too big, and reading only what's needed");
+put("users/chi/projects/huge", { name: "Huge", code: "x".repeat(500_001), mcu: "arduino", boardId: "uno", components: [], connections: [], createdAt: stamp(NOW), updatedAt: stamp(NOW) });
+try { await shareProject(db, chi, "huge", NOW); check(false, "code over 500,000 characters is refused, never cut short"); }
+catch (e) { check(e instanceof TeamError && e.status === 413 && /too long to share/.test(e.message), "code over 500,000 characters is refused, never cut short"); }
+check(db.selects > 0, "lists ask for the row fields only (not every project's code)");
+check(read("teamMembers/chi")?.teamCopies?.[e1.copyId] === tp, "Edit records which team project a working copy is, so opening a project reads one document");
 
 console.log("Copies, removing, and the limit");
 const mine = await copyTeamProject(db, chi, tp, NOW);

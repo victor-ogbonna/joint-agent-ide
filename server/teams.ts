@@ -972,12 +972,52 @@ export interface TeamRouteDeps {
   paystackPublicKey: () => string | null;
 }
 
+/**
+ * Teams paid before what a license is paid for was kept (paidFor) read as
+ * paid for a month: 2 grace days. Once at start, each such team takes it
+ * from its latest renewal, online or by invoice (a year from 12 months,
+ * else a month), so one that paid for a year keeps its 30 days. A team
+ * with no payment recorded stays as it is. The number of teams updated.
+ */
+export async function backfillPaidFor(db: Db): Promise<number> {
+  const teams = await db.collection(TEAMS).get();
+  let updated = 0;
+  for (const d of teams.docs) {
+    const data = d.data() || {};
+    if (isPeriod(data.paidFor) || time(data.paidUntil) === null) continue;
+    const pays = await db.collection(PAYMENTS).where("teamId", "==", d.id).get();
+    const renewals = pays.docs.map((p: any) => p.data() || {}).filter((p: any) => p.action !== "add_seats" && num(p.months) > 0);
+    if (!renewals.length) continue;
+    const latest = renewals.reduce((a: any, b: any) => (num(b.paidAt) > num(a.paidAt) ? b : a));
+    const paidFor: TeamPeriod = isPeriod(latest.period) ? latest.period : paidForMonths(num(latest.months, 1));
+    const wrote = await db.runTransaction(async (tx: any) => {
+      // A payment that came in meanwhile has set it already.
+      const now = await tx.get(teamRef(db, d.id));
+      const cur = now.exists ? now.data() || {} : {};
+      if (!now.exists || isPeriod(cur.paidFor) || time(cur.paidUntil) === null) return false;
+      tx.set(teamRef(db, d.id), { paidFor }, { merge: true });
+      return true;
+    });
+    if (wrote) {
+      forgetTeam(d.id);
+      updated++;
+    }
+  }
+  return updated;
+}
+
 export function registerTeamRoutes(app: express.Express, requireAdmin: express.RequestHandler, deps: TeamRouteDeps) {
   const ready = (res: express.Response) => {
     if (isFirebaseAdminConfigured()) return true;
     res.status(503).json({ error: "Accounts aren't configured on the server yet." });
     return false;
   };
+
+  if (isFirebaseAdminConfigured()) {
+    backfillPaidFor(adminDb)
+      .then((n) => { if (n) console.log(`[Teams] Recorded what ${n} team license(s) were paid for, for their grace days.`); })
+      .catch((err) => console.error("[Teams] Recording what licenses were paid for failed:", err?.message || err));
+  }
 
   // ---- The /team page ----
 

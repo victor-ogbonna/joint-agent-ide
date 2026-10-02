@@ -17,7 +17,7 @@ import {
 import {
   createTeam, joinByCode, acceptInvites, leaveTeam, removeMember, setRole, updateTeamSettings, inviteEmails,
   cancelInvite, declineInvite, quoteFor, applyTeamPayment, recordInvoice, adminUpdateTeam, adminInvite,
-  teamDetail, teamPage, teamForStatus, listTeams, TeamError, inviteId,
+  teamDetail, teamPage, teamForStatus, listTeams, TeamError, inviteId, backfillPaidFor,
 } from "../server/teams.ts";
 import { readUserDoc, tierOf, allowanceFor, tokenUsagePatch, onTeamPro, PAID_TOKEN_CAP } from "../server/quota.ts";
 import { planOf } from "../server/adminMetrics.ts";
@@ -416,6 +416,27 @@ const special = await adminUpdateTeam(db, accra.id, { seatPrice: "500", currency
 check(special.currency === "USD" && special.seatPrice === 500, "dollars with a special price: as set");
 const normal = await adminUpdateTeam(db, accra.id, { seatPrice: "", currency: "NGN" });
 check(normal.currency === "NGN" && normal.seatPrice === null && (await db.doc(`teams/${accra.id}`).get()).data().currency === "NGN", "back to the normal price, in naira");
+
+console.log("Teams paid before what a license is paid for was kept");
+const put = (path, data) => db.doc(path).set(data);
+await put("teams/oldYear", { name: "Paid a year", kind: "school", seats: 5, seatPrice: null, currency: "NGN", paidUntil: NOW + 200 * DAY, joinCode: "OLDY2345", memberCount: 1, createdAt: NOW - 165 * DAY });
+await put("teamPayments/oy1", { teamId: "oldYear", kind: "online", action: "renew", period: "year", months: 12, seats: 5, amount: 1, currency: "NGN", paidAt: NOW - 165 * DAY });
+await put("teamPayments/oy2", { teamId: "oldYear", kind: "online", action: "add_seats", period: null, months: 0, seats: 6, extra: 1, amount: 1, currency: "NGN", paidAt: NOW - 10 * DAY });
+await put("teams/oldTerm", { name: "Paid a term", kind: "school", seats: 5, seatPrice: null, currency: "NGN", paidUntil: NOW + 20 * DAY, joinCode: "OLDT2345", memberCount: 1, createdAt: NOW - 100 * DAY });
+await put("teamPayments/ot1", { teamId: "oldTerm", kind: "online", action: "renew", period: "term", months: 4, seats: 5, amount: 1, currency: "NGN", paidAt: NOW - 100 * DAY });
+await put("teams/oldInvoice", { name: "Invoiced a year", kind: "school", seats: 5, seatPrice: null, currency: "NGN", paidUntil: NOW + 30 * DAY, joinCode: "OLDI2345", memberCount: 1, createdAt: NOW - 400 * DAY });
+await put("teamPayments/oi1", { teamId: "oldInvoice", kind: "invoice", action: "renew", period: null, months: 1, seats: 5, amount: 0, currency: "NGN", paidAt: NOW - 400 * DAY });
+await put("teamPayments/oi2", { teamId: "oldInvoice", kind: "invoice", action: "renew", period: null, months: 12, seats: 5, amount: 0, currency: "NGN", paidAt: NOW - 335 * DAY });
+await put("teams/oldByHand", { name: "Set by hand", kind: "team", seats: 5, seatPrice: null, currency: "NGN", paidUntil: NOW + 5 * DAY, joinCode: "OLDH2345", memberCount: 1, createdAt: NOW - 5 * DAY });
+const yearBefore = (await db.doc(`teams/${yTeam.id}`).get()).data().paidFor;
+const backfilled = await backfillPaidFor(db);
+const pf = async (id) => (await db.doc(`teams/${id}`).get()).data().paidFor;
+check(await pf("oldYear") === "year" && (await teamDetail(db, "oldYear", NOW)).graceUntil === NOW + 230 * DAY, "paid for a year before: its 30 grace days (added seats don't change it)");
+check(await pf("oldTerm") === "month", "a school term from before (4 months): as a month, 2 grace days");
+check(await pf("oldInvoice") === "year", "invoices: the latest counts (12 months: a year)");
+check(await pf("oldByHand") === undefined, "no payment recorded (set by hand): left as it is");
+check(await pf(yTeam.id) === yearBefore && backfilled === 3, "teams that have it already are left alone", String(backfilled));
+check(await backfillPaidFor(db) === 0, "run again: nothing left to do");
 
 console.log("A team made in dollars before teams were priced in naira");
 await db.doc("teams/legacy").set({ name: "Old Dollar Team", kind: "team", seats: 5, seatPrice: null, currency: "USD", paidUntil: null, joinCode: "LEGA2345", joinOpen: true, memberCount: 1, createdAt: NOW - 30 * DAY, ownerEmail: "old@x.io" });

@@ -293,11 +293,12 @@ export function registerPaystackRoutes(app: express.Express, requireAdmin: expre
       return res.status(400).json({ error: "Provide at least one of secretKey, publicKey, planCode, yearlyPlanCode." });
     }
     // A test public key with a live secret key (or the other way round) opens
-    // a checkout that can never be confirmed.
+    // a checkout that can never be confirmed. Checked when a key changes, so
+    // a plan code can still be saved while the keys are being sorted out.
     const before = getPaystackConfig();
     const pkMode = keyMode(pk || before.publicKey);
     const skMode = keyMode(sk || before.secretKey);
-    if (pkMode && skMode && pkMode !== skMode) {
+    if ((sk || pk) && pkMode && skMode && pkMode !== skMode) {
       return res.status(400).json({ error: `The public key is a ${pkMode} key but the secret key is a ${skMode} key. Use both test keys or both live keys, from the same Paystack account.` });
     }
     const { durable } = await saveAdminConfig(patch);

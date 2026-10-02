@@ -27,8 +27,10 @@ import { storedRef, clearStoredRef } from "./lib/referral";
 import { loadPaystack } from "./lib/paystackScript";
 import { lazyPart, PartLoading } from "./components/LazyPart";
 
-// Downloaded when they first show rather than with the app (LazyPart.tsx):
-// together they were over half of the app's download.
+// Their own downloads rather than part of the app's (LazyPart.tsx): together
+// they were over half of it, and the app opens without waiting for them.
+// The circuit drawing sits under the other tabs, so it downloads as soon as
+// the app is up; the plotter's chart and the Web3 panel when they first show.
 const SchematicViewer = lazyPart(() => import("./components/SchematicViewer"));
 const Web3Panel = lazyPart(() => import("./components/Web3Panel"));
 const SerialPlotterChart = lazyPart(() => import("./components/SerialPlotterChart"));

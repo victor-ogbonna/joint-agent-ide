@@ -124,14 +124,15 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
   const partnerMode = partner === "publicKey" ? modeOf(config?.publicKey) : partner === "secretKey" ? secretMode : null;
   const needsPartner = !!partner && !!typedMode && !!partnerMode && typedMode !== partnerMode;
 
-  const send = async (body: Record<string, unknown>, done: string) => {
+  /** Saves, and says how it went; the saved settings, or null if it didn't save. */
+  const send = async (body: Record<string, unknown>, done: string): Promise<Config | null> => {
     setBusy(true);
     setMessage(null);
     try {
       const res = await post("/api/admin/paystack-config", body);
-      if (!res) return;
+      if (!res) return null;
       const data = await res.json();
-      if (!res.ok) { setMessage({ type: "error", text: data.error || "That couldn't be saved." }); return; }
+      if (!res.ok) { setMessage({ type: "error", text: data.error || "That couldn't be saved." }); return null; }
       setConfig(data);
       setEditing(null);
       setValue("");
@@ -144,8 +145,10 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
           : `${done} It works straight away, but this server keeps it only until it restarts: add it to the server's .env file too.`,
       });
       void runCheck();
+      return data;
     } catch {
       setMessage({ type: "error", text: "Could not reach the server." });
+      return null;
     } finally {
       setBusy(false);
     }
@@ -170,7 +173,12 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
 
   const removeYearly = () => {
     if (!window.confirm("Remove the yearly plan? The Plans page then offers monthly only. People already paying yearly keep their plan.")) return;
-    void send({ clearYearlyPlanCode: true }, "Yearly plan removed.");
+    void send({ clearYearlyPlanCode: true }, "Yearly plan removed.").then((saved) => {
+      // The server's .env file can set one too; that one is still used.
+      if (saved?.yearlyPlanCode) {
+        setMessage({ type: "error", text: `Removed from here, but the server's .env file sets a yearly plan too (PAYSTACK_YEARLY_PLAN_CODE=${saved.yearlyPlanCode}), so it's still offered. To stop offering yearly, delete that line from .env, then restart the server.` });
+      }
+    });
   };
 
   const toggleSecret = async () => {
