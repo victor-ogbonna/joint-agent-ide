@@ -64,9 +64,25 @@ export async function createProject(uid: string, name: string, defaults: Pick<Pr
   return ref.id;
 }
 
+/**
+ * The project list couldn't come from the database: no connection, or one
+ * that blocks it. Firestore then answers from its own memory instead, which
+ * on a freshly opened page is empty, so it would read as "no projects" and
+ * look as if they were gone. They aren't: the list just has to be asked
+ * again (the app retries, and says so meanwhile).
+ */
+export class ProjectsUnreachableError extends Error {
+  constructor() {
+    super("Couldn't reach your saved projects just now. They're safe: check your connection, then try again.");
+    this.name = "ProjectsUnreachableError";
+  }
+}
+
 async function listAll(uid: string): Promise<ProjectSummary[]> {
   const q = query(projectsCol(uid), orderBy("updatedAt", "desc"));
   const snap = await getDocs(q);
+  // From Firestore's memory, not the database: not the real list (above).
+  if (snap.metadata?.fromCache === true) throw new ProjectsUnreachableError();
   return snap.docs.map(d => {
     const data = d.data();
     const mcu: MCUType = data.mcu || "esp32";

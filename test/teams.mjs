@@ -15,7 +15,7 @@ import {
   newJoinCode, normalizeJoinCode, teamMonthKey, nextTeamMonthStart, addMonths,
 } from "../server/teamRules.ts";
 import {
-  createTeam, joinByCode, acceptInvites, leaveTeam, removeMember, setRole, updateTeamSettings, inviteEmails,
+  createTeam, joinByCode, acceptInvite, invitationFor, leaveTeam, removeMember, setRole, updateTeamSettings, inviteEmails,
   cancelInvite, declineInvite, quoteFor, applyTeamPayment, recordInvoice, adminUpdateTeam, adminInvite,
   teamDetail, teamPage, teamForStatus, listTeams, TeamError, inviteId, backfillPaidFor,
 } from "../server/teams.ts";
@@ -261,10 +261,17 @@ check(JSON.stringify(inv.invited) === JSON.stringify(["chi@school.ng", "dee@scho
 check(await throwsWith(() => inviteEmails(db, "ada", "e1@x.com e2@x.com", NOW), /1 seat is free/, "full"), "never more invitations than free seats");
 check(await throwsWith(() => inviteEmails(db, "ben", "e1@x.com", NOW), /Only the team's admins/), "only admins invite");
 check(await throwsWith(() => inviteEmails(db, "ada", "", NOW), /at least one/), "an empty list is refused");
-check((await acceptInvites(db, dee, NOW)) === null && !(await db.doc("teamMembers/dee").get()).exists, "an unverified address isn't joined");
-const chiTeam = await acceptInvites(db, chi, NOW);
-check(chiTeam?.id === team.id && (await db.doc(`teams/${team.id}`).get()).data().memberCount === 3, "Chi opens the app: joined, 3 members");
-check(!(await db.doc(`teamInvites/${inviteId(team.id, "chi@school.ng")}`).get()).exists, "the invitation is used up");
+check(await throwsWith(() => acceptInvite(db, dee, team.id, NOW), /Verify your email address first/) && !(await db.doc("teamMembers/dee").get()).exists, "an unverified address can't accept");
+check((await teamForStatus(db, chi, { teamId: null }, NOW)) === null && (await teamPage(db, chi, NOW)).team === null && !(await db.doc("teamMembers/chi").get()).exists,
+  "nobody joins by opening the app or the Team page: only by accepting");
+const chiPage = await teamPage(db, chi, NOW);
+const chiInvitation = await invitationFor(db, chi, NOW);
+check(chiPage.invites.length === 1 && chiPage.invites[0].teamId === team.id && chiInvitation?.teamId === team.id && chiInvitation.teamName === "Lagos Robotics Club",
+  "Chi's Team page lists the invitation, and the app's status points to it");
+check(await throwsWith(() => acceptInvite(db, chi, "nope", NOW), /no longer exists/), "accepting an invitation to a team that isn't there is refused");
+const chiTeam = await acceptInvite(db, chi, team.id, NOW);
+check(chiTeam?.id === team.id && (await db.doc(`teams/${team.id}`).get()).data().memberCount === 3, "Chi presses Accept: joined, 3 members");
+check(!(await db.doc(`teamInvites/${inviteId(team.id, "chi@school.ng")}`).get()).exists && (await invitationFor(db, chi, NOW)) === null, "the invitation is used up");
 await cancelInvite(db, "ada", "dee@school.ng");
 check(!(await db.doc(`teamInvites/${inviteId(team.id, "dee@school.ng")}`).get()).exists, "an invitation can be withdrawn");
 check(await throwsWith(() => cancelInvite(db, "ada", "dee@school.ng"), /isn't invited/), "and only once");
@@ -272,13 +279,14 @@ const eve = { uid: "eve", email: "eve@school.ng", emailVerified: true };
 await db.doc("users/eve").set({ subscriptionStatus: "none" });
 await inviteEmails(db, "ada", "eve@school.ng", NOW);
 await license(NOW - 3 * DAY, "month");
-check((await acceptInvites(db, eve, NOW)) === null && (await db.doc(`teamInvites/${inviteId(team.id, "eve@school.ng")}`).get()).exists && !(await db.doc("teamMembers/eve").get()).exists,
-  "an invitation to a team whose license has ended waits, kept, until it's renewed");
+check(await throwsWith(() => acceptInvite(db, eve, team.id, NOW), /license has ended/, "unpaid") && (await db.doc(`teamInvites/${inviteId(team.id, "eve@school.ng")}`).get()).exists && !(await db.doc("teamMembers/eve").get()).exists,
+  "an invitation to a team whose license has ended can't be accepted until it's renewed; it's kept");
 const evePage = await teamPage(db, eve, NOW);
 check(evePage.team === null && evePage.invites.length === 1 && evePage.invites[0].teamId === team.id && evePage.invites[0].state === "ended",
   "and Eve's Team page says what it waits for");
 await license(NOW - DAY, "month");
-check((await teamPage(db, eve, NOW)).team?.id === team.id, "renewed (here, back in its grace days): she's on the team");
+check((await teamPage(db, eve, NOW)).team === null, "renewed (here, back in its grace days): still not on it until she accepts");
+check((await acceptInvite(db, eve, team.id, NOW)).id === team.id && (await teamPage(db, eve, NOW)).team?.id === team.id, "she accepts: on the team");
 await leaveTeam(db, "eve");
 // Unpaid again, for paying for it below.
 await license(null);
@@ -351,8 +359,10 @@ check(school.seatPrice === 30000 && school.currency === "NGN" && school.memberCo
 check(await throwsWith(() => createTeam(db, null, { name: "No owner", seats: 5 }, NOW, random), /email/), "it needs its admin's address");
 const head = { uid: "head", email: "head@kings.edu.ng", emailVerified: true };
 await db.doc("users/head").set({ subscriptionStatus: "none" });
+check((await teamPage(db, head, NOW)).invites[0]?.role === "admin" && (await teamPage(db, head, NOW)).team === null, "its admin signs in: the invitation to be its admin waits for Accept");
+await acceptInvite(db, head, school.id, NOW);
 const headPage = await teamPage(db, head, NOW);
-check(headPage.team?.id === school.id && headPage.team.role === "admin", "its admin signs in: joined as its admin");
+check(headPage.team?.id === school.id && headPage.team.role === "admin", "accepted (though not paid yet: an admin joins to pay): its admin");
 check(Array.isArray(headPage.team.members) && headPage.team.joinCode === school.joinCode, "and sees the members and join code");
 const benPage = await teamPage(db, ben, NOW + DAY);
 check(benPage.team?.role === "admin", "Ben (now an admin) sees his team");
@@ -377,18 +387,19 @@ check(adminInvited.invited[0] === "deputy@kings.edu.ng" && (await teamDetail(db,
 const teams = await listTeams(db, NOW);
 check(teams.length === 2 && teams.every((t) => typeof t.state === "string"), "every team is listed, with its standing");
 
-console.log("Invitations that can't be taken up yet");
+console.log("Invitations that can't be accepted yet");
 const small = await createTeam(db, null, { name: "Tiny Team", seats: 5, ownerEmail: "boss@tiny.io" }, NOW, random);
 await db.doc(`teams/${small.id}`).set({ memberCount: 5 }, { merge: true });
 const busy = { uid: "busy", email: "boss@tiny.io", emailVerified: true };
 await db.doc("users/busy").set({ subscriptionStatus: "none" });
-check((await acceptInvites(db, busy, NOW)) === null && (await db.doc(`teamInvites/${inviteId(small.id, "boss@tiny.io")}`).get()).exists, "for a full team: it waits for a seat");
+check(await throwsWith(() => acceptInvite(db, busy, small.id, NOW), /full/, "full") && (await db.doc(`teamInvites/${inviteId(small.id, "boss@tiny.io")}`).get()).exists, "for a full team: refused, the invitation kept");
 await db.doc(`teams/${small.id}`).set({ memberCount: 0 }, { merge: true });
-const page = await teamPage(db, busy, NOW);
-check(page.team?.id === small.id, "and is taken up once there is one");
+await acceptInvite(db, busy, small.id, NOW);
+check((await teamPage(db, busy, NOW)).team?.id === small.id, "and accepted once there's a seat");
 await db.doc(`teamInvites/${inviteId("gone", "lost@x.io")}`).set({ teamId: "gone", email: "lost@x.io", role: "member", invitedAt: NOW });
-check((await acceptInvites(db, { uid: "lost", email: "lost@x.io", emailVerified: true }, NOW)) === null && !(await db.doc(`teamInvites/${inviteId("gone", "lost@x.io")}`).get()).exists,
-  "one for a team that's gone is cleared");
+const lost = { uid: "lost", email: "lost@x.io", emailVerified: true };
+check((await teamPage(db, lost, NOW)).invites.length === 0 && !(await db.doc(`teamInvites/${inviteId("gone", "lost@x.io")}`).get()).exists && (await invitationFor(db, lost, NOW)) === null,
+  "one for a team that's gone isn't listed, and is cleared");
 await db.doc(`teamInvites/${inviteId(school.id, "nah@x.io")}`).set({ teamId: school.id, email: "nah@x.io", role: "member", invitedAt: NOW });
 await declineInvite(db, { uid: "nah", email: "nah@x.io", emailVerified: true }, school.id);
 check(!(await db.doc(`teamInvites/${inviteId(school.id, "nah@x.io")}`).get()).exists, "an invitation can be turned down");

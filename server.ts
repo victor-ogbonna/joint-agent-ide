@@ -26,7 +26,7 @@ import { adminDb, isFirebaseAdminConfigured } from './server/firebaseAdmin';
 import { registerWaitlistRoutes } from './server/waitlist';
 import { registerFeedbackRoutes } from './server/feedback';
 import { registerCreatorRoutes } from './server/creators';
-import { registerTeamRoutes, teamForStatus, type TeamStatus } from './server/teams';
+import { registerTeamRoutes, teamForStatus, invitationFor, type TeamStatus, type WaitingInvite } from './server/teams';
 import { registerTeamProjectRoutes } from './server/teamProjects';
 import { canUseCode, firstMonthOfferUntil, firstMonthOfferOpensAt } from './server/referrals';
 import { registerGithubRoutes } from './server/github';
@@ -428,12 +428,16 @@ registerAdminStatsRoutes(app, requireAdmin, {
 // countdown (hence requireFirebaseAuth, not the quota-enforcing variant).
 app.get("/api/quota/status", requireFirebaseAuth, async (req, res) => {
   let doc = await getOrCreateUserDoc(req.uid!);
-  // The account's team or school license (server/teams.ts), taking up an
-  // invitation to its address first. Never stops the status itself.
+  // The account's team or school license (server/teams.ts), or, on none, an
+  // invitation waiting for it to accept. Never stops the status itself.
   let team: TeamStatus | null = null;
+  let invitation: WaitingInvite | null = null;
   try {
-    team = await teamForStatus(adminDb, { uid: req.uid!, email: req.email ?? null, emailVerified: req.emailVerified === true }, doc, Date.now());
-    doc = { ...doc, teamId: team ? team.id : null, teamPaidUntil: team ? team.paidUntil : null };
+    const who = { uid: req.uid!, email: req.email ?? null, emailVerified: req.emailVerified === true };
+    team = await teamForStatus(adminDb, who, doc, Date.now());
+    // With what it was paid for: a year's license keeps PRO 30 days after it ends, not 2.
+    doc = { ...doc, teamId: team ? team.id : null, teamPaidUntil: team ? team.paidUntil : null, teamPaidFor: team ? team.paidFor : null };
+    if (!team) invitation = await invitationFor(adminDb, who, Date.now());
   } catch (err: any) {
     console.error(`[Teams] Status for uid=${req.uid} failed:`, err?.message || err);
   }
@@ -465,6 +469,8 @@ app.get("/api/quota/status", requireFirebaseAuth, async (req, res) => {
     offerOpensAt: firstMonthOfferOpensAt(doc, Date.now()),
     // The team license, for the app's banner while it is in its grace days.
     team,
+    // An invitation to a team, for the app to point to (accepted on /team).
+    invitation,
   });
 });
 

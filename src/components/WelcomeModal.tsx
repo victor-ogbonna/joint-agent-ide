@@ -17,6 +17,9 @@ interface WelcomeModalProps {
    * and what each choice does with the work on screen.
    */
   forBuild?: boolean;
+  /** The saved projects couldn't be loaded (no connection): said, never "your first project". */
+  failed?: boolean;
+  onRetry?: () => void;
 }
 
 const RECENT_SHOWN = 4;
@@ -34,7 +37,7 @@ const when = (ts: any): string => {
 };
 
 export default function WelcomeModal({
-  displayName, projects, loading, onNewProject, onOpenProject, onBrowseAll, onClose, boardNames, forBuild = false,
+  displayName, projects, loading, onNewProject, onOpenProject, onBrowseAll, onClose, boardNames, forBuild = false, failed = false, onRetry,
 }: WelcomeModalProps) {
   const recent = projects.slice(0, RECENT_SHOWN);
 
@@ -49,7 +52,7 @@ export default function WelcomeModal({
             <p className="text-xs text-[var(--text-muted)] mt-0.5">
               {forBuild
                 ? "Your work isn't in a project yet. Start a new project to keep it there, and the build carries on. Or open a saved project instead."
-                : recent.length > 0 ? "Pick up where you left off, or start something new." : "Start your first project."}
+                : recent.length > 0 ? "Pick up where you left off, or start something new." : failed ? "Start something new, or open a saved project once they've loaded." : "Start your first project."}
             </p>
           </div>
           <button type="button" onClick={onClose} title="Close" className="text-[var(--text-muted)] hover:text-[var(--text-main)] shrink-0 -mr-1">
@@ -103,6 +106,13 @@ export default function WelcomeModal({
                 </button>
               )}
             </div>
+          ) : failed ? (
+            <p className="text-center text-xs text-[var(--text-muted)]" role="status" data-welcome-failed="">
+              Couldn't load your saved projects just now. They're safe: check your connection.{" "}
+              {onRetry && (
+                <button type="button" onClick={onRetry} className="font-semibold text-[var(--accent-primary)] hover:underline">Try again</button>
+              )}
+            </p>
           ) : null}
         </div>
       </div>

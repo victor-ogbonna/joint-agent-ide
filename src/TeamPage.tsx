@@ -417,7 +417,7 @@ function InviteCard({ team, call, reload }: { team: TeamView; call: Call; reload
     <section className={card}>
       <h2 className={heading}><Mail size={16} aria-hidden="true" /> Invite by email {lock && <Lock size={13} className="text-[var(--text-muted)]" aria-label="Locked" />}</h2>
       <p className={`mt-1 ${small}`}>
-        Paste addresses, separated by commas or new lines. Each person joins the next time they open Joint-Agent signed in with that address.{" "}
+        Paste addresses, separated by commas or new lines. Each person sees the invitation on their Team page, signed in with that address, and joins when they accept it.{" "}
         {lock ? "It works once the license is paid." : free > 0 ? `${free} seat${free === 1 ? " is" : "s are"} free to invite.` : "Every seat is taken or invited."}
       </p>
       <form onSubmit={send} className="mt-3" data-invite-form={lock ? "locked" : ""}>
@@ -579,32 +579,49 @@ function LeaveButton({ team, call, reload }: { team: TeamView; call: Call; reloa
   );
 }
 
+/**
+ * Invitations to the person's address. Nobody is put on a team without
+ * saying so: Accept joins it (with PRO while it's paid), Decline turns it
+ * down. One that can't be accepted yet says why.
+ */
 function WaitingInvites({ data, call, reload }: { data: PageData; call: Call; reload: () => Promise<void> }) {
   const { busy, error, note, run } = useAction(call, reload);
   if (!data.invites.length) return null;
   return (
-    <section className={card}>
+    <section className={card} data-invitations="">
       <h2 className={heading}><Mail size={16} aria-hidden="true" /> Invitations</h2>
       <ul className="mt-2 divide-y divide-[var(--border-main)] text-[13px]">
-        {data.invites.map((i) => (
-          <li key={i.teamId} className="flex flex-wrap items-center justify-between gap-2 py-2">
-            <span className="min-w-0">
-              <strong>{i.teamName}</strong> invited you{i.role === "admin" ? " as its admin" : ""}.{" "}
-              <span className="text-[var(--text-muted)]">
-                {data.team
-                  ? "Leave your current team to join it."
-                  : i.role !== "admin" && i.state === "unpaid"
-                    ? "It's waiting for the team's license to be paid."
-                    : i.role !== "admin" && i.state === "ended"
-                      ? "It's waiting for the team's license to be renewed."
-                      : "It's waiting for a free seat."}
-              </span>
-            </span>
-            <button type="button" className={button} disabled={busy !== null} onClick={() => void run(`d:${i.teamId}`, "/api/team/invites/decline", { teamId: i.teamId }, () => `Declined ${i.teamName}'s invitation.`)}>
-              {busy === `d:${i.teamId}` ? <Loader2 size={14} className="animate-spin" /> : <X size={14} />} Decline
-            </button>
-          </li>
-        ))}
+        {data.invites.map((i) => {
+          // Why it can't be accepted now, if it can't.
+          const blocked = data.team
+            ? "Leave your current team to join it."
+            : i.role !== "admin" && i.state === "unpaid"
+              ? "It can be accepted once the team's license is paid."
+              : i.role !== "admin" && i.state === "ended"
+                ? "It can be accepted once the team's license is renewed."
+                : null;
+          return (
+            <li key={i.teamId} className="py-3" data-invitation={i.teamId}>
+              <p className="min-w-0">
+                <strong>{i.teamName}</strong> invited you to its {i.role === "admin" ? "license, as its admin" : "license"}.{" "}
+                <span className="text-[var(--text-muted)]">{blocked ?? (i.role === "admin" ? "Accept to join and manage it." : "Accept to join: everyone on it has PRO while it's paid.")}</span>
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {!blocked && (
+                  <button
+                    type="button" className={primary} style={{ background: "var(--gradient-hero)" }} disabled={busy !== null}
+                    onClick={() => void run(`a:${i.teamId}`, "/api/team/invites/accept", { teamId: i.teamId }, () => `You joined ${i.teamName}.`)}
+                  >
+                    {busy === `a:${i.teamId}` ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />} Accept
+                  </button>
+                )}
+                <button type="button" className={button} disabled={busy !== null} onClick={() => void run(`d:${i.teamId}`, "/api/team/invites/decline", { teamId: i.teamId }, () => `Declined ${i.teamName}'s invitation.`)}>
+                  {busy === `d:${i.teamId}` ? <Loader2 size={14} className="animate-spin" /> : <X size={14} />} Decline
+                </button>
+              </div>
+            </li>
+          );
+        })}
       </ul>
       <Notes error={error} note={note} />
     </section>

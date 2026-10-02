@@ -10,8 +10,9 @@
  *                             and whether the team's admins may see its
  *                             projects (adminsCanView, the member's choice;
  *                             server/teamProjects.ts)
- *   teamInvites/{id}:{email}  an address a team invited; taken up when that
- *                             person next opens the app, signed in with it
+ *   teamInvites/{id}:{email}  an address a team invited; the person accepts
+ *                             (or declines) it on their Team page, signed in
+ *                             with that address: nobody joins without saying so
  *   teamQuotes/{id}           a price shown to a team's admin, which their
  *                             Paystack payment then pays, once
  *   teamPayments/{ref}        each payment, online (keyed by the Paystack
@@ -370,23 +371,33 @@ async function invitesFor(db: Db, email: string): Promise<InviteRow[]> {
 }
 
 /**
- * Take up the oldest invitation to the account's verified address, for an
- * account on no team. One for a full team waits until it has a free seat,
- * and one for a team that isn't paid until it's paid; one for a team that's
- * gone is cleared. The team joined, or null.
+ * Accept an invitation to the account's verified address: the person joins
+ * only when they say so (Accept on their Team page). Refused, with the
+ * invitation kept, while they're on another team, the team is full, or its
+ * license isn't paid (an admin's invitation excepted); one for a team that's
+ * gone is cleared. The team joined.
  */
-export async function acceptInvites(db: Db, who: Who, now: number): Promise<TeamRecord | null> {
-  if (!who.emailVerified || !who.email) return null;
-  const email = who.email.trim().toLowerCase();
-  for (const inv of await invitesFor(db, email)) {
-    try {
-      return await joinTeam(db, who, inv.teamId, {}, now);
-    } catch (err) {
-      if (!(err instanceof TeamError)) throw err;
-      if (err.reason === "on_team") return null;
-      if (err.reason === "gone") await inviteRef(db, inv.teamId, email).delete().catch(() => {});
-      // Full or not paid: it waits. Anything else: try the next.
+export async function acceptInvite(db: Db, who: Who, rawTeamId: unknown, now: number): Promise<TeamRecord> {
+  if (!who.emailVerified || !who.email) throw new TeamError("Verify your email address first, then accept the invitation.");
+  const teamId = cleanTeamId(rawTeamId);
+  try {
+    return await joinTeam(db, who, teamId, {}, now);
+  } catch (err) {
+    if (err instanceof TeamError && err.reason === "gone") {
+      await inviteRef(db, teamId, who.email.trim().toLowerCase()).delete().catch(() => {});
     }
+    throw err;
+  }
+}
+
+/** The oldest invitation waiting for the account's verified address, for the app to point to; null when none. */
+export async function invitationFor(db: Db, who: Who, now: number): Promise<WaitingInvite | null> {
+  if (!who.emailVerified || !who.email) return null;
+  for (const inv of await invitesFor(db, who.email.trim().toLowerCase())) {
+    const t = await teamRef(db, inv.teamId).get();
+    if (!t.exists) continue;
+    const team = teamOf(inv.teamId, t.data());
+    return { teamId: inv.teamId, teamName: team.name, role: inv.role, state: licenseStanding(team.paidUntil, now, team.paidFor).state };
   }
   return null;
 }
@@ -840,14 +851,14 @@ export interface WaitingInvite {
 
 /** The /team page: the person's team (and as an admin sees it, if they are one), and invitations waiting. */
 export async function teamPage(db: Db, who: Who, now: number): Promise<{ team: TeamView | TeamAdminView | null; invites: WaitingInvite[]; verified: boolean }> {
-  let mine = await memberRef(db, who.uid).get();
-  if (!mine.exists && (await acceptInvites(db, who, now))) mine = await memberRef(db, who.uid).get();
+  const mine = await memberRef(db, who.uid).get();
   const email = who.emailVerified && who.email ? who.email.trim().toLowerCase() : null;
   const waiting = email ? await invitesFor(db, email) : [];
   const invites: WaitingInvite[] = [];
   for (const inv of waiting.slice(0, 10)) {
     const t = await teamRef(db, inv.teamId).get();
-    if (!t.exists) continue;
+    // A team that's gone: its invitation is cleared.
+    if (!t.exists) { await inviteRef(db, inv.teamId, email!).delete().catch(() => {}); continue; }
     const team = teamOf(inv.teamId, t.data());
     invites.push({ teamId: inv.teamId, teamName: team.name, role: inv.role, state: licenseStanding(team.paidUntil, now, team.paidFor).state });
   }
@@ -878,17 +889,18 @@ export interface TeamStatus {
   role: TeamRole;
   state: LicenseState;
   paidUntil: number | null;
+  /** What it was paid for last: its grace days (2 after a month, 30 after a year). */
+  paidFor: TeamPeriod | null;
   graceUntil: number | null;
 }
 
 /**
- * The person's team for the app's status, taking up an invitation first if
- * they're on none. The membership record decides: an account whose teamId
- * points at a team it isn't on is corrected.
+ * The person's team for the app's status. The membership record decides: an
+ * account whose teamId points at a team it isn't on is corrected. (An
+ * invitation is never taken up here: the person accepts it themselves.)
  */
 export async function teamForStatus(db: Db, who: Who, doc: Pick<UserQuotaDoc, "teamId">, now: number): Promise<TeamStatus | null> {
-  let teamId = doc.teamId;
-  if (!teamId) teamId = (await acceptInvites(db, who, now))?.id ?? null;
+  const teamId = doc.teamId;
   if (!teamId) return null;
   const [memberSnap, teamSnap] = await Promise.all([memberRef(db, who.uid).get(), teamRef(db, teamId).get()]);
   const member = memberSnap.exists ? memberOf(who.uid, memberSnap.data()) : null;
@@ -899,7 +911,7 @@ export async function teamForStatus(db: Db, who: Who, doc: Pick<UserQuotaDoc, "t
   if (!teamSnap.exists) return null;
   const team = teamOf(teamId, teamSnap.data());
   const standing = licenseStanding(team.paidUntil, now, team.paidFor);
-  return { id: team.id, name: team.name, kind: team.kind, role: member.role, state: standing.state, paidUntil: team.paidUntil, graceUntil: standing.graceUntil };
+  return { id: team.id, name: team.name, kind: team.kind, role: member.role, state: standing.state, paidUntil: team.paidUntil, paidFor: team.paidFor, graceUntil: standing.graceUntil };
 }
 
 export interface TeamSummary {
@@ -1087,6 +1099,18 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
       res.json({ ok: true });
     } catch (err) {
       sendError(res, err, "Leaving a team");
+    }
+  });
+
+  app.post("/api/team/invites/accept", requireFirebaseAuth, async (req, res) => {
+    if (!ready(res) || limited(res, `accept:${req.uid}`, 30)) return;
+    try {
+      await getOrCreateUserDoc(req.uid!);
+      const team = await acceptInvite(adminDb, whoOf(req), req.body?.teamId, Date.now());
+      forgetTeam(team.id);
+      res.json({ ok: true, teamId: team.id, name: team.name });
+    } catch (err) {
+      sendError(res, err, "Accepting an invitation");
     }
   });
 

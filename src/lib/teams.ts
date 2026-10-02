@@ -49,6 +49,24 @@ export function readTeamStatus(raw: any): TeamStatusView | null {
 export type TeamLock = "unpaid" | "ended" | null;
 export const lockOf = (state: LicenseState): TeamLock => (state === "unpaid" || state === "ended" ? state : null);
 
+/** An invitation waiting for the account to accept (on /team), from /api/quota/status. */
+export interface TeamInvitationView {
+  teamId: string;
+  teamName: string;
+  role: TeamRole;
+  state: LicenseState;
+}
+
+export function readInvitation(raw: any): TeamInvitationView | null {
+  if (!raw || typeof raw !== "object" || typeof raw.teamId !== "string" || typeof raw.teamName !== "string") return null;
+  return {
+    teamId: raw.teamId,
+    teamName: raw.teamName,
+    role: raw.role === "admin" ? "admin" : "member",
+    state: STATES.includes(raw.state) ? raw.state : "unpaid",
+  };
+}
+
 /** Whole days left until `at`, at least 1 while it's still ahead. */
 export function daysLeft(at: number, now = Date.now()): number {
   return Math.max(1, Math.ceil((at - now) / DAY));

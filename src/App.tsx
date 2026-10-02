@@ -36,7 +36,8 @@ const Web3Panel = lazyPart(() => import("./components/Web3Panel"));
 const SerialPlotterChart = lazyPart(() => import("./components/SerialPlotterChart"));
 import TeamLicenseBanner from "./components/TeamLicenseBanner";
 import TeamCopyBanner, { type TeamCopyInfo } from "./components/TeamCopyBanner";
-import { readTeamStatus, stateLabel, type TeamStatusView } from "./lib/teams";
+import { readTeamStatus, readInvitation, stateLabel, type TeamStatusView, type TeamInvitationView } from "./lib/teams";
+import TeamInviteBanner from "./components/TeamInviteBanner";
 import LibrariesModal from "./components/LibrariesModal";
 import OnboardingTour, { TourStep } from "./components/OnboardingTour";
 import { canInstallApp, installApp, isInstalledFullscreenApp, onInstallAvailabilityChange } from "./lib/installApp";
@@ -405,7 +406,8 @@ export default function App() {
       document.removeEventListener("focusin", onFocusIn);
     };
   }, []);
-  const [selectedPane, setSelectedPane] = useState<MobilePane>("editor");
+  // A phone opens on the Agent section (Code in Manual-Mode, which has none).
+  const [selectedPane, setSelectedPane] = useState<MobilePane>("agent");
   const [appMode, setAppMode] = useState<AppMode>("agentic");
   const [theme, setTheme] = useState<AppTheme>("dark");
   const [activeTab, setActiveTab] = useState<EditorTab>("code");
@@ -710,9 +712,12 @@ export default function App() {
   const trialActive = trialEndsAt !== null && trialEndsAt > Date.now();
   // The team or school license the account is on (server/teams.ts).
   const [teamStatus, setTeamStatus] = useState<TeamStatusView | null>(null);
+  // An invitation to a team waiting for this account to accept it (on /team).
+  const [teamInvitation, setTeamInvitation] = useState<TeamInvitationView | null>(null);
   /** The code, trial, offer and team fields of /api/quota/status. */
   const applyCodeStatus = (status: any) => {
     setTeamStatus(readTeamStatus(status?.team));
+    setTeamInvitation(readInvitation(status?.invitation));
     setTrialEndsAt(typeof status?.trialEndsAt === "number" ? status.trialEndsAt : null);
     setCanUseCode(status?.canUseCode === true);
     setOfferUntil(typeof status?.offerUntil === "number" ? status.offerUntil : null);
@@ -816,9 +821,13 @@ export default function App() {
    *  the board returns. Unplugging previously ended the session silently and
    *  left no way to resume short of reloading. */
   const wantSerialMonitorRef = useRef(false);
+  // True once the list has come from the database (not just been asked for).
   const [recentFetched, setRecentFetched] = useState(false);
   const welcomeShownForRef = useRef<string | null>(null);
   const [loadingRecent, setLoadingRecent] = useState(false);
+  // Loads in a row that couldn't reach the database (no connection): never
+  // shown as "no projects", and tried again, sooner first.
+  const [recentFailures, setRecentFailures] = useState(0);
   const [showNewProjectModal, setShowNewProjectModal] = useState(false);
   const [importedFileCode, setImportedFileCode] = useState<string | null>(null);
   const [importedFileName, setImportedFileName] = useState<string>("");
@@ -3176,21 +3185,36 @@ export default function App() {
   }, [user]);
 
   const refreshRecentProjects = React.useCallback(async () => {
-    if (!user) { setRecentProjects([]); return; }
+    if (!user) { setRecentProjects([]); setRecentFailures(0); return; }
     setLoadingRecent(true);
     try {
       setRecentProjects(await listProjects(user.uid));
-    } catch {
-      // Non-fatal: the sidebar list is a convenience, Browse projects still works.
+      setRecentFailures(0);
+      setRecentFetched(true);
+    } catch (err: any) {
+      // Not loaded (no connection): the list on screen stays as it was, and
+      // Recent says it couldn't load rather than "no projects". The reason
+      // goes to the console (no connection, or the database refusing).
+      console.warn("[Projects] Couldn't load the project list:", err?.code || "", err?.message || err);
+      setRecentFailures((n) => n + 1);
     } finally {
       setLoadingRecent(false);
-      setRecentFetched(true);
     }
   }, [user]);
 
   // Re-fetch when the user changes or they switch project — switching is the
   // moment a project is created, renamed or saved, so this covers all of them.
   useEffect(() => { refreshRecentProjects(); }, [refreshRecentProjects, currentProjectId]);
+
+  // Couldn't load: tried again by itself (after 5 s, then longer, up to a
+  // minute), and straight away when the connection comes back.
+  useEffect(() => {
+    if (!user || recentFailures === 0) return;
+    const again = () => { void refreshRecentProjects(); };
+    const t = setTimeout(again, Math.min(60_000, 5_000 * recentFailures));
+    window.addEventListener("online", again);
+    return () => { clearTimeout(t); window.removeEventListener("online", again); };
+  }, [user, recentFailures, refreshRecentProjects]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3213,11 +3237,15 @@ export default function App() {
     if (!user) {
       welcomeShownForRef.current = null;
       setRecentFetched(false);
+      setRecentFailures(0);
       setShowWelcome(false);
       return;
     }
     if (!recentFetched || welcomeShownForRef.current === user.uid) return;
     welcomeShownForRef.current = user.uid;
+    // The list came late (a retry after no connection), and a project is
+    // already open: nothing to ask.
+    if (currentProjectIdRef.current) return;
     // Someone with no projects yet, who has not had the tour here, is new:
     // show them around instead of asking what to open.
     let seen = true;
@@ -3761,6 +3789,8 @@ export default function App() {
 
       {/* A team or school license in its grace days: when PRO ends. */}
       <TeamLicenseBanner team={teamStatus} />
+      {/* An invitation to a team: accepted on the Team page. */}
+      {!teamStatus && <TeamInviteBanner invitation={teamInvitation} />}
       {/* A working copy of a team project: whose it is, and Send. */}
       {teamCopy && teamCopy.projectId === currentProjectId && (
         <TeamCopyBanner info={teamCopy.info} sending={teamCopySending} note={teamCopyNote} onSend={() => void sendTeamCopy()} />
@@ -3956,7 +3986,24 @@ export default function App() {
                     <div className="px-3.5 py-1.5 text-[11px] text-[var(--text-subtle)]">Loading…</div>
                   )}
 
-                  {!loadingRecent && recentProjects.length === 0 && (
+                  {/* Couldn't reach the database: say so, never "none yet". */}
+                  {recentFailures > 0 && (
+                    <div className="px-3.5 py-1.5 text-[10px] leading-relaxed text-[var(--text-subtle)]" role="status" data-recent-failed="">
+                      {recentProjects.length === 0
+                        ? "Couldn't load your projects just now. They're safe: check your connection."
+                        : "Couldn't refresh this list just now."}{" "}
+                      <button
+                        type="button"
+                        onClick={() => void refreshRecentProjects()}
+                        disabled={loadingRecent}
+                        className="font-semibold text-[var(--accent-primary)] hover:underline disabled:opacity-60"
+                      >
+                        {loadingRecent ? "Trying…" : "Try again"}
+                      </button>
+                    </div>
+                  )}
+
+                  {!loadingRecent && recentFailures === 0 && recentFetched && recentProjects.length === 0 && (
                     <p className="px-3.5 py-1.5 text-[10px] leading-relaxed text-[var(--text-subtle)]">
                       Projects you save appear here.
                     </p>
@@ -4734,6 +4781,8 @@ export default function App() {
           displayName={user.displayName?.split(" ")[0] || ""}
           projects={recentProjects}
           loading={loadingRecent}
+          failed={recentFailures > 0 && recentProjects.length === 0}
+          onRetry={() => void refreshRecentProjects()}
           forBuild={pendingBuild !== null}
           onNewProject={() => { setShowWelcome(false); void openNewProject(); }}
           onOpenProject={(id) => {

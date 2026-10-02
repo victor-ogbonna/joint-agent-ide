@@ -3,7 +3,7 @@ import { X, FolderOpen, Plus, Trash2, Cpu, Loader2, FileCode, Search, RotateCcw 
 import { useAuth } from "../contexts/AuthContext";
 import {
   listProjects, listTrashedProjects, trashProject, restoreProject, deleteProject,
-  trashExpiresAt, ProjectSummary, TRASH_DAYS,
+  trashExpiresAt, ProjectSummary, TRASH_DAYS, ProjectsUnreachableError,
 } from "../lib/projects";
 
 interface ProjectsBrowserProps {
@@ -41,6 +41,8 @@ export default function ProjectsBrowser({ onClose, onOpenProject, onNewProject, 
   const [trash, setTrash] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  /** The list itself couldn't load: offer to try again. */
+  const [loadFailed, setLoadFailed] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   // Name or board, any order of words: "mega blink" finds "Blink" on a Mega.
@@ -56,12 +58,14 @@ export default function ProjectsBrowser({ onClose, onOpenProject, onNewProject, 
     if (!user) return;
     setLoading(true);
     setError(null);
+    setLoadFailed(false);
     try {
       const [live, trashed] = await Promise.all([listProjects(user.uid), listTrashedProjects(user.uid)]);
       setProjects(live);
       setTrash(trashed);
     } catch (err: any) {
-      setError("Couldn't load your projects. " + (err?.message || ""));
+      setError(err instanceof ProjectsUnreachableError ? err.message : "Couldn't load your projects. " + (err?.message || ""));
+      setLoadFailed(true);
     } finally {
       setLoading(false);
     }
@@ -168,7 +172,12 @@ export default function ProjectsBrowser({ onClose, onOpenProject, onNewProject, 
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 terminal-scrollbar">
-          {error && <p className="text-xs text-red-400 text-center pb-4" role="alert">{error}</p>}
+          {error && (
+            <p className="text-xs text-red-400 text-center pb-4" role="alert">
+              {error}
+              {loadFailed && <>{" "}<button type="button" onClick={() => void refresh()} className="font-semibold text-[var(--accent-primary)] hover:underline">Try again</button></>}
+            </p>
+          )}
           {loading ? (
             <div className="flex items-center justify-center py-16 text-[var(--text-muted)]">
               <Loader2 size={20} className="animate-spin" />
