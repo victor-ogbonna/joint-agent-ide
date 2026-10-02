@@ -11,8 +11,12 @@ export const PRO_MAX_REPLY_TOKENS = 40000;
 export const FREE_WINDOW_COMPILES = 8;
 export const FREE_DAILY_COMPILES = 25;
 export const PRO_PRICE = "$7/month";
-/** PRO_PRICE as an amount (cents), for sums such as what a team saves. */
-export const PRO_MONTHLY_PRICE = { amount: 700, currency: "USD" };
+/**
+ * PRO's monthly price as amounts (kobo, cents), for sums such as what a team
+ * saves when Paystack's own can't be read: ₦9,300 on the Paystack plan,
+ * which is the $7 of PRO_PRICE.
+ */
+export const PRO_MONTHLY_PRICES = [{ amount: 930_000, currency: "NGN" }, { amount: 700, currency: "USD" }];
 /** Projects a Free account can have at once. Nothing is ever deleted to fit: past it, a new one waits for a free slot. */
 export const FREE_PROJECT_LIMIT = 5;
 
@@ -51,17 +55,22 @@ export function formatWhen(at: number, now = Date.now()): string {
   return `on ${when.toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}`;
 }
 
-/** Money in a currency's smallest unit (kobo, cents), as people read it: "$5.60", "₦4,000". */
+/**
+ * Money in a currency's smallest unit (kobo, cents), as people read it:
+ * "$5.60", "₦4,000". The narrow symbol, so naira reads "₦6,643" in every
+ * browser language (en-US alone would write "NGN 6,643"); a browser too old
+ * for it gets the usual symbol.
+ */
 export function formatMoney(minor: number, currency: string): string {
   const major = minor / 100;
+  const digits = { minimumFractionDigits: minor % 100 === 0 ? 0 : 2, maximumFractionDigits: 2 };
   try {
-    return new Intl.NumberFormat(undefined, {
-      style: "currency",
-      currency,
-      minimumFractionDigits: minor % 100 === 0 ? 0 : 2,
-      maximumFractionDigits: 2,
-    }).format(major);
+    return new Intl.NumberFormat(undefined, { style: "currency", currency, currencyDisplay: "narrowSymbol", ...digits }).format(major);
   } catch {
-    return `${currency} ${major.toFixed(2)}`;
+    try {
+      return new Intl.NumberFormat(undefined, { style: "currency", currency, ...digits }).format(major);
+    } catch {
+      return `${currency} ${major.toFixed(2)}`;
+    }
   }
 }

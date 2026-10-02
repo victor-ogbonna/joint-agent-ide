@@ -3,7 +3,7 @@ import { Users, Copy, Check, LogOut, Loader2, UserPlus, CreditCard, Link2, Mail,
 import { useDocumentScroll } from "./useDocumentScroll";
 import { useAuth } from "./contexts/AuthContext";
 import GoogleSignInButton from "./components/GoogleSignInButton";
-import { formatMoney, formatDay, PRO_MONTHLY_PRICE } from "./lib/plans";
+import { formatMoney, formatDay, PRO_MONTHLY_PRICES } from "./lib/plans";
 import { loadPaystack } from "./lib/paystackScript";
 import { ConsentCard, MemberProjects, TeamProjectsCard } from "./components/TeamProjects";
 import { TEAM_PRICES, PERIOD_MONTHS, renewalPrice, addSeatsPrice, daysLeft, stateLabel, teamSavings, type TeamPeriod, type LicenseState, type TeamRole, type TeamKind } from "./lib/teams";
@@ -11,7 +11,8 @@ import { TEAM_PRICES, PERIOD_MONTHS, renewalPrice, addSeatsPrice, daysLeft, stat
 /**
  * Team and school licenses (/team), by server/teams.ts. A team's admins pay
  * for its seats for a month or a year, invite people and manage who's on it;
- * every member has PRO while it's paid, and for 7 days after. Anyone signed
+ * every member has PRO while it's paid, and for its grace days after (2 after
+ * a month, 30 after a year). Anyone signed
  * in can start one, or join one by its code or an invitation to their address.
  */
 
@@ -210,7 +211,7 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
       <p className={`mt-1 ${small}`}>
         {formatMoney(seatPrice, currency)} a seat a month, paid ahead for a month, or for a year at 12 months for the price of 11. Nothing renews by itself: you renew here when it's due.
         {team.state === "active" ? " Renewing now adds the time after the current end." : " It runs from the day you pay."}
-        {" "}When it ends unpaid, everyone keeps PRO for 7 more days.
+        {" "}If it isn't renewed, everyone keeps PRO for 2 more days after a month, or 30 more days after a year.
       </p>
 
       <fieldset className="mt-4">
@@ -271,7 +272,7 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
 
 /** What a team saves against everyone paying for PRO on their own, at the foot of the page. */
 function SavingsCard({ seats, seatPrice, currency, proMonthly }: { seats: number; seatPrice: number; currency: string; proMonthly: ProPrice | null }) {
-  const s = teamSavings(seats, seatPrice, currency, [proMonthly, PRO_MONTHLY_PRICE]);
+  const s = teamSavings(seats, seatPrice, currency, [proMonthly, ...PRO_MONTHLY_PRICES]);
   if (!s) return null;
   const money = (n: number) => formatMoney(n, currency);
   return (
@@ -549,7 +550,7 @@ function NoTeam({ data, call, reload, joinFromLink, proMonthly }: { data: PageDa
         <h2 className={heading}><Users size={16} aria-hidden="true" /> Start a school or team license</h2>
         <p className={`mt-1 ${small}`}>
           PRO for everyone on it: {formatMoney(data.prices.seatPrice, data.prices.currency)} a seat a month, at least {data.prices.minSeats} seats.
-          Pay for a month, or for a year at 12 months for the price of 11. When a license ends, everyone keeps PRO for 7 more days.
+          Pay for a month, or for a year at 12 months for the price of 11. When a license ends, everyone keeps PRO for 2 more days after a month, or 30 more days after a year.
         </p>
         <form
           className="mt-4 space-y-3"

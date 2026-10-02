@@ -53,7 +53,7 @@ export const PERIOD_MONTHS: Record<TeamPeriod, { months: number; chargedMonths: 
  * page shows the server's). Mirrors server/teamRules.ts: test/teams.mjs
  * fails if the two ever disagree.
  */
-export const TEAM_PRICES = { seatPrice: 500, currency: "USD", minSeats: 5, maxSeats: 2000 };
+export const TEAM_PRICES = { seatPrice: 664_300, currency: "NGN", minSeats: 5, maxSeats: 2000 };
 
 export function renewalPrice(seats: number, seatPrice: number, period: TeamPeriod): number {
   return seats * seatPrice * PERIOD_MONTHS[period].chargedMonths;
@@ -76,9 +76,9 @@ export interface TeamSavings {
 
 /**
  * What a team saves a month against everyone paying for PRO on their own.
- * `pro` is PRO's monthly price, tried in order (from Paystack, then the $7
- * the app lists); the first in the team's currency counts. Null when none
- * is, or a seat costs no less.
+ * `pro` is PRO's monthly price, tried in order (from Paystack, then the
+ * listed ₦9,300 and $7); the first in the team's currency counts. Null when
+ * none is, or a seat costs no less.
  */
 export function teamSavings(seats: number, seatPrice: number, currency: string, pro: ({ amount: number; currency: string } | null)[]): TeamSavings | null {
   const match = pro.find((p) => p && Number.isFinite(p.amount) && p.amount > 0 && p.currency.toUpperCase() === currency.toUpperCase());

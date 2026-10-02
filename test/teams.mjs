@@ -9,7 +9,8 @@
  * uses (documents, merges, deletes, simple queries, transactions).
  */
 import {
-  DEFAULT_SEAT_PRICE, DEFAULT_TEAM_CURRENCY, MIN_SEATS, MAX_SEATS, GRACE_MS, PERIODS, TEAM_KIND, isPeriod,
+  DEFAULT_SEAT_PRICE, DEFAULT_TEAM_CURRENCY, SEAT_PRICES, normalSeatPrice, MIN_SEATS, MAX_SEATS, GRACE_DAYS, graceMs, paidForMonths,
+  PERIODS, TEAM_KIND, isPeriod,
   validSeats, renewalPrice, addSeatsPrice, renewedUntil, licenseStanding, teamGivesPro, emailList,
   newJoinCode, normalizeJoinCode, teamMonthKey, nextTeamMonthStart, addMonths,
 } from "../server/teamRules.ts";
@@ -21,7 +22,7 @@ import {
 import { readUserDoc, tierOf, allowanceFor, tokenUsagePatch, onTeamPro, PAID_TOKEN_CAP } from "../server/quota.ts";
 import { planOf } from "../server/adminMetrics.ts";
 import { TEAM_PRICES, PERIOD_MONTHS, teamSavings, renewalPrice as shownRenewalPrice } from "../src/lib/teams.ts";
-import { PRO_PRICE, PRO_MONTHLY_PRICE } from "../src/lib/plans.ts";
+import { PRO_PRICE, PRO_MONTHLY_PRICES } from "../src/lib/plans.ts";
 
 let bad = 0;
 const check = (cond, label, extra = "") => {
@@ -97,8 +98,11 @@ let seed = 0;
 const random = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
 
 console.log("Prices and seats");
-check(DEFAULT_SEAT_PRICE === 500 && MIN_SEATS === 5, "$5.00 a seat a month, at least 5 seats");
-check(renewalPrice(5, 500, "month") === 2500 && renewalPrice(5, 500, "year") === 27500, "5 seats: $25 a month, $275 a year (12 months for 11)");
+check(DEFAULT_SEAT_PRICE === 664300 && DEFAULT_TEAM_CURRENCY === "NGN" && MIN_SEATS === 5, "new teams: ₦6,643 a seat a month, at least 5 seats");
+check(Math.round(5 * 9300 / 7) * 100 === DEFAULT_SEAT_PRICE, "₦6,643 is $5 at ₦9,300 to $7 (PRO's own rate), to the naira");
+check(SEAT_PRICES.USD === 500 && normalSeatPrice("USD") === 500 && normalSeatPrice("GHS") === null && normalSeatPrice("toString") === null,
+  "teams priced in dollars before keep $5; other currencies have no normal price");
+check(renewalPrice(5, 664300, "month") === 3321500 && renewalPrice(5, 664300, "year") === 36536500, "5 seats: ₦33,215 a month, ₦365,365 a year (12 months for 11)");
 check(Object.keys(PERIODS).join() === "month,year" && PERIODS.month.months === 1 && PERIODS.month.chargedMonths === 1 && PERIODS.year.months === 12 && PERIODS.year.chargedMonths === 11,
   "a month, or a year charged as 11 months; no school term");
 check(isPeriod("month") && isPeriod("year") && !isPeriod("term") && !isPeriod(undefined), "a period is a month or a year");
@@ -119,21 +123,27 @@ check(Object.keys(PERIOD_MONTHS).join() === Object.keys(PERIODS).join()
   && Object.keys(PERIODS).every((k) => PERIOD_MONTHS[k].months === PERIODS[k].months && PERIOD_MONTHS[k].chargedMonths === PERIODS[k].chargedMonths)
   && shownRenewalPrice(6, 500, "month") === renewalPrice(6, 500, "month") && shownRenewalPrice(6, 500, "year") === renewalPrice(6, 500, "year"),
   "and its month and year prices are the server's");
-check(PRO_MONTHLY_PRICE.currency === "USD" && PRO_PRICE === `$${PRO_MONTHLY_PRICE.amount / 100}/month`, "PRO on your own: $7 a month, as the app lists it");
-const saved = teamSavings(5, 500, "USD", [null, PRO_MONTHLY_PRICE]);
-check(saved?.pro === 700 && saved.perSeat === 200 && saved.teamPays === 2500 && saved.onTheirOwn === 3500 && saved.saved === 1000,
-  "5 seats: $5 each instead of $7, $25 a month instead of $35: $10 saved");
-check(teamSavings(5, 500, "USD", [{ amount: 800, currency: "USD" }, PRO_MONTHLY_PRICE])?.perSeat === 300, "PRO's price from Paystack counts when it's in the team's currency");
-check(teamSavings(5, 500, "USD", [{ amount: 1000000, currency: "NGN" }, PRO_MONTHLY_PRICE])?.pro === 700, "in another currency, the listed $7 counts");
-check(teamSavings(5, 700, "USD", [null, PRO_MONTHLY_PRICE]) === null && teamSavings(5, 400000, "NGN", [null, PRO_MONTHLY_PRICE]) === null,
+check(PRO_MONTHLY_PRICES[0].amount === 930000 && PRO_MONTHLY_PRICES[0].currency === "NGN" && PRO_MONTHLY_PRICES[1].currency === "USD" && PRO_PRICE === `$${PRO_MONTHLY_PRICES[1].amount / 100}/month`,
+  "PRO on your own: ₦9,300 a month on Paystack, the $7 the app lists");
+const saved = teamSavings(5, 664300, "NGN", [null, ...PRO_MONTHLY_PRICES]);
+check(saved?.pro === 930000 && saved.perSeat === 265700 && saved.teamPays === 3321500 && saved.onTheirOwn === 4650000 && saved.saved === 1328500,
+  "5 seats: ₦6,643 each instead of ₦9,300, ₦33,215 a month instead of ₦46,500: ₦13,285 saved");
+check(teamSavings(5, 664300, "NGN", [{ amount: 1000000, currency: "NGN" }, ...PRO_MONTHLY_PRICES])?.pro === 1000000, "PRO's price from Paystack counts when it's in the team's currency");
+check(teamSavings(5, 664300, "NGN", [{ amount: 800, currency: "USD" }, ...PRO_MONTHLY_PRICES])?.pro === 930000, "in another currency, the listed ₦9,300 counts");
+check(teamSavings(5, 500, "USD", [null, ...PRO_MONTHLY_PRICES])?.saved === 1000, "a team priced in dollars: against $7");
+check(teamSavings(5, 930000, "NGN", [null, ...PRO_MONTHLY_PRICES]) === null && teamSavings(5, 400000, "GHS", [null, ...PRO_MONTHLY_PRICES]) === null,
   "nothing shown when a seat costs no less, or the prices can't be compared");
 
 console.log("The license's standing and the grace days");
 check(licenseStanding(null, NOW).state === "unpaid" && !teamGivesPro(null, NOW), "unpaid: no PRO");
-const paid = licenseStanding(NOW + DAY, NOW);
-check(paid.state === "active" && paid.graceUntil === NOW + DAY + 7 * DAY && GRACE_MS === 7 * DAY, "paid: active, with 7 grace days after it ends");
-check(licenseStanding(NOW - DAY, NOW).state === "grace" && teamGivesPro(NOW - DAY, NOW), "ended yesterday: in grace, still PRO");
-check(licenseStanding(NOW - 7 * DAY, NOW).state === "ended" && !teamGivesPro(NOW - 7 * DAY, NOW), "7 days after it ended: PRO ends");
+const paid = licenseStanding(NOW + DAY, NOW, "month");
+check(paid.state === "active" && paid.graceUntil === NOW + 3 * DAY && GRACE_DAYS.month === 2 && graceMs("month") === 2 * DAY, "paid for a month: active, with 2 grace days after it ends");
+check(licenseStanding(NOW - DAY, NOW, "month").state === "grace" && teamGivesPro(NOW - DAY, NOW, "month"), "a month that ended yesterday: in grace, still PRO");
+check(licenseStanding(NOW - 2 * DAY, NOW, "month").state === "ended" && !teamGivesPro(NOW - 2 * DAY, NOW, "month"), "2 days after a month ended: PRO ends");
+check(licenseStanding(NOW - 29 * DAY, NOW, "year").state === "grace" && teamGivesPro(NOW - 29 * DAY, NOW, "year") && GRACE_DAYS.year === 30, "a year that ended 29 days ago: still in grace");
+check(licenseStanding(NOW - 30 * DAY, NOW, "year").state === "ended" && !teamGivesPro(NOW - 30 * DAY, NOW, "year"), "30 days after a year ended: PRO ends");
+check(graceMs(null) === 2 * DAY && licenseStanding(NOW - 2 * DAY, NOW).state === "ended", "no record of what it was paid for (paid before this was kept): as a month");
+check(paidForMonths(1) === "month" && paidForMonths(6) === "month" && paidForMonths(12) === "year" && paidForMonths(24) === "year", "an invoice for 12 months or more counts as a year; fewer, as a month");
 
 console.log("Join codes and email lists");
 const code = newJoinCode(random);
@@ -147,11 +157,14 @@ check(teamMonthKey(Date.UTC(2026, 0, 31)) + 1 === teamMonthKey(Date.UTC(2026, 1,
   "the allowance runs by calendar month");
 
 console.log("PRO and its allowance for members");
-const member = (fields) => ({ ...readUserDoc({ teamId: "t1", ...fields }), teamPaidUntil: fields.teamPaidUntil ?? null });
-check(readUserDoc({ teamId: "t1", teamPaidUntil: NOW + DAY }).teamPaidUntil === null, "the paid-until date is never read from the account itself");
+const member = (fields) => ({ ...readUserDoc({ teamId: "t1", ...fields }), teamPaidUntil: fields.teamPaidUntil ?? null, teamPaidFor: fields.teamPaidFor ?? null });
+check(readUserDoc({ teamId: "t1", teamPaidUntil: NOW + DAY, teamPaidFor: "year" }).teamPaidUntil === null && readUserDoc({ teamPaidFor: "year" }).teamPaidFor === null,
+  "the paid-until date and what it was for are never read from the account itself");
 check(tierOf(member({ teamPaidUntil: NOW + DAY }), "none", NOW) === "pro", "a member of a paid team has PRO");
-check(tierOf(member({ teamPaidUntil: NOW - 2 * DAY }), "none", NOW) === "pro", "and during the grace days");
-check(tierOf(member({ teamPaidUntil: NOW - 8 * DAY }), "none", NOW) === "free" && tierOf(member({}), "none", NOW) === "free", "not after them, nor while unpaid");
+check(tierOf(member({ teamPaidUntil: NOW - DAY, teamPaidFor: "month" }), "none", NOW) === "pro" && tierOf(member({ teamPaidUntil: NOW - 20 * DAY, teamPaidFor: "year" }), "none", NOW) === "pro",
+  "and during the grace days (2 after a month, 30 after a year)");
+check(tierOf(member({ teamPaidUntil: NOW - 2 * DAY, teamPaidFor: "month" }), "none", NOW) === "free" && tierOf(member({ teamPaidUntil: NOW - 30 * DAY, teamPaidFor: "year" }), "none", NOW) === "free"
+  && tierOf(member({}), "none", NOW) === "free", "not after them, nor while unpaid");
 check(!onTeamPro({ teamId: null, teamPaidUntil: NOW + DAY }, NOW), "no team, no team PRO");
 const fresh = allowanceFor(member({ teamPaidUntil: NOW + DAY }), "pro", NOW);
 check(fresh.cycleCap === PAID_TOKEN_CAP && fresh.cycleUsed === 0 && !fresh.blocked, "the same monthly allowance as a PRO subscriber");
@@ -185,7 +198,7 @@ check(await throwsWith(() => createTeam(db, ada, { name: " ", seats: 5 }, NOW, r
 const team = await createTeam(db, ada, { name: "  Lagos   Robotics ", kind: "school", seats: 5, seatPrice: 1, currency: "NGN" }, NOW, random);
 check(team.name === "Lagos Robotics" && team.kind === "school" && team.seats === 5 && team.paidUntil === null && team.memberCount === 1,
   "started: unpaid, 5 seats, its maker on it");
-check(team.seatPrice === null && team.currency === "USD", "at the normal price: a special one is the admin page's to set");
+check(team.seatPrice === null && team.currency === "NGN", "at the normal price, in naira: a special one is the admin page's to set");
 check((await db.doc(`teamMembers/ada`).get()).data().role === "admin" && (await db.doc("users/ada").get()).data().teamId === team.id, "its maker is its admin");
 check(normalizeJoinCode(team.joinCode) === team.joinCode, "it has a join code");
 check(await throwsWith(() => createTeam(db, ada, { name: "Second", seats: 5 }, NOW, random), /already on a team/, "on_team"), "one team per account");
@@ -225,40 +238,43 @@ check(await throwsWith(() => quoteFor(db, "ben", { action: "renew", period: "mon
 check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "term" }, NOW), /a month or a year/), "a school term can't be bought (a page from before still open)");
 check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "week" }, NOW), /a month or a year/), "nor anything else");
 const yearQuote = await quoteFor(db, "ada", { action: "renew", period: "year", seats: 6 }, NOW);
-check(yearQuote.amount === 33000 && yearQuote.months === 12 && yearQuote.paidUntilAfter === addMonths(NOW, 12), "a year for 6 seats: $330 (11 months), paid for 12 months");
+check(yearQuote.amount === 43843800 && yearQuote.currency === "NGN" && yearQuote.months === 12 && yearQuote.paidUntilAfter === addMonths(NOW, 12), "a year for 6 seats: ₦438,438 (11 months), paid for 12 months");
 check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "month", seats: 2 }, NOW), /5 to 2000 seats/), "never fewer than 5 seats");
 check(await throwsWith(() => quoteFor(db, "ada", { action: "add_seats", extra: 2 }, NOW), /while the license is paid/), "seats are added to a paid license only");
 const quote = await quoteFor(db, "ada", { action: "renew", period: "month", seats: 6 }, NOW);
-check(quote.amount === 3000 && quote.currency === "USD" && quote.seats === 6 && quote.months === 1 && quote.paidUntilAfter === addMonths(NOW, 1), "a month for 6 seats: $30, paid for 1 month");
+check(quote.amount === 3985800 && quote.currency === "NGN" && quote.seats === 6 && quote.months === 1 && quote.paidUntilAfter === addMonths(NOW, 1), "a month for 6 seats: ₦39,858, paid for 1 month");
 const payment = (over = {}) => ({
-  reference: "T-1", amount: 3000, currency: "USD", paid_at: new Date(NOW + 60000).toISOString(),
+  reference: "T-1", amount: 3985800, currency: "NGN", paid_at: new Date(NOW + 60000).toISOString(),
   customer: { email: "ada@school.ng" }, metadata: { uid: "ada", kind: TEAM_KIND, quoteId: quote.id }, ...over,
 });
 check(await throwsWith(() => applyTeamPayment(db, "ben", payment(), NOW), /doesn't belong/), "someone else's payment is refused");
-check(await throwsWith(() => applyTeamPayment(db, "ada", payment({ amount: 2999 }), NOW), /less than the price/), "less than the price is refused");
-check(await throwsWith(() => applyTeamPayment(db, "ada", payment({ currency: "NGN" }), NOW), /wrong currency/), "another currency is refused");
+check(await throwsWith(() => applyTeamPayment(db, "ada", payment({ amount: 3985799 }), NOW), /less than the price/), "less than the price is refused");
+check(await throwsWith(() => applyTeamPayment(db, "ada", payment({ currency: "USD" }), NOW), /wrong currency/), "another currency is refused");
 check(await throwsWith(() => applyTeamPayment(db, "ada", payment({ metadata: { uid: "ada", kind: TEAM_KIND, quoteId: "nope" } }), NOW), /couldn't find the price/), "an unknown price is refused");
 const applied = await applyTeamPayment(db, "ada", payment(), NOW);
 const paidUntil = addMonths(NOW + 60000, 1);
 check(applied.applied && applied.paidUntil === paidUntil && applied.seats === 6, "paid: a month from the payment, 6 seats");
+check((await db.doc(`teams/${team.id}`).get()).data().paidFor === "month", "kept: it was paid for a month (its grace days follow)");
 const again = await applyTeamPayment(db, "ada", payment(), NOW);
 check(again.already && !again.applied && again.paidUntil === paidUntil, "reported again (the app's check and the webhook): counted once");
 check(await throwsWith(() => applyTeamPayment(db, "ada", payment({ reference: "T-2" }), NOW), /paid already/), "one price can't be paid for twice");
 const rows = (await teamDetail(db, team.id, NOW)).payments;
-check(rows.length === 1 && rows[0].kind === "online" && rows[0].amount === 3000 && rows[0].period === "month" && rows[0].months === 1, "the payment is listed");
+check(rows.length === 1 && rows[0].kind === "online" && rows[0].amount === 3985800 && rows[0].period === "month" && rows[0].months === 1, "the payment is listed");
 
 console.log("Members have PRO");
-const benDoc = { ...readUserDoc((await db.doc("users/ben").get()).data()), teamPaidUntil: paidUntil };
+const benDoc = { ...readUserDoc((await db.doc("users/ben").get()).data()), teamPaidUntil: paidUntil, teamPaidFor: "month" };
 check(tierOf(benDoc, "none", NOW + DAY) === "pro", "Ben has PRO while it's paid");
-check(tierOf(benDoc, "none", paidUntil + 6 * DAY) === "pro" && tierOf(benDoc, "none", paidUntil + 7 * DAY) === "free", "for 7 days after it ends, then Free");
+check(tierOf(benDoc, "none", paidUntil + 2 * DAY - 1) === "pro" && tierOf(benDoc, "none", paidUntil + 2 * DAY) === "free", "for 2 days after a month ends, then Free");
+check(tierOf({ ...benDoc, teamPaidFor: "year" }, "none", paidUntil + 29 * DAY) === "pro" && tierOf({ ...benDoc, teamPaidFor: "year" }, "none", paidUntil + 30 * DAY) === "free", "for 30 days after a year ends");
+check(onTeamPro({ teamId: team.id, teamPaidUntil: paidUntil, teamPaidFor: null }, paidUntil + DAY) && !onTeamPro({ teamId: team.id, teamPaidUntil: paidUntil, teamPaidFor: null }, paidUntil + 2 * DAY), "paid before this was kept: as a month");
 const status = await teamForStatus(db, ben, { teamId: team.id }, NOW + DAY);
-check(status?.state === "active" && status.role === "member" && status.graceUntil === paidUntil + GRACE_MS, "the app's status shows the license and when PRO ends");
+check(status?.state === "active" && status.role === "member" && status.graceUntil === paidUntil + 2 * DAY, "the app's status shows the license and when PRO ends");
 const graceStatus = await teamForStatus(db, ben, { teamId: team.id }, paidUntil + DAY);
 check(graceStatus?.state === "grace", "and shows the grace days once it has ended");
 
 console.log("Adding seats part-way");
 const addQuote = await quoteFor(db, "ada", { action: "add_seats", extra: 2 }, NOW + DAY);
-check(addQuote.amount === addSeatsPrice(2, 500, paidUntil, NOW + DAY) && addQuote.seats === 8 && addQuote.months === 0, "2 seats for the days left");
+check(addQuote.amount === addSeatsPrice(2, 664300, paidUntil, NOW + DAY) && addQuote.seats === 8 && addQuote.months === 0, "2 seats for the days left");
 const added = await applyTeamPayment(db, "ada", { ...payment({ reference: "T-3", amount: addQuote.amount }), metadata: { uid: "ada", kind: TEAM_KIND, quoteId: addQuote.id } }, NOW + DAY);
 check(added.seats === 8 && added.paidUntil === paidUntil, "8 seats, the same end date");
 
@@ -297,6 +313,10 @@ check(deePage.team?.role === "member" && deePage.team.members === undefined && d
 const invoiced = await recordInvoice(db, school.id, { months: 12, amount: 1200000, note: "Bank transfer, INV-7" }, NOW);
 check(invoiced.paidUntil === addMonths(NOW, 12) && invoiced.seats === 40, "an invoice paid: a year");
 check((await teamDetail(db, school.id, NOW)).payments[0].kind === "invoice", "listed as an invoice");
+check(invoiced.paidFor === "year" && (await teamDetail(db, school.id, NOW)).graceUntil === invoiced.paidUntil + 30 * DAY, "an invoice for a year: 30 grace days after it");
+const monthInvoice = await recordInvoice(db, school.id, { months: 1 }, NOW);
+check(monthInvoice.paidFor === "month" && monthInvoice.paidUntil === addMonths(invoiced.paidUntil, 1) && (await teamDetail(db, school.id, NOW)).graceUntil === monthInvoice.paidUntil + 2 * DAY,
+  "then one for a month: 2 grace days after it");
 check(await throwsWith(() => recordInvoice(db, school.id, { months: 0 }, NOW), /1 to 36 months/), "an invoice pays for 1 to 36 months");
 check(await throwsWith(() => adminUpdateTeam(db, team.id, { seats: 1 }), /5 to 2000 seats/), "seats can't go below 5");
 const repriced = await adminUpdateTeam(db, school.id, { seatPrice: "", paidUntil: null });
@@ -322,6 +342,27 @@ check((await acceptInvites(db, { uid: "lost", email: "lost@x.io", emailVerified:
 await db.doc(`teamInvites/${inviteId(school.id, "nah@x.io")}`).set({ teamId: school.id, email: "nah@x.io", role: "member", invitedAt: NOW });
 await declineInvite(db, { uid: "nah", email: "nah@x.io", emailVerified: true }, school.id);
 check(!(await db.doc(`teamInvites/${inviteId(school.id, "nah@x.io")}`).get()).exists, "an invitation can be turned down");
+
+console.log("Paid for a year online: 30 grace days");
+const yan = { uid: "yan", email: "yan@school.ng", emailVerified: true };
+await db.doc("users/yan").set({ subscriptionStatus: "none" });
+const yTeam = await createTeam(db, yan, { name: "Yearly Club", seats: 5 }, NOW, random);
+const yQuote = await quoteFor(db, "yan", { action: "renew", period: "year", seats: 5 }, NOW);
+const yPaid = await applyTeamPayment(db, "yan", {
+  reference: "Y-1", amount: yQuote.amount, currency: "NGN", paid_at: new Date(NOW).toISOString(),
+  customer: { email: "yan@school.ng" }, metadata: { uid: "yan", kind: TEAM_KIND, quoteId: yQuote.id },
+}, NOW);
+const yStatus = await teamForStatus(db, yan, { teamId: yTeam.id }, NOW);
+check(yQuote.amount === 36536500 && yPaid.paidUntil === addMonths(NOW, 12) && (await db.doc(`teams/${yTeam.id}`).get()).data().paidFor === "year" && yStatus?.graceUntil === yPaid.paidUntil + 30 * DAY,
+  "5 seats for a year, ₦365,365: PRO for 30 days after it ends");
+
+console.log("Other currencies need a special price");
+check(await throwsWith(() => createTeam(db, null, { name: "Accra Coders", seats: 5, currency: "GHS", ownerEmail: "a@coders.gh" }, NOW, random), /no normal seat price in GHS/), "a team in cedis without a price is refused");
+const accra = await createTeam(db, null, { name: "Accra Coders", seats: 5, currency: "GHS", seatPrice: "8000", ownerEmail: "a@coders.gh" }, NOW, random);
+check(accra.currency === "GHS" && accra.seatPrice === 8000, "with a special price, it's made");
+check(await throwsWith(() => adminUpdateTeam(db, accra.id, { seatPrice: "" }), /no normal seat price in GHS/), "and its price can't be cleared while it's in cedis");
+const dollars = await adminUpdateTeam(db, accra.id, { seatPrice: "", currency: "USD" });
+check(dollars.currency === "USD" && dollars.seatPrice === null, "in dollars it can (the normal $5 then)");
 
 console.log(bad ? `\n${bad} check(s) failed.` : "\nAll team checks passed.");
 process.exit(bad ? 1 : 0);

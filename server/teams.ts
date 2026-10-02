@@ -30,7 +30,7 @@ import { requireFirebaseAuth, getOrCreateUserDoc, forgetTeam, type UserQuotaDoc 
 import { paymentFacts, earningId } from "./creators";
 import {
   DEFAULT_SEAT_PRICE, DEFAULT_TEAM_CURRENCY, MIN_SEATS, MAX_SEATS, PERIODS, TEAM_KIND, MAX_INVITES_AT_ONCE,
-  isPeriod, validSeats, renewalPrice, addSeatsPrice, renewedUntil, licenseStanding, emailList, newJoinCode, normalizeJoinCode,
+  normalSeatPrice, paidForMonths, isPeriod, validSeats, renewalPrice, addSeatsPrice, renewedUntil, licenseStanding, emailList, newJoinCode, normalizeJoinCode,
   type TeamPeriod, type LicenseState,
 } from "./teamRules";
 
@@ -63,10 +63,12 @@ export interface TeamRecord {
   name: string;
   kind: TeamKind;
   seats: number;
-  /** A special price a seat a month, in the currency's smallest unit; null for DEFAULT_SEAT_PRICE. */
+  /** A special price a seat a month, in the currency's smallest unit; null for the normal one in its currency. */
   seatPrice: number | null;
   currency: string;
   paidUntil: number | null;
+  /** What it was paid for last, a month or a year: its grace days follow from it. Null before any payment. */
+  paidFor: TeamPeriod | null;
   joinCode: string;
   joinOpen: boolean;
   memberCount: number;
@@ -106,6 +108,7 @@ export function teamOf(id: string, d: any): TeamRecord {
     seatPrice: typeof d.seatPrice === "number" && Number.isFinite(d.seatPrice) ? d.seatPrice : null,
     currency: typeof d.currency === "string" && /^[A-Z]{3}$/.test(d.currency) ? d.currency : DEFAULT_TEAM_CURRENCY,
     paidUntil: time(d.paidUntil),
+    paidFor: isPeriod(d.paidFor) ? d.paidFor : null,
     joinCode: typeof d.joinCode === "string" ? d.joinCode : "",
     joinOpen: d.joinOpen !== false,
     memberCount: Math.max(0, num(d.memberCount)),
@@ -127,8 +130,19 @@ export function memberOf(uid: string, d: any): MemberRecord {
   };
 }
 
-/** What a seat costs this team a month. */
-export const seatPriceOf = (t: TeamRecord) => t.seatPrice ?? DEFAULT_SEAT_PRICE;
+/**
+ * What a seat costs this team a month: its special price, or the normal one
+ * in its currency. 0 when neither is set, which nobody can be charged (the
+ * admin page asks for a special price in such a currency).
+ */
+export const seatPriceOf = (t: TeamRecord) => t.seatPrice ?? normalSeatPrice(t.currency) ?? 0;
+
+/** A currency needs a special price unless it has a normal one. */
+function priceOrRefuse(currency: string, seatPrice: number | null): void {
+  if (seatPrice === null && normalSeatPrice(currency) === null) {
+    throw new TeamError(`There's no normal seat price in ${currency}. Set a special price for this team, or use NGN.`);
+  }
+}
 
 const EMAIL_RE = /^[^\s@/]+@[^\s@/]+\.[^\s@/]+$/;
 
@@ -246,6 +260,7 @@ export async function createTeam(db: Db, by: Who | null, input: CreateTeamInput,
   const seats = seatsOrRefuse(input.seats ?? MIN_SEATS, MIN_SEATS);
   const seatPrice = by ? null : cleanSeatPrice(input.seatPrice);
   const currency = by ? DEFAULT_TEAM_CURRENCY : cleanCurrency(input.currency);
+  priceOrRefuse(currency, seatPrice);
   let ownerEmail: string;
   if (by) {
     if (!by.email) throw new TeamError("Your account needs an email address to start a team.");
@@ -512,7 +527,7 @@ export async function quoteFor(db: Db, adminUid: string, input: { action?: unkno
         paidUntilAfter: renewedUntil(team.paidUntil, now, months),
       };
     } else {
-      if (licenseStanding(team.paidUntil, now).state !== "active") {
+      if (licenseStanding(team.paidUntil, now, team.paidFor).state !== "active") {
         throw new TeamError("Seats can be added while the license is paid. Renew it instead, with the seats you need.", 409);
       }
       const extra = typeof input.extra === "string" && input.extra.trim() !== "" ? Number(input.extra) : input.extra;
@@ -576,14 +591,16 @@ export async function applyTeamPayment(db: Db, uid: string, data: any, now: numb
     if (pay.amount < num(q.amount)) throw new TeamError("The payment was less than the price.", 402);
     let seats = team.seats;
     let paidUntil = team.paidUntil;
+    let paidFor = team.paidFor;
     if (q.action === "renew") {
       seats = num(q.seats, team.seats);
       paidUntil = renewedUntil(team.paidUntil, pay.paidAt, num(q.months, 1));
+      paidFor = isPeriod(q.period) ? q.period : paidForMonths(num(q.months, 1));
     } else {
       seats = team.seats + num(q.extra);
     }
     seats = Math.min(MAX_SEATS, Math.max(MIN_SEATS, seats));
-    tx.set(teamRef(db, team.id), { seats, paidUntil }, { merge: true });
+    tx.set(teamRef(db, team.id), { seats, paidUntil, ...(paidFor ? { paidFor } : {}) }, { merge: true });
     tx.set(quoteRef, { paidBy: pay.reference }, { merge: true });
     tx.set(payRef, {
       reference: pay.reference,
@@ -621,12 +638,13 @@ export async function recordInvoice(db: Db, rawTeamId: unknown, input: { months?
     const seats = input.seats === undefined || input.seats === null || input.seats === "" ? team.seats : seatsOrRefuse(input.seats, team.memberCount);
     const currency = input.currency === undefined || input.currency === null || input.currency === "" ? team.currency : cleanCurrency(input.currency);
     const paidUntil = renewedUntil(team.paidUntil, now, months);
-    tx.set(teamRef(db, team.id), { seats, paidUntil }, { merge: true });
+    const paidFor = paidForMonths(months);
+    tx.set(teamRef(db, team.id), { seats, paidUntil, paidFor }, { merge: true });
     tx.set(ref, {
       reference: null, teamId: team.id, kind: "invoice", action: "renew", period: null, months, seats, extra: 0,
       amount: amount ?? 0, currency, paidAt: now, payerUid: null, payerEmail: null, note, createdAt: now,
     });
-    return { ...team, seats, paidUntil };
+    return { ...team, seats, paidUntil, paidFor };
   });
   forgetTeam(updated.id);
   return updated;
@@ -654,6 +672,8 @@ export async function adminUpdateTeam(db: Db, rawTeamId: unknown, patch: { name?
     const team = await readTeam(tx, db, teamId);
     if (patch.seats !== undefined) changes.seats = seatsOrRefuse(patch.seats, team.memberCount);
     if (!Object.keys(changes).length) throw new TeamError("Nothing to change.");
+    const next = teamOf(team.id, { ...team, ...changes });
+    priceOrRefuse(next.currency, next.seatPrice);
     tx.set(teamRef(db, team.id), changes, { merge: true });
     return teamOf(team.id, { ...team, ...changes });
   });
@@ -754,7 +774,7 @@ export async function teamDetail(db: Db, rawTeamId: unknown, now: number): Promi
     .map((d: any) => memberOf(d.id, d.data()))
     .map((m: MemberRecord) => ({ uid: m.uid, email: m.email, emailVerified: m.emailVerified, role: m.role, joinedAt: m.joinedAt, adminsCanView: m.adminsCanView }))
     .sort((a: MemberRow, b: MemberRow) => (a.role === b.role ? a.joinedAt - b.joinedAt : a.role === "admin" ? -1 : 1));
-  const standing = licenseStanding(team.paidUntil, now);
+  const standing = licenseStanding(team.paidUntil, now, team.paidFor);
   return {
     id: team.id,
     name: team.name,
@@ -837,7 +857,7 @@ export async function teamForStatus(db: Db, who: Who, doc: Pick<UserQuotaDoc, "t
   }
   if (!teamSnap.exists) return null;
   const team = teamOf(teamId, teamSnap.data());
-  const standing = licenseStanding(team.paidUntil, now);
+  const standing = licenseStanding(team.paidUntil, now, team.paidFor);
   return { id: team.id, name: team.name, kind: team.kind, role: member.role, state: standing.state, paidUntil: team.paidUntil, graceUntil: standing.graceUntil };
 }
 
@@ -863,7 +883,7 @@ export async function listTeams(db: Db, now: number): Promise<TeamSummary[]> {
   return snap.docs
     .map((d: any) => {
       const t = teamOf(d.id, d.data());
-      const s = licenseStanding(t.paidUntil, now);
+      const s = licenseStanding(t.paidUntil, now, t.paidFor);
       return {
         id: t.id, name: t.name, kind: t.kind, state: s.state, paidUntil: t.paidUntil, graceUntil: s.graceUntil,
         seats: t.seats, memberCount: t.memberCount, seatPrice: seatPriceOf(t), customSeatPrice: t.seatPrice,
@@ -873,11 +893,14 @@ export async function listTeams(db: Db, now: number): Promise<TeamSummary[]> {
     .sort((a: TeamSummary, b: TeamSummary) => b.createdAt - a.createdAt);
 }
 
-/** Every team's paid-until date, for the admin page's plan column. */
-export async function teamPaidUntilMap(db: Db): Promise<Map<string, number | null>> {
-  const snap = await db.collection(TEAMS).select("paidUntil").get();
-  const map = new Map<string, number | null>();
-  for (const d of snap.docs) map.set(d.id, time(d.get("paidUntil")));
+/** Every team's paid-until date and what it was paid for (its grace days), for the admin page's plan column. */
+export async function teamLicenseMap(db: Db): Promise<Map<string, { paidUntil: number | null; paidFor: TeamPeriod | null }>> {
+  const snap = await db.collection(TEAMS).select("paidUntil", "paidFor").get();
+  const map = new Map<string, { paidUntil: number | null; paidFor: TeamPeriod | null }>();
+  for (const d of snap.docs) {
+    const paidFor = d.get("paidFor");
+    map.set(d.id, { paidUntil: time(d.get("paidUntil")), paidFor: isPeriod(paidFor) ? paidFor : null });
+  }
   return map;
 }
 

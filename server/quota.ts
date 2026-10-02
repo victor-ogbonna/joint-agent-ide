@@ -5,7 +5,7 @@ import { loadAdminConfig } from "./adminConfig";
 import { accessLevelFor, bypassesLaunchLock, LAUNCH_LOCKED_CODE, LAUNCH_LOCKED_MESSAGE } from "./access";
 import { hasPaidPro, standing, type BillingState } from "./billing";
 import { isOnTrial } from "./referrals";
-import { teamGivesPro, teamMonthKey, nextTeamMonthStart } from "./teamRules";
+import { teamGivesPro, teamMonthKey, nextTeamMonthStart, isPeriod, type TeamPeriod } from "./teamRules";
 import { noteActive } from "./stats";
 
 /** Sentinel subscription status for accounts whose usage is never counted. */
@@ -119,8 +119,9 @@ export interface UserQuotaDoc {
   cycleMonth: number | null;
   /** The team or school license this account is on (server/teams.ts). */
   teamId: string | null;
-  /** When that license is paid until. Read from the team, never stored here (teamPaidUntilFor). */
+  /** When that license is paid until, and what it was paid for (its grace days). Read from the team, never stored here (teamLicenseFor). */
   teamPaidUntil: number | null;
+  teamPaidFor: TeamPeriod | null;
   /** The calendar month (teamMonthKey) teamMonthTokens counts. */
   teamMonth: number | null;
   teamMonthTokens: number;
@@ -154,6 +155,7 @@ const DEFAULT_USER_DOC: UserQuotaDoc = {
   cycleMonth: null,
   teamId: null,
   teamPaidUntil: null,
+  teamPaidFor: null,
   teamMonth: null,
   teamMonthTokens: 0,
 };
@@ -190,6 +192,7 @@ export function readUserDoc(data: any): UserQuotaDoc {
     cycleMonth: typeof data.cycleMonth === "number" && Number.isFinite(data.cycleMonth) ? data.cycleMonth : null,
     teamId: typeof data.teamId === "string" && data.teamId ? data.teamId : null,
     teamPaidUntil: null,
+    teamPaidFor: null,
     teamMonth: typeof data.teamMonth === "number" && Number.isFinite(data.teamMonth) ? data.teamMonth : null,
     teamMonthTokens: num(data.teamMonthTokens),
   };
@@ -198,27 +201,30 @@ export function readUserDoc(data: any): UserQuotaDoc {
 // A team's paid-until date, kept a minute so a member's every request
 // doesn't read the team too. server/teams.ts forgets a team when it changes.
 const TEAM_CACHE_MS = 60_000;
-const teamCache = new Map<string, { at: number; paidUntil: number | null }>();
+const teamCache = new Map<string, { at: number; paidUntil: number | null; paidFor: TeamPeriod | null }>();
 
-/** When a team's license is paid until (teams/{id}), or null. */
-export async function teamPaidUntilFor(teamId: string, now = Date.now()): Promise<number | null> {
+/** When a team's license is paid until (teams/{id}), or null, and what it was paid for last. */
+export async function teamLicenseFor(teamId: string, now = Date.now()): Promise<{ paidUntil: number | null; paidFor: TeamPeriod | null }> {
   const hit = teamCache.get(teamId);
-  if (hit && now - hit.at < TEAM_CACHE_MS) return hit.paidUntil;
+  if (hit && now - hit.at < TEAM_CACHE_MS) return { paidUntil: hit.paidUntil, paidFor: hit.paidFor };
   const snap = await adminDb.collection("teams").doc(teamId).get();
   const v = snap.exists ? snap.get("paidUntil") : null;
+  const f = snap.exists ? snap.get("paidFor") : null;
   const paidUntil = typeof v === "number" && Number.isFinite(v) ? v : null;
-  teamCache.set(teamId, { at: now, paidUntil });
-  return paidUntil;
+  const paidFor = isPeriod(f) ? f : null;
+  teamCache.set(teamId, { at: now, paidUntil, paidFor });
+  return { paidUntil, paidFor };
 }
 
 export function forgetTeam(teamId: string): void {
   teamCache.delete(teamId);
 }
 
-/** The account with its team's paid-until date filled in. */
+/** The account with its team's paid-until date (and what it was paid for) filled in. */
 export async function withTeam(doc: UserQuotaDoc): Promise<UserQuotaDoc> {
   if (!doc.teamId) return doc;
-  return { ...doc, teamPaidUntil: await teamPaidUntilFor(doc.teamId) };
+  const license = await teamLicenseFor(doc.teamId);
+  return { ...doc, teamPaidUntil: license.paidUntil, teamPaidFor: license.paidFor };
 }
 
 export async function getOrCreateUserDoc(uid: string): Promise<UserQuotaDoc> {
@@ -226,7 +232,7 @@ export async function getOrCreateUserDoc(uid: string): Promise<UserQuotaDoc> {
   const snap = await ref.get();
   if (!snap.exists) {
     const now = FieldValue.serverTimestamp();
-    const { teamPaidUntil: _notStored, ...fields } = DEFAULT_USER_DOC;
+    const { teamPaidUntil: _notStored, teamPaidFor: _notStoredEither, ...fields } = DEFAULT_USER_DOC;
     await ref.set({ ...fields, createdAt: now, updatedAt: now });
     return { ...DEFAULT_USER_DOC };
   }
@@ -364,8 +370,8 @@ export function tierOf(doc: UserQuotaDoc, level: string, now = Date.now()): Tier
 }
 
 /** Whether the account has PRO through a team license. */
-export function onTeamPro(doc: Pick<UserQuotaDoc, "teamId" | "teamPaidUntil">, now: number): boolean {
-  return !!doc.teamId && teamGivesPro(doc.teamPaidUntil, now);
+export function onTeamPro(doc: Pick<UserQuotaDoc, "teamId" | "teamPaidUntil" | "teamPaidFor">, now: number): boolean {
+  return !!doc.teamId && teamGivesPro(doc.teamPaidUntil, now, doc.teamPaidFor);
 }
 
 export function utcDay(ms = Date.now()): string {

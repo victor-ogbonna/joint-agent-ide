@@ -327,7 +327,7 @@ function TeamCard({ t, get, post, onChanged }: { t: TeamSummary; get: AdminGet; 
           </div>
           <div className="sm:col-span-2 lg:col-span-5">
             <button type="submit" className={button} disabled={busy}>{busy ? <Loader2 size={13} className="animate-spin" /> : <Receipt size={13} />} Record payment</button>
-            <p className="mt-1 text-[11px] text-[var(--text-subtle)]">The months are added after the current end, or from today if it has ended.</p>
+            <p className="mt-1 text-[11px] text-[var(--text-subtle)]">The months are added after the current end, or from today if it has ended. 1 year gives 30 grace days after it ends; 1 or 6 months, 2.</p>
           </div>
         </form>
       )}
