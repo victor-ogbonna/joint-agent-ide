@@ -3482,10 +3482,10 @@ export default function App() {
           onClick={() => setAppMode(mode)}
           aria-pressed={appMode === mode}
           className={`flex items-center justify-center gap-1.5 rounded-md font-semibold tracking-wide transition-all duration-200 ${
-            fullWidth ? "flex-1 min-h-[40px] text-[13px]" : "px-4 min-h-[32px] text-[12px]"
+            fullWidth ? "flex-1 min-h-[34px] text-[12px]" : "px-4 min-h-[32px] text-[12px]"
           } ${appMode === mode ? `${on} shadow-sm` : "text-[var(--text-muted)] hover:text-[var(--text-main)]"}`}
         >
-          <Icon size={fullWidth ? 16 : 14} />
+          <Icon size={14} />
           {label}
         </button>
       ))}
@@ -3496,12 +3496,17 @@ export default function App() {
     <div className="app-shell h-full bg-[var(--bg-root)] text-[var(--text-main)] flex flex-col antialiased overflow-hidden">
       {/* Universal Header — Glassmorphism */}
       <header className="border-b border-[var(--border-main)] header-glass shrink-0 z-30">
-        <div className="h-12 px-2 sm:px-4 flex items-center justify-between gap-2">
+        <div className="relative h-12 px-2 sm:px-4 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
-          {isNarrow ? (
-            // On a phone the plan takes the logo's place: a way up for free
-            // accounts, a quiet badge for PRO ones — and nothing until the
-            // server has said which, so PRO never flashes an upgrade.
+          {isNarrow && mobilePane === "files" ? (
+            // Workspace on a phone: the logo. The account row just below
+            // already shows the plan (PRO, or Upgrade to Pro).
+            <img src="/logo.png" alt="Joint-Agent IDE" className="w-7 h-7 rounded-lg shrink-0 shadow-md select-none" />
+          ) : isNarrow ? (
+            // On a phone's Agent and Code sections the plan takes the logo's
+            // place: a way up for free accounts, a quiet badge for PRO ones —
+            // and nothing until the server has said which, so PRO never
+            // flashes an upgrade.
             accountTier === null ? null : isPro ? (
               <span className="pro-badge h-9 px-1 text-[15px] select-none" title={trialActive && trialEndsAt !== null ? `Free PRO trial, ends ${formatDay(trialEndsAt)}` : teamStatus && (teamStatus.state === "active" || teamStatus.state === "grace") ? `PRO through ${teamStatus.name}` : "You're on PRO"}>
                 <Zap size={16} fill="currentColor" strokeWidth={1.5} aria-hidden="true" />
@@ -3517,24 +3522,24 @@ export default function App() {
               </button>
             )
           ) : (
-            <div className="flex items-center gap-2.5 logo-accent cursor-default select-none">
-              <img src="/logo.png" alt="Joint-Agent IDE" className="w-7 h-7 rounded-lg shrink-0 shadow-md" />
-              <div className="flex flex-col">
-                <h1 className="font-display font-bold text-[13px] text-[var(--text-main)] tracking-wide leading-tight flex items-center gap-1.5">
-                  Joint-Agent <span className="gradient-text">IDE</span>
-                  <span className="text-[8px] font-mono font-semibold text-[var(--text-subtle)] bg-[var(--bg-surface)] border border-[var(--border-main)] rounded px-1 py-px leading-none">
-                    v1.0
-                  </span>
-                </h1>
-                <p className="text-[8px] text-[var(--text-subtle)] font-mono tracking-[0.2em] uppercase">IoT · Blockchain · AI</p>
-              </div>
-            </div>
+            modeSwitcher(false)
           )}
-
-          {!isNarrow && <div className="h-5 w-px bg-[var(--border-main)] mx-1"></div>}
-
-          {!isNarrow && modeSwitcher(false)}
         </div>
+
+        {/* Desktop: the logo with the name beside it, in the middle of the
+            bar (beside rather than beneath, so it fits the bar's height and
+            the name stays readable). Held at the centre of the whole bar,
+            whatever is either side of it. */}
+        {!isNarrow && (
+          <div className="absolute left-1/2 top-1/2" style={{ transform: "translate(-50%, -50%)" }}>
+            <div className="flex items-center gap-2 logo-accent cursor-default select-none">
+              <img src="/logo.png" alt="" className="w-7 h-7 rounded-lg shrink-0 shadow-md" />
+              <h1 className="font-display font-bold text-[12px] text-[var(--text-main)] tracking-wide leading-tight whitespace-nowrap">
+                Joint-Agent <span className="gradient-text">IDE</span>
+              </h1>
+            </div>
+          </div>
+        )}
 
         {/* Global Controls */}
         <div className="flex items-center gap-2 min-w-0">

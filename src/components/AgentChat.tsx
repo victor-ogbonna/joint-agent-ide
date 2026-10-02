@@ -1048,7 +1048,7 @@ export default function AgentChat({
           <button
             type="submit"
             disabled={!input.trim() || isRecording}
-            className="p-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-md transition shrink-0"
+            className="p-2 bg-[var(--accent-primary)] hover:opacity-90 disabled:opacity-40 text-white rounded-md transition shrink-0"
           >
             <Send size={14} />
           </button>
