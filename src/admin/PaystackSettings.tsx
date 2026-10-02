@@ -7,7 +7,9 @@ import { formatMoney } from "../lib/plans";
  * goes through (PRO monthly, PRO yearly, team licenses) and the two PRO
  * plans, each shown as it is and editable on its own. The secret key is
  * masked until Show; each plan is checked with Paystack, so the page says
- * what customers are really charged.
+ * what customers are really charged. Moving from test keys to live ones (or
+ * back) changes both keys at once: the server refuses a test key beside a
+ * live one, so a new key of the other kind asks for its partner too.
  */
 
 type Get = (path: string) => Promise<Response | null>;
@@ -37,6 +39,10 @@ const EVERY: Record<string, string> = {
   hourly: "every hour", daily: "every day", weekly: "every week", monthly: "every month",
   quarterly: "every 3 months", biannually: "every 6 months", annually: "every year",
 };
+
+/** "test" or "live", from a key's prefix (sk_test_, pk_live_...), as the server reads it. */
+const modeOf = (key: string | null | undefined): "test" | "live" | null =>
+  (!key ? null : /^[sp]k_test_/.test(key) ? "test" : /^[sp]k_live_/.test(key) ? "live" : null);
 
 const input = "w-full min-w-0 bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-lg px-3 py-2 text-sm font-mono text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] transition";
 const smallButton = "inline-flex items-center gap-1 rounded-md border border-[var(--border-main)] px-2 py-1 text-[11px] font-medium text-[var(--text-main)] hover:bg-[var(--bg-hover)] disabled:opacity-50";
@@ -72,6 +78,8 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
   const [checked, setChecked] = useState<Checked | null | undefined>(undefined);
   const [editing, setEditing] = useState<Field | null>(null);
   const [value, setValue] = useState("");
+  /** The other key, when the one typed is of the other kind (test or live): both are saved together. */
+  const [pair, setPair] = useState("");
   const [showTyped, setShowTyped] = useState(false);
   const [secret, setSecret] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -106,7 +114,15 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
     setShowTyped(false);
     setMessage(null);
     setValue(field === "secretKey" ? "" : (config?.[field] ?? ""));
+    setPair("");
   };
+
+  // The secret key's kind, from its masked start ("sk_liv…", "sk_tes…").
+  const secretMode = config?.maskedSecretKey?.startsWith("sk_tes") ? "test" : config?.maskedSecretKey?.startsWith("sk_liv") ? "live" : null;
+  const partner: Field | null = editing === "secretKey" ? "publicKey" : editing === "publicKey" ? "secretKey" : null;
+  const typedMode = modeOf(value.trim());
+  const partnerMode = partner === "publicKey" ? modeOf(config?.publicKey) : partner === "secretKey" ? secretMode : null;
+  const needsPartner = !!partner && !!typedMode && !!partnerMode && typedMode !== partnerMode;
 
   const send = async (body: Record<string, unknown>, done: string) => {
     setBusy(true);
@@ -119,6 +135,7 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
       setConfig(data);
       setEditing(null);
       setValue("");
+      setPair("");
       setSecret(null);
       setMessage({
         type: "success",
@@ -139,6 +156,14 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
     if (!editing) return;
     const v = value.trim();
     if (!v) { setMessage({ type: "error", text: `Paste the ${HINTS[editing].label.toLowerCase()} first.` }); return; }
+    if (needsPartner && partner) {
+      const p = pair.trim();
+      const other = HINTS[partner].label.toLowerCase();
+      if (!p) { setMessage({ type: "error", text: `Paste the ${typedMode} ${other} too: the two keys change together.` }); return; }
+      if (modeOf(p) !== typedMode) { setMessage({ type: "error", text: `The ${other} has to be a ${typedMode} key too (it starts with ${partner === "secretKey" ? "sk" : "pk"}_${typedMode}_).` }); return; }
+      void send({ [editing]: v, [partner]: p }, `Secret key and public key saved (${typedMode} keys).`);
+      return;
+    }
     if (editing !== "secretKey" && v === config?.[editing]) { setEditing(null); return; }
     void send({ [editing]: v }, `${HINTS[editing].label} saved.`);
   };
@@ -210,10 +235,28 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
               </button>
             )}
           </div>
+          {needsPartner && partner && (
+            <div className="basis-full" data-paystack-pair="">
+              <p className="mb-1 text-[11px] text-orange-400">
+                That's a {typedMode} key, and the {HINTS[partner].label.toLowerCase()} is a {partnerMode} key. Paste the {typedMode} {HINTS[partner].label.toLowerCase()} too: both are saved together.
+              </p>
+              <label htmlFor="paystack-pair" className="sr-only">{HINTS[partner].label}</label>
+              <input
+                id="paystack-pair"
+                type={partner === "secretKey" && !showTyped ? "password" : "text"}
+                value={pair}
+                onChange={(e) => setPair(e.target.value)}
+                placeholder={`${partner === "secretKey" ? "sk" : "pk"}_${typedMode}_...`}
+                autoComplete="off"
+                spellCheck={false}
+                className={input}
+              />
+            </div>
+          )}
           <button type="submit" disabled={busy} className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50">
             {busy ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Save
           </button>
-          <button type="button" onClick={() => { setEditing(null); setValue(""); }} className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-main)] px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)]">
+          <button type="button" onClick={() => { setEditing(null); setValue(""); setPair(""); }} className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-main)] px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)]">
             <X size={13} /> Cancel
           </button>
         </form>

@@ -119,6 +119,9 @@ async function pushToRenderEnv(patch: Partial<AdminConfig>): Promise<void> {
   for (const [field, value] of Object.entries(patch)) {
     const envName = RENDER_ENV_VAR_NAMES[field as keyof AdminConfig];
     if (envName && typeof value === "string") merged.set(envName, value);
+    // A setting removed on the admin page (the yearly plan): gone from
+    // Render too, or it would come back with the next restart.
+    else if (envName && value === undefined) merged.delete(envName);
   }
 
   const putRes = await fetch(`${base}/env-vars`, {

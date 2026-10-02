@@ -68,7 +68,43 @@ r = await call("POST", "/api/admin/paystack-config", { clearYearlyPlanCode: true
 check(r.status === 200 && r.body.yearlyPlanCode === null && r.body.planCode === "PLN_x", "Remove: the yearly plan goes, the monthly stays");
 r = await call("POST", "/api/admin/paystack-config", { planCode: "nope" });
 check(r.status === 400 && /PLN_/.test(r.body.error), "a plan code that isn't one is refused");
+r = await call("POST", "/api/admin/paystack-config", { publicKey: "pk_test_abc" });
+check(r.status === 400, "one test key beside a live one is still refused");
+r = await call("POST", "/api/admin/paystack-config", { secretKey: "sk_test_abc123secret", publicKey: "pk_test_abc" });
+check(r.status === 200 && r.body.publicKey === "pk_test_abc" && r.body.maskedSecretKey?.startsWith("sk_tes"), "both keys together: live to test works (the admin card asks for both)");
+r = await call("POST", "/api/admin/paystack-config", { secretKey: "sk_live_abc123secret", publicKey: "pk_live_abc" });
+check(r.status === 200 && r.body.publicKey === "pk_live_abc" && r.body.maskedSecretKey?.startsWith("sk_liv"), "and test back to live");
 await new Promise((resolve) => server.close(resolve));
+
+// On Render, a setting is also kept in Render's own settings; one removed here goes from there too.
+{
+  const realFetch = globalThis.fetch;
+  const sent = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes("/env-vars") && (!opts.method || opts.method === "GET")) {
+      return { ok: true, json: async () => [
+        { envVar: { key: "PAYSTACK_YEARLY_PLAN_CODE", value: "PLN_yr" }, cursor: "a" },
+        { envVar: { key: "PAYSTACK_PLAN_CODE", value: "PLN_x" }, cursor: "b" },
+        { envVar: { key: "OTHER", value: "kept" }, cursor: "c" },
+      ] };
+    }
+    sent.push({ url: u, method: opts.method, body: opts.body ? JSON.parse(opts.body) : null });
+    return { ok: true, json: async () => ({}), text: async () => "" };
+  };
+  process.env.RENDER_API_KEY = "rnd_test";
+  process.env.RENDER_SERVICE_ID = "srv-test";
+  try {
+    const out = await saveAdminConfig({ paystackYearlyPlanCode: undefined });
+    const put = sent.find((x) => x.method === "PUT");
+    const keys = (put?.body ?? []).map((v) => v.key).sort().join();
+    check(out.durable && keys === "OTHER,PAYSTACK_PLAN_CODE", "the yearly plan removed: gone from Render's settings, the rest kept", keys);
+  } finally {
+    globalThis.fetch = realFetch;
+    delete process.env.RENDER_API_KEY;
+    delete process.env.RENDER_SERVICE_ID;
+  }
+}
 
 fs.rmSync(dir, { recursive: true, force: true });
 console.log(bad ? `\n${bad} FAILED` : "\nall ok");

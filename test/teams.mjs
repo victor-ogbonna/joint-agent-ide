@@ -407,12 +407,25 @@ check(yQuote.amount === 36536500 && yPaid.paidUntil === addMonths(NOW, 12) && (a
   "5 seats for a year, ₦365,365: PRO for 30 days after it ends");
 
 console.log("Other currencies need a special price");
-check(await throwsWith(() => createTeam(db, null, { name: "Accra Coders", seats: 5, currency: "GHS", ownerEmail: "a@coders.gh" }, NOW, random), /no normal seat price in GHS/), "a team in cedis without a price is refused");
+check(await throwsWith(() => createTeam(db, null, { name: "Accra Coders", seats: 5, currency: "GHS", ownerEmail: "a@coders.gh" }, NOW, random), /^A team at the normal price pays in NGN\. To charge it in GHS, set a special price for it\.$/), "a team in cedis without a price is refused");
 const accra = await createTeam(db, null, { name: "Accra Coders", seats: 5, currency: "GHS", seatPrice: "8000", ownerEmail: "a@coders.gh" }, NOW, random);
 check(accra.currency === "GHS" && accra.seatPrice === 8000, "with a special price, it's made");
-check(await throwsWith(() => adminUpdateTeam(db, accra.id, { seatPrice: "" }), /no normal seat price in GHS/), "and its price can't be cleared while it's in cedis");
-const dollars = await adminUpdateTeam(db, accra.id, { seatPrice: "", currency: "USD" });
-check(dollars.currency === "USD" && dollars.seatPrice === null, "in dollars it can (the normal $5 then)");
+check(await throwsWith(() => adminUpdateTeam(db, accra.id, { seatPrice: "" }), /pays in NGN\. To charge it in GHS/), "and its price can't be cleared while it's in cedis");
+check(await throwsWith(() => adminUpdateTeam(db, accra.id, { seatPrice: "", currency: "USD" }), /pays in NGN\. To charge it in USD/), "nor in dollars: the normal price is in naira, what Paystack takes");
+const special = await adminUpdateTeam(db, accra.id, { seatPrice: "500", currency: "USD" });
+check(special.currency === "USD" && special.seatPrice === 500, "dollars with a special price: as set");
+const normal = await adminUpdateTeam(db, accra.id, { seatPrice: "", currency: "NGN" });
+check(normal.currency === "NGN" && normal.seatPrice === null && (await db.doc(`teams/${accra.id}`).get()).data().currency === "NGN", "back to the normal price, in naira");
+
+console.log("A team made in dollars before teams were priced in naira");
+await db.doc("teams/legacy").set({ name: "Old Dollar Team", kind: "team", seats: 5, seatPrice: null, currency: "USD", paidUntil: null, joinCode: "LEGA2345", joinOpen: true, memberCount: 1, createdAt: NOW - 30 * DAY, ownerEmail: "old@x.io" });
+await db.doc("teamMembers/old").set({ teamId: "legacy", role: "admin", email: "old@x.io", emailVerified: true, joinedAt: NOW - 30 * DAY });
+const legacyView = await teamDetail(db, "legacy", NOW);
+check(legacyView.currency === "NGN" && legacyView.seatPrice === 664300, "it's priced in naira now: ₦6,643 a seat (the same $5), what Paystack takes");
+const legacyQuote = await quoteFor(db, "old", { action: "renew", period: "month", seats: 5 }, NOW);
+check(legacyQuote.currency === "NGN" && legacyQuote.amount === 3321500, "and pays ₦33,215 for 5 seats a month, not dollars a naira account can't take");
+const renamedLegacy = await adminUpdateTeam(db, "legacy", { name: "Old Dollar Team 2" });
+check(renamedLegacy.currency === "NGN" && (await db.doc("teams/legacy").get()).data().currency === "NGN", "an edit on the admin page stores it in naira");
 
 console.log(bad ? `\n${bad} check(s) failed.` : "\nAll team checks passed.");
 process.exit(bad ? 1 : 0);

@@ -100,13 +100,18 @@ const time = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 
 
 export function teamOf(id: string, d: any): TeamRecord {
   d = d || {};
+  const seatPrice = typeof d.seatPrice === "number" && Number.isFinite(d.seatPrice) ? d.seatPrice : null;
   return {
     id,
     name: typeof d.name === "string" && d.name ? d.name : "Team",
     kind: d.kind === "school" ? "school" : "team",
     seats: num(d.seats, MIN_SEATS),
-    seatPrice: typeof d.seatPrice === "number" && Number.isFinite(d.seatPrice) ? d.seatPrice : null,
-    currency: typeof d.currency === "string" && /^[A-Z]{3}$/.test(d.currency) ? d.currency : DEFAULT_TEAM_CURRENCY,
+    seatPrice,
+    // The normal price is always in DEFAULT_TEAM_CURRENCY, the currency
+    // Paystack takes: a team made in dollars before teams were priced in
+    // naira pays ₦6,643 a seat, the same $5. Another currency comes only
+    // with a special price (priceOrRefuse).
+    currency: seatPrice === null ? DEFAULT_TEAM_CURRENCY : typeof d.currency === "string" && /^[A-Z]{3}$/.test(d.currency) ? d.currency : DEFAULT_TEAM_CURRENCY,
     paidUntil: time(d.paidUntil),
     paidFor: isPeriod(d.paidFor) ? d.paidFor : null,
     joinCode: typeof d.joinCode === "string" ? d.joinCode : "",
@@ -137,10 +142,10 @@ export function memberOf(uid: string, d: any): MemberRecord {
  */
 export const seatPriceOf = (t: TeamRecord) => t.seatPrice ?? normalSeatPrice(t.currency) ?? 0;
 
-/** A currency needs a special price unless it has a normal one. */
+/** The normal price is in DEFAULT_TEAM_CURRENCY; another currency needs a special price. */
 function priceOrRefuse(currency: string, seatPrice: number | null): void {
-  if (seatPrice === null && normalSeatPrice(currency) === null) {
-    throw new TeamError(`There's no normal seat price in ${currency}. Set a special price for this team, or use NGN.`);
+  if (seatPrice === null && currency !== DEFAULT_TEAM_CURRENCY) {
+    throw new TeamError(`A team at the normal price pays in ${DEFAULT_TEAM_CURRENCY}. To charge it in ${currency}, set a special price for it.`);
   }
 }
 
@@ -695,8 +700,11 @@ export async function adminUpdateTeam(db: Db, rawTeamId: unknown, patch: { name?
     const team = await readTeam(tx, db, teamId);
     if (patch.seats !== undefined) changes.seats = seatsOrRefuse(patch.seats, team.memberCount);
     if (!Object.keys(changes).length) throw new TeamError("Nothing to change.");
-    const next = teamOf(team.id, { ...team, ...changes });
-    priceOrRefuse(next.currency, next.seatPrice);
+    const nextPrice = changes.seatPrice !== undefined ? (changes.seatPrice as number | null) : team.seatPrice;
+    const nextCurrency = changes.currency !== undefined ? (changes.currency as string) : team.currency;
+    priceOrRefuse(nextCurrency, nextPrice);
+    // Stored as it's read (a team at the normal price, in naira).
+    changes.currency = nextCurrency;
     tx.set(teamRef(db, team.id), changes, { merge: true });
     return teamOf(team.id, { ...team, ...changes });
   });
