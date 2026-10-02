@@ -147,6 +147,8 @@ export type ChatStreamEvent =
   | { type: "context"; used: number; limit: number }
   | { type: "tier"; tier: string }
   | { type: "context_compacted"; summary: string; compactedIds: string[] }
+  /** The reply couldn't be written; the text before it says why (Try again). */
+  | { type: "failed" }
   | { type: "done" };
 
 // For /api/ai/chat specifically — reads the server-sent-events stream and

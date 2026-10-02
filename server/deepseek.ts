@@ -92,12 +92,50 @@ export function modelFor(free: boolean): ModelProfile {
 // only overload/rate-limit retries. A bad key or malformed request is not
 // transient and should surface immediately rather than after ~6.5s.
 const RETRY_DELAYS_MS = [700, 1800, 4000];
+/**
+ * For a request someone is waiting on with the connection kept open (the
+ * agent's chat, the build helpers): the AI service being briefly down,
+ * overloaded or unreachable is ridden out for about two minutes rather than
+ * six seconds, with the person told it's trying again (onRetry).
+ */
+export const PATIENT_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 15_000, 15_000, 15_000, 15_000, 15_000, 15_000, 15_000];
 
 function isRetryable(status: number): boolean {
-  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+  return status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
-const FATAL = /^\S+ \d{3}:/;
+/**
+ * The AI service couldn't give a reply. kind says why, for a plain message:
+ *   unavailable  down, overloaded or unreachable, even after the retries
+ *   refused      it turned Joint-Agent itself away (key, balance: 401/402/403)
+ *   rejected     it wouldn't take this request (400 and the like)
+ */
+export class AiServiceError extends Error {
+  constructor(message: string, public status: number | null, public kind: "unavailable" | "refused" | "rejected") {
+    super(message);
+    this.name = "AiServiceError";
+  }
+}
+
+function failureKind(status: number): AiServiceError["kind"] {
+  if (isRetryable(status)) return "unavailable";
+  if (status === 401 || status === 402 || status === 403) return "refused";
+  return "rejected";
+}
+
+/** A wait that ends early, without throwing, when `signal` stops. */
+function pauseUnlessStopped(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
 
 /**
  * When the AI service is busy it holds a request open, sending keep-alive
@@ -132,9 +170,18 @@ function linkedController(outer?: AbortSignal): AbortController {
   return controller;
 }
 
-async function postWithRetry(profile: ModelProfile, path: string, body: any, label: string, signal?: AbortSignal): Promise<Response> {
+/** How a request is retried: how long between tries, and who to tell. */
+interface RetryPolicy {
+  delays?: number[];
+  /** Called before each new try. */
+  onRetry?: () => void;
+}
+
+async function postWithRetry(profile: ModelProfile, path: string, body: any, label: string, signal?: AbortSignal, retry: RetryPolicy = {}): Promise<Response> {
+  const delays = retry.delays ?? RETRY_DELAYS_MS;
   let lastErr: any;
-  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+  let lastStatus: number | null = null;
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
     try {
       const res = await fetch(`${profile.baseUrl}${path}`, {
         method: "POST",
@@ -148,41 +195,45 @@ async function postWithRetry(profile: ModelProfile, path: string, body: any, lab
       if (res.ok) return res;
 
       const detail = await res.text();
-      if (!isRetryable(res.status) || attempt === RETRY_DELAYS_MS.length) {
-        throw new Error(`${profile.label} ${res.status}: ${detail.slice(0, 400)}`);
+      if (!isRetryable(res.status) || attempt === delays.length) {
+        throw new AiServiceError(`${profile.label} ${res.status}: ${detail.slice(0, 400)}`, res.status, failureKind(res.status));
       }
       lastErr = new Error(`${profile.label} ${res.status}`);
+      lastStatus = res.status;
     } catch (err: any) {
       // A thrown non-retryable error above must not be swallowed into a retry.
-      if (FATAL.test(err?.message || "")) throw err;
+      if (err instanceof AiServiceError) throw err;
       // Stopped on purpose (the person left, or the wait ran out): no retry.
       if (signal?.aborted) throw err;
       lastErr = err;
-      if (attempt === RETRY_DELAYS_MS.length) break;
+      lastStatus = null;
+      if (attempt === delays.length) break;
     }
-    const wait = RETRY_DELAYS_MS[attempt] + Math.floor(Math.random() * 400);
+    const wait = delays[attempt] + Math.floor(Math.random() * 400);
     console.warn(`[${profile.label}] ${label} failed (attempt ${attempt + 1}) — retrying in ${wait}ms`);
-    await new Promise((r) => setTimeout(r, wait));
+    try { retry.onRetry?.(); } catch { /* a notice must not stop the retry */ }
+    await pauseUnlessStopped(wait, signal);
     if (signal?.aborted) throw lastErr;
   }
-  throw lastErr;
+  // Never reached the service, or it stayed overloaded, through every try.
+  throw new AiServiceError(`${profile.label} ${label} failed after ${delays.length + 1} tries: ${lastErr?.message || lastErr}`, lastStatus, "unavailable");
 }
 
 /** A model that refuses its configured output cap gets 8192, once, and keeps it. */
 const SAFE_OUTPUT_TOKENS = 8192;
 const refusedCap = new Set<string>();
 
-async function postChat(profile: ModelProfile, body: any, label: string, signal?: AbortSignal): Promise<Response> {
+async function postChat(profile: ModelProfile, body: any, label: string, signal?: AbortSignal, retry: RetryPolicy = {}): Promise<Response> {
   const cap = () => refusedCap.has(profile.id) ? Math.min(SAFE_OUTPUT_TOKENS, profile.maxOutputTokens) : profile.maxOutputTokens;
   try {
-    return await postWithRetry(profile, "/chat/completions", { ...body, max_tokens: cap() }, label, signal);
+    return await postWithRetry(profile, "/chat/completions", { ...body, max_tokens: cap() }, label, signal, retry);
   } catch (err: any) {
     const msg = err?.message || "";
     const tooLarge = / 400:/.test(msg) && /max_tokens|max_output|maxOutputTokens/i.test(msg);
     if (!tooLarge || refusedCap.has(profile.id) || profile.maxOutputTokens <= SAFE_OUTPUT_TOKENS) throw err;
     console.warn(`[${profile.label}] max_tokens ${profile.maxOutputTokens} refused; using ${SAFE_OUTPUT_TOKENS} from now on`);
     refusedCap.add(profile.id);
-    return await postWithRetry(profile, "/chat/completions", { ...body, max_tokens: cap() }, label, signal);
+    return await postWithRetry(profile, "/chat/completions", { ...body, max_tokens: cap() }, label, signal, retry);
   }
 }
 
@@ -197,8 +248,12 @@ export interface StreamOptions {
   signal?: AbortSignal;
   /** Called once if the AI service hasn't started replying after WAITING_NOTICE_MS. */
   onWaiting?: () => void;
-  /** The waits above, shorter in tests. */
-  timing?: { firstReplyMs?: number; idleMs?: number; noticeMs?: number };
+  /** Ride out the AI service being down for about two minutes (PATIENT_RETRY_DELAYS_MS). */
+  patient?: boolean;
+  /** Called before each new try when the AI service didn't answer. */
+  onRetry?: () => void;
+  /** The waits above, and between tries, shorter in tests. */
+  timing?: { firstReplyMs?: number; idleMs?: number; noticeMs?: number; retryDelaysMs?: number[] };
 }
 
 export interface StreamResult {
@@ -241,6 +296,14 @@ export async function streamChat(
   let lastData = 0;
   let noticed = false;
   let timedOut: AiTimeoutError | null = null;
+  const retry: RetryPolicy = {
+    delays: options.timing?.retryDelaysMs ?? (options.patient ? PATIENT_RETRY_DELAYS_MS : undefined),
+    onRetry: () => {
+      // "Trying again" says more than "in its queue" would after it.
+      noticed = true;
+      options.onRetry?.();
+    },
+  };
   const watchdog = setInterval(() => {
     const now = Date.now();
     if (!lastData) {
@@ -258,7 +321,7 @@ export async function streamChat(
     }
   }, Math.min(1000, Math.max(20, Math.floor(Math.min(firstReplyMs, idleMs, noticeMs) / 4))));
   try {
-    return await readChatStream(messages, tools, handlers, profile, controller.signal, () => { lastData = Date.now(); });
+    return await readChatStream(messages, tools, handlers, profile, controller.signal, () => { lastData = Date.now(); }, retry);
   } catch (err) {
     if (timedOut) {
       console.warn(`[${profile.label}] reply stopped: ${timedOut.kind === "busy" ? "the service didn't start it in time" : "the service went quiet part-way"}`);
@@ -277,6 +340,7 @@ async function readChatStream(
   profile: ModelProfile,
   signal: AbortSignal,
   onData: () => void,
+  retry: RetryPolicy,
 ): Promise<StreamResult> {
   const res = await postChat(
     profile,
@@ -291,6 +355,7 @@ async function readChatStream(
     },
     "chat stream",
     signal,
+    retry,
   );
 
   const reader = res.body?.getReader();
@@ -389,7 +454,7 @@ async function readChatStream(
  */
 export async function completeChat(
   messages: ChatMessage[],
-  opts: { jsonMode?: boolean; signal?: AbortSignal; maxMs?: number } = {},
+  opts: { jsonMode?: boolean; signal?: AbortSignal; maxMs?: number; patient?: boolean; onRetry?: () => void; retryDelaysMs?: number[] } = {},
   profile: ModelProfile = PRO_MODEL,
 ): Promise<{ text: string; outputTokens: number }> {
   const controller = linkedController(opts.signal);
@@ -405,6 +470,7 @@ export async function completeChat(
       },
       "completion",
       controller.signal,
+      { delays: opts.retryDelaysMs ?? (opts.patient ? PATIENT_RETRY_DELAYS_MS : undefined), onRetry: opts.onRetry },
     );
     const data: any = await res.json();
     return {

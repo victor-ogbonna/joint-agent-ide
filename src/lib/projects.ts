@@ -19,6 +19,7 @@ export interface StoredMessage {
   isContextSummary?: boolean;
   compacted?: boolean;
   images?: string[];
+  failed?: boolean;
 }
 
 export interface ProjectData {
@@ -175,5 +176,6 @@ export function trimMessagesForStorage(messages: StoredMessage[]): StoredMessage
       ...(m.isPlanResponse ? { isPlanResponse: true } : {}),
       ...(m.isContextSummary ? { isContextSummary: true } : {}),
       ...(m.compacted ? { compacted: true } : {}),
+      ...(m.failed ? { failed: true } : {}),
     }));
 }

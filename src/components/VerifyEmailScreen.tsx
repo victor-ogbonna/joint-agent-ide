@@ -1,14 +1,14 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Mail, Loader2, LogOut, RefreshCw } from "lucide-react";
 import { friendlyAuthError } from "../contexts/AuthContext";
 
 /**
- * Shown while the pre-launch lock is on to someone who signed in with an
- * email and password they haven't verified yet. Access is granted to a
- * verified address (server/access.ts), so until then the server can't tell
- * that this account is the one on the list. It used to sign them straight
- * out with "That account doesn't have early access yet", which read as
- * being refused.
+ * Shown, straight after signing up and on every sign-in until it's done, to
+ * someone who signed in with an email and password they haven't verified yet,
+ * whether the pre-launch lock is on or off. The app is used once the address
+ * is verified (the server refuses the account until then: server/quota.ts).
+ * Before, during the lock, it signed them straight out with "That account
+ * doesn't have early access yet", which read as being refused.
  */
 export default function VerifyEmailScreen({ email, onResend, onCheck, onSignOut }: {
   email: string | null;
@@ -20,6 +20,25 @@ export default function VerifyEmailScreen({ email, onResend, onCheck, onSignOut 
   const [busy, setBusy] = useState<"check" | "resend" | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Back on this tab after opening the link (it opens in a new one): look
+  // again by itself, so there's nothing to press.
+  const quietCheck = useRef(onCheck);
+  quietCheck.current = onCheck;
+  useEffect(() => {
+    let running = false;
+    const look = () => {
+      if (document.visibilityState !== "visible" || running) return;
+      running = true;
+      quietCheck.current().catch(() => false).finally(() => { running = false; });
+    };
+    window.addEventListener("focus", look);
+    document.addEventListener("visibilitychange", look);
+    return () => {
+      window.removeEventListener("focus", look);
+      document.removeEventListener("visibilitychange", look);
+    };
+  }, []);
 
   const check = async () => {
     setBusy("check");

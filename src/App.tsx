@@ -2740,7 +2740,8 @@ export default function App() {
     }
   };
 
-  const handleSendMessage = async (text: string, modeOverride?: "plan" | "implement", images?: string[]) => {
+  /** `history` is the conversation to add it to, when not the one on screen (Try again). */
+  const handleSendMessage = async (text: string, modeOverride?: "plan" | "implement", images?: string[], history?: ChatMessage[]) => {
     const requestProjectId = currentProjectIdRef.current;
     const newUserMsg: ChatMessage = {
       id: Math.random().toString(),
@@ -2750,7 +2751,7 @@ export default function App() {
       ...(images?.length ? { images } : {}),
     };
 
-    const newMessages = [...chatMessages, newUserMsg];
+    const newMessages = [...(history ?? chatMessages), newUserMsg];
     setChatMessages(newMessages);
     setIsLoading(true);
 
@@ -2775,6 +2776,9 @@ export default function App() {
     // Whether this request folded the earlier conversation into a summary:
     // the one thing that makes the conversation genuinely smaller.
     let compactedThisRequest = false;
+    // The server couldn't write the reply ("failed"): it says why, and Try
+    // again sends the message once more.
+    let failed: boolean = false;
     let started = false;
     const ensureStarted = () => {
       if (started) return;
@@ -2804,7 +2808,8 @@ export default function App() {
         // the summary stands in for them.
         // The sketch in the editor goes along, so the agent changes it rather
         // than writing a new one blind.
-        { messages: newMessages.filter((m) => !m.compacted), mcu, boardId, chatMode: effectiveMode, currentCode: codeRef.current },
+        // Replies that didn't come through aren't part of the conversation.
+        { messages: newMessages.filter((m) => !m.compacted && !m.failed), mcu, boardId, chatMode: effectiveMode, currentCode: codeRef.current },
         (event) => {
           if (event.type === "text_delta") {
             assistantContent += event.text;
@@ -2861,6 +2866,8 @@ export default function App() {
             // the user stares at a spinner for the whole of code generation.
             ensureStarted();
             if (!assistantContent) updateAssistantMsg({ content: event.text });
+          } else if (event.type === "failed") {
+            failed = true;
           }
         },
         {
@@ -2885,6 +2892,12 @@ export default function App() {
       if (result.error) throw new Error(result.error);
 
       ensureStarted(); // defensive: stream completed with zero events
+
+      if (failed) {
+        updateAssistantMsg({ failed: true, retryMode: effectiveMode });
+        logToTerminal("[AI AGENT] The reply didn't come through. Press Try again in the chat.", "error");
+        return;
+      }
 
       if (currentProjectIdRef.current !== requestProjectId) {
         logToTerminal("[AI AGENT] Response arrived after you switched projects — not applying it here.", "info");
@@ -2919,15 +2932,40 @@ export default function App() {
           { id: Math.random().toString(), role: "assistant", content: "Generation stopped.", timestamp: Date.now() }
         ]);
       } else {
-        setChatMessages((prev) => [
-          ...prev,
-          { id: Math.random().toString(), role: "assistant", content: `Error: ${err.message}`, timestamp: Date.now() }
-        ]);
+        // Said plainly (the messages are written for people: see
+        // src/lib/aiClient.ts), with Try again beside it.
+        const why = err?.message || "Something went wrong. Nothing was used from your allowance.";
+        if (started) {
+          updateAssistantMsg({ content: (assistantContent ? `${assistantContent}\n\n` : "") + why, failed: true, retryMode: effectiveMode });
+        } else {
+          setChatMessages((prev) => [
+            ...prev,
+            { id: assistantMsgId, role: "assistant", content: why, timestamp: Date.now(), failed: true, retryMode: effectiveMode }
+          ]);
+        }
+        logToTerminal("[AI AGENT] The reply didn't come through. Press Try again in the chat.", "error");
       }
     } finally {
       setIsLoading(false);
       abortControllerRef.current = null;
     }
+  };
+
+  /**
+   * Try again, on a reply that didn't come through: the message it answered
+   * is sent once more (with its images and mode), and the failed pair makes
+   * way for the new one, so nobody has to type it again.
+   */
+  const retryFailedReply = (failedId: string) => {
+    if (isLoading) return;
+    const at = chatMessages.findIndex((m) => m.id === failedId);
+    if (at < 0 || !chatMessages[at].failed) return;
+    let asked = at - 1;
+    while (asked >= 0 && chatMessages[asked].role !== "user") asked--;
+    if (asked < 0) return;
+    const question = chatMessages[asked];
+    const rest = chatMessages.filter((m) => m.id !== question.id && m.id !== failedId);
+    void handleSendMessage(question.content, chatMessages[at].retryMode, question.images, rest);
   };
 
   // Refreshed every render, so a send started from an older closure uses
@@ -3861,6 +3899,7 @@ export default function App() {
                       <AgentChat
                         messages={chatMessages}
                         onSendMessage={handleSendMessage}
+                        onRetryFailed={retryFailedReply}
                         isLoading={isLoading}
                         mcu={mcu}
                         onApplyUpdate={handleApplyProjectUpdate}

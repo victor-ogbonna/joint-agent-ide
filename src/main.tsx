@@ -12,6 +12,7 @@ import SharePage from './SharePage.tsx';
 import CreatorPage from './CreatorPage.tsx';
 import TeamPage from './TeamPage.tsx';
 import { AuthProvider, useAuth } from './contexts/AuthContext.tsx';
+import type { User } from 'firebase/auth';
 import VerifyEmailScreen from './components/VerifyEmailScreen.tsx';
 import './index.css';
 import { startInstallSupport } from './lib/installApp.ts';
@@ -92,15 +93,24 @@ function LaunchScreen() {
   );
 }
 
+/** An email-and-password account whose address isn't verified yet, as this browser last heard. */
+function maybeUnverified(user: User | null): boolean {
+  return !!user && !user.emailVerified && user.providerData.some((p) => p.providerId === 'password');
+}
+
 function RootRoute() {
   const { user, loading, signOut, sendVerificationEmail, refreshVerification } = useAuth();
   const [holding, setHolding] = useState(true);
   const [access, setAccess] = useState<'checking' | 'open' | 'locked'>('checking');
   const [accessDenied, setAccessDenied] = useState(false);
-  // Signed in with an email and password not yet verified, while locked
-  // (VerifyEmailScreen). recheck asks the server again once it is.
+  // Signed in with an email and password not yet verified (VerifyEmailScreen),
+  // launch lock or not. recheck looks again once it is.
   const [needsVerify, setNeedsVerify] = useState(false);
   const [recheck, setRecheck] = useState(0);
+  // The signed-in account the decision below was made for. Until it's made,
+  // a possibly unverified one waits on the launch screen rather than opening
+  // the app for a moment (whose first requests the server would refuse).
+  const [decidedFor, setDecidedFor] = useState<User | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setHolding(false), MIN_LAUNCH_MS);
@@ -114,13 +124,36 @@ function RootRoute() {
   // lock out the whole product.
   useEffect(() => {
     let cancelled = false;
+    // The verify screen and the access decision change together, so nothing
+    // shows in between (the app, for an account the lock then turns away).
+    const decide = (next: 'open' | 'locked', verify = false) => {
+      setNeedsVerify(verify);
+      setAccess(next);
+      setDecidedFor(user);
+    };
     (async () => {
       try {
+        // An email-and-password account is used once its address is
+        // verified; the server refuses it until then (server/quota.ts).
+        // Google accounts come verified. Decided by how this session signed
+        // in, as the server decides it.
+        if (user) {
+          const token = await user.getIdTokenResult();
+          if (cancelled) return;
+          if (token.signInProvider === 'password') {
+            if (!user.emailVerified) return decide('open', true);
+            // Verified since this sign-in's token was made (the link opened
+            // in another tab, say): a new one carries it to the server.
+            if (token.claims.email_verified !== true) await user.getIdToken(true);
+            if (cancelled) return;
+          }
+        }
+
         const res = await fetch('/api/launch-status');
         const { launchLocked } = await res.json();
         if (cancelled) return;
-        if (!launchLocked) return setAccess('open');
-        if (!user) return setAccess('locked');
+        if (!launchLocked) return decide('open');
+        if (!user) return decide('locked');
 
         // Locked and signed in. Only the server knows who is allowlisted, so
         // ask it rather than shipping the list to the browser.
@@ -128,34 +161,30 @@ function RootRoute() {
         const probe = await fetch('/api/quota/status', { headers: { Authorization: `Bearer ${idToken}` } });
         if (cancelled) return;
         if (probe.status === 403) {
-          // Access is given to a verified address (server/access.ts). An
-          // email-and-password account whose address isn't verified yet may
-          // well be on the list: ask for the verification rather than
-          // turning it away.
-          const passwordAccount = user.providerData.some((p) => p.providerId === 'password');
-          if (!user.emailVerified && passwordAccount) {
-            setNeedsVerify(true);
-            setAccess('locked');
-            return;
-          }
-          setNeedsVerify(false);
+          // Not verified after all, as far as the server can tell: ask for
+          // it rather than turning the account away.
+          const { code } = await probe.json().catch(() => ({ code: null }));
+          if (cancelled) return;
+          if (code === 'EMAIL_NOT_VERIFIED') return decide('open', true);
           await signOut();
           setAccessDenied(true);
-          setAccess('locked');
+          decide('locked');
         } else {
-          setNeedsVerify(false);
-          setAccess('open');
+          decide('open');
         }
       } catch {
-        if (!cancelled) setAccess('open');
+        // Falls open (see above), except that an account this browser knows
+        // is unverified still gets the verify screen.
+        if (!cancelled) decide('open', maybeUnverified(user));
       }
     })();
     return () => { cancelled = true; };
   }, [user, signOut, recheck]);
 
   if (loading || holding || access === 'checking') return <LaunchScreen />;
+  if (maybeUnverified(user) && decidedFor !== user) return <LaunchScreen />;
 
-  if (access === 'locked' && needsVerify && user) {
+  if (needsVerify && user) {
     return (
       <VerifyEmailScreen
         email={user.email}
@@ -165,10 +194,9 @@ function RootRoute() {
           if (verified) setRecheck((n) => n + 1);
           return verified;
         }}
-        onSignOut={async () => {
-          setNeedsVerify(false);
-          await signOut();
-        }}
+        // Stays up until the sign-out is done, so the app never shows in
+        // between; the decision above then runs again for nobody signed in.
+        onSignOut={signOut}
       />
     );
   }

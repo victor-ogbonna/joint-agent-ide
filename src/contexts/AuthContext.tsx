@@ -152,8 +152,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     signUpWithEmail: (name, email, password) => run(async () => {
       const cred = await createUserWithEmailAndPassword(auth, email, password);
       if (name.trim()) await updateProfile(cred.user, { displayName: name.trim() });
-      // Access you're given is matched on a verified address
-      // (server/access.ts), so the link goes out straight away.
+      // The app is used once the address is verified (server/quota.ts;
+      // the verify screen in src/main.tsx), so the link goes out straight away.
       try {
         await sendVerification(cred.user);
       } catch (err) {

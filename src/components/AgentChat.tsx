@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { motion } from "motion/react";
-import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Square, Code, X, Clock} from "lucide-react";
+import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Square, Code, X, Clock, RotateCcw} from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -59,6 +59,8 @@ interface AgentChatProps {
     wait: string | null;
   } | null;
   onUpgrade?: () => void;
+  /** Try again on a reply that didn't come through: sends its message once more. */
+  onRetryFailed?: (messageId: string) => void;
 }
 
 /** Images per message, and the longest side they are scaled down to. A phone
@@ -357,7 +359,8 @@ export default function AgentChat({
   onOpenCode,
   planModeAvailable = true,
   pause,
-  onUpgrade
+  onUpgrade,
+  onRetryFailed
 }: AgentChatProps) {
   const [input, setInput] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -753,7 +756,20 @@ export default function AgentChat({
                     />
                   </div>
                   
-                  {chatMode === "plan" && index === messages.length - 1 && msg.role === "assistant" && msg.isPlanResponse && (
+                  {/* The last reply didn't come through: the same message again, no retyping. */}
+                  {msg.role === "assistant" && msg.failed && index === messages.length - 1 && !isLoading && onRetryFailed && (
+                    <div className="pt-1">
+                      <button
+                        type="button"
+                        onClick={() => onRetryFailed(msg.id)}
+                        className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-md text-xs font-bold shadow-sm transition flex items-center gap-1.5"
+                      >
+                        <RotateCcw size={13} /> Try again
+                      </button>
+                    </div>
+                  )}
+
+                  {chatMode === "plan" && index === messages.length - 1 && msg.role === "assistant" && msg.isPlanResponse && !msg.failed && (
                     <div className="mt-4 pt-3 border-t border-[var(--border-main)] space-y-3">
                       <p className="text-xs text-[var(--text-muted)] font-medium">Use the comment icons above to answer any clarifying questions, then proceed when ready:</p>
                       <div className="flex gap-2">
