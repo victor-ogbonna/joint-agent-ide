@@ -8,6 +8,7 @@ import PaymentsTab from "./admin/PaymentsTab";
 import ServerTab from "./admin/ServerTab";
 import CreatorsTab from "./admin/CreatorsTab";
 import TeamsTab from "./admin/TeamsTab";
+import PaystackSettings from "./admin/PaystackSettings";
 
 const TOKEN_KEY = "jointagent_admin_token";
 const TAB_KEY = "jointagent_admin_tab";
@@ -50,19 +51,6 @@ export default function AdminPage() {
 
 
 
-  const [paystackHasSecretKey, setPaystackHasSecretKey] = useState(false);
-  const [paystackMaskedSecretKey, setPaystackMaskedSecretKey] = useState<string | null>(null);
-  const [paystackPublicKey, setPaystackPublicKey] = useState<string | null>(null);
-  const [paystackPlanCode, setPaystackPlanCode] = useState<string | null>(null);
-  const [paystackYearlyPlanCode, setPaystackYearlyPlanCode] = useState<string | null>(null);
-  const [newYearlyPlanCode, setNewYearlyPlanCode] = useState("");
-  const [newSecretKey, setNewSecretKey] = useState("");
-  const [newPublicKey, setNewPublicKey] = useState("");
-  const [newPlanCode, setNewPlanCode] = useState("");
-  const [showSecretKey, setShowSecretKey] = useState(false);
-  const [savingPaystack, setSavingPaystack] = useState(false);
-  const [paystackSaveMessage, setPaystackSaveMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
-  const [loadingPaystackConfig, setLoadingPaystackConfig] = useState(false);
 
   type WaitlistEntry = { email: string; joinedAt: string | null };
   const [waitlist, setWaitlist] = useState<WaitlistEntry[]>([]);
@@ -113,23 +101,6 @@ export default function AdminPage() {
   const adminGet = useCallback((path: string) => adminFetch(token ?? "", path), [token]);
   const adminPost = useCallback((path: string, body: unknown) => adminFetch(token ?? "", path, { method: "POST", body: JSON.stringify(body) }), [token]);
 
-  const loadPaystackConfig = async (t: string) => {
-    setLoadingPaystackConfig(true);
-    try {
-      const res = await adminFetch(t, "/api/admin/paystack-config");
-      if (!res) return;
-      const data = await res.json();
-      setPaystackHasSecretKey(data.hasSecretKey);
-      setPaystackMaskedSecretKey(data.maskedSecretKey);
-      setPaystackPublicKey(data.publicKey);
-      setPaystackPlanCode(data.planCode);
-      setPaystackYearlyPlanCode(data.yearlyPlanCode ?? null);
-    } catch (e) {
-      setPaystackSaveMessage({ type: "error", text: "Could not reach the server." });
-    } finally {
-      setLoadingPaystackConfig(false);
-    }
-  };
 
   // The route is admin-gated by a bearer token, so it cannot be a plain link —
   // fetch it with the header and hand the blob to the browser.
@@ -276,7 +247,6 @@ export default function AdminPage() {
 
   useEffect(() => {
     if (token) {
-      loadPaystackConfig(token);
       loadWaitlist(token);
       loadFeedback(token);
       loadLaunchStatus(token);
@@ -320,50 +290,6 @@ export default function AdminPage() {
   };
 
 
-  const handleSavePaystackConfig = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!token) return;
-    const body: Record<string, string> = {};
-    if (newSecretKey.trim()) body.secretKey = newSecretKey.trim();
-    if (newPublicKey.trim()) body.publicKey = newPublicKey.trim();
-    if (newPlanCode.trim()) body.planCode = newPlanCode.trim();
-    if (newYearlyPlanCode.trim()) body.yearlyPlanCode = newYearlyPlanCode.trim();
-    if (Object.keys(body).length === 0) return;
-
-    setSavingPaystack(true);
-    setPaystackSaveMessage(null);
-    try {
-      const res = await adminFetch(token, "/api/admin/paystack-config", {
-        method: "POST",
-        body: JSON.stringify(body)
-      });
-      if (!res) return;
-      const data = await res.json();
-      if (!res.ok) {
-        setPaystackSaveMessage({ type: "error", text: data.error || "Failed to save Paystack config." });
-        return;
-      }
-      setPaystackHasSecretKey(data.hasSecretKey);
-      setPaystackMaskedSecretKey(data.maskedSecretKey);
-      setPaystackPublicKey(data.publicKey);
-      setPaystackPlanCode(data.planCode);
-      setPaystackYearlyPlanCode(data.yearlyPlanCode ?? null);
-      setNewSecretKey("");
-      setNewPublicKey("");
-      setNewPlanCode("");
-      setNewYearlyPlanCode("");
-      setPaystackSaveMessage({
-        type: "success",
-        text: data.durable
-          ? "Paystack config updated — takes effect immediately and will survive restarts."
-          : "Paystack config updated and takes effect immediately, but will revert on the next restart (RENDER_API_KEY/RENDER_SERVICE_ID aren't set, so this save isn't durable)."
-      });
-    } catch (e) {
-      setPaystackSaveMessage({ type: "error", text: "Could not reach the server." });
-    } finally {
-      setSavingPaystack(false);
-    }
-  };
 
   if (!token) {
     return (
@@ -583,97 +509,7 @@ export default function AdminPage() {
           </p>
         </div>
 
-        <div className="bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl p-5 space-y-4">
-          <div className="flex items-center gap-2">
-            <div className="p-1.5 bg-orange-500/10 rounded-md text-orange-600">
-              <CreditCard size={14} />
-            </div>
-            <h2 className="font-display font-bold text-sm">Paystack subscription</h2>
-          </div>
-
-          <div className="text-xs text-[var(--text-muted)] space-y-1">
-            <p>
-              Secret key:{" "}
-              {loadingPaystackConfig ? (
-                <span className="italic">loading…</span>
-              ) : paystackHasSecretKey ? (
-                <span className="font-mono text-[var(--text-main)]">{paystackMaskedSecretKey}</span>
-              ) : (
-                <span className="text-red-400">not set — the Subscribe button shows a "not configured" state</span>
-              )}
-            </p>
-            <p>
-              Public key: <span className="font-mono text-[var(--text-main)]">{paystackPublicKey || "not set"}</span>
-            </p>
-            <p>
-              Plan code: <span className="font-mono text-[var(--text-main)]">{paystackPlanCode || "not set"}</span>
-            </p>
-            <p>
-              Yearly plan code: <span className="font-mono text-[var(--text-main)]">{paystackYearlyPlanCode || "not set — the Plans page offers monthly only"}</span>
-            </p>
-          </div>
-
-          <form onSubmit={handleSavePaystackConfig} className="space-y-3">
-            <div className="relative">
-              <input
-                type={showSecretKey ? "text" : "password"}
-                value={newSecretKey}
-                onChange={(e) => setNewSecretKey(e.target.value)}
-                placeholder="Paystack secret key (sk_...)"
-                className="w-full bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-lg pl-3 pr-9 py-2 text-sm font-mono text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] transition"
-              />
-              <button
-                type="button"
-                onClick={() => setShowSecretKey((v) => !v)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-[var(--text-muted)] hover:text-[var(--text-main)] transition"
-                title={showSecretKey ? "Hide" : "Show"}
-              >
-                {showSecretKey ? <EyeOff size={14} /> : <Eye size={14} />}
-              </button>
-            </div>
-            <input
-              type="text"
-              value={newPublicKey}
-              onChange={(e) => setNewPublicKey(e.target.value)}
-              placeholder="Paystack public key (pk_...)"
-              className="w-full bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-lg px-3 py-2 text-sm font-mono text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] transition"
-            />
-            <input
-              type="text"
-              value={newPlanCode}
-              onChange={(e) => setNewPlanCode(e.target.value)}
-              placeholder="Plan code (PLN_...) — Paystack owns the amount"
-              className="w-full bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-lg px-3 py-2 text-sm font-mono text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] transition"
-            />
-            <input
-              type="text"
-              value={newYearlyPlanCode}
-              onChange={(e) => setNewYearlyPlanCode(e.target.value)}
-              placeholder="Yearly plan code (PLN_...) — interval Annually, 20% below 12 months"
-              className="w-full bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-lg px-3 py-2 text-sm font-mono text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] transition"
-            />
-
-            <button
-              type="submit"
-              disabled={savingPaystack || (!newSecretKey.trim() && !newPublicKey.trim() && !newPlanCode.trim() && !newYearlyPlanCode.trim())}
-              className="flex items-center justify-center gap-1.5 bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 rounded-lg transition"
-            >
-              {savingPaystack ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
-              Save Paystack Config
-            </button>
-          </form>
-
-          {paystackSaveMessage && (
-            <div className={`flex items-start gap-1.5 text-xs ${paystackSaveMessage.type === "success" ? "text-green-400" : "text-red-400"}`}>
-              {paystackSaveMessage.type === "success" ? <Check size={13} className="mt-0.5 shrink-0" /> : <AlertCircle size={13} className="mt-0.5 shrink-0" />}
-              <span>{paystackSaveMessage.text}</span>
-            </div>
-          )}
-
-          <p className="text-[10px] text-[var(--text-subtle)] leading-relaxed border-t border-[var(--border-main)] pt-3">
-            The plan code decides what customers are charged — the amount and currency live in Paystack, not in this app, so switching plans needs no redeploy. Fields are saved individually; leave any blank to keep its current value.
-          </p>
-        </div>
+        <PaystackSettings get={adminGet} post={adminPost} />
 
         <div className="bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl p-5 space-y-4 mt-4">
           <div className="flex items-center gap-2">

@@ -146,11 +146,13 @@ async function pushToRenderEnv(patch: Partial<AdminConfig>): Promise<void> {
 // to Render's own environment, so it survives the next restart instead of
 // silently reverting. The Render push is best-effort: if it fails, the
 // local save still succeeded, and the caller is told the change isn't
-// durable rather than being told a comforting lie about it.
+// durable rather than being told a comforting lie about it. With
+// ADMIN_CONFIG_DIR set (docker-compose.yml mounts ./data there), the local
+// file itself is kept across restarts and deploys: durable.
 export async function saveAdminConfig(patch: Partial<AdminConfig>): Promise<{ durable: boolean }> {
   writeLocalAdminConfig(patch);
   if (!process.env.RENDER_API_KEY || !process.env.RENDER_SERVICE_ID) {
-    return { durable: false };
+    return { durable: !!process.env.ADMIN_CONFIG_DIR };
   }
   try {
     await pushToRenderEnv(patch);
