@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { Users, Copy, Check, LogOut, Loader2, UserPlus, CreditCard, Link2, Mail, Shield, Trash2, RefreshCw, Pencil, X } from "lucide-react";
 import { useDocumentScroll } from "./useDocumentScroll";
 import { useAuth } from "./contexts/AuthContext";
+import GoogleSignInButton from "./components/GoogleSignInButton";
 import { formatMoney, formatDay } from "./lib/plans";
 import { PERIOD_MONTHS, renewalPrice, addSeatsPrice, daysLeft, stateLabel, type TeamPeriod, type LicenseState, type TeamRole, type TeamKind } from "./lib/teams";
 
@@ -560,7 +561,7 @@ function NoTeam({ data, call, reload, joinFromLink }: { data: PageData; call: Ca
 
 export default function TeamPage() {
   useDocumentScroll();
-  const { user, loading, signInWithGoogle, signOut } = useAuth();
+  const { user, loading, signOut } = useAuth();
   const [data, setData] = useState<PageData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [joinFromLink] = useState(() => {
@@ -621,9 +622,7 @@ export default function TeamPage() {
             <p className="text-[14px] text-[var(--text-muted)]">
               {joinFromLink ? "Sign in to join your team." : "Sign in to start a school or team license, or to join one."}
             </p>
-            <button type="button" onClick={() => void signInWithGoogle()} className={`mt-4 ${primary}`} style={{ background: "var(--gradient-hero)" }}>
-              Sign in with Google
-            </button>
+            <GoogleSignInButton className={`mt-4 ${primary}`} style={{ background: "var(--gradient-hero)" }} />
           </div>
         ) : error && !data ? (
           <p role="alert" className="mt-6 text-[14px] text-red-500">{error}</p>

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Copy, Check, LogOut, Loader2, BadgePercent } from "lucide-react";
 import { useDocumentScroll } from "./useDocumentScroll";
 import { useAuth } from "./contexts/AuthContext";
+import GoogleSignInButton from "./components/GoogleSignInButton";
 import { formatMoney, formatDay } from "./lib/plans";
 
 /**
@@ -100,7 +101,7 @@ function CodeCard({ c }: { c: CreatorView }) {
 
 export default function CreatorPage() {
   useDocumentScroll();
-  const { user, loading, signInWithGoogle, signOut } = useAuth();
+  const { user, loading, signOut } = useAuth();
   const [data, setData] = useState<{ creators: CreatorView[]; verified: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -145,14 +146,10 @@ export default function CreatorPage() {
         ) : !user ? (
           <div className="mt-6 rounded-2xl border border-[var(--border-main)] bg-[var(--bg-panel)] p-5">
             <p className="text-[14px] text-[var(--text-muted)]">Sign in with the email address we have for you to see your code, sign-ups and earnings.</p>
-            <button
-              type="button"
-              onClick={() => void signInWithGoogle()}
-              className="mt-4 inline-flex min-h-[44px] items-center gap-2 rounded-full px-5 text-[14px] font-bold text-white shadow-md"
+            <GoogleSignInButton
+              className="mt-4 inline-flex min-h-[44px] items-center gap-2 rounded-full px-5 text-[14px] font-bold text-white shadow-md disabled:opacity-60"
               style={{ background: "var(--gradient-hero)" }}
-            >
-              Sign in with Google
-            </button>
+            />
           </div>
         ) : error ? (
           <p role="alert" className="mt-6 text-[14px] text-red-500">{error}</p>

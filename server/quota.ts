@@ -233,20 +233,31 @@ export async function getOrCreateUserDoc(uid: string): Promise<UserQuotaDoc> {
   return withTeam(readUserDoc(snap.data()));
 }
 
-type Identity = { uid: string; email: string | null; emailVerified: boolean };
+type Identity = {
+  uid: string;
+  email: string | null;
+  emailVerified: boolean;
+  /** Signed in with an email and password whose address isn't confirmed yet. */
+  unverifiedPassword: boolean;
+};
+
+/** Who a checked sign-in token belongs to. */
+export function identityFromToken(decoded: { uid: string; email?: string; email_verified?: boolean; firebase?: { sign_in_provider?: string } }): Identity {
+  return {
+    uid: decoded.uid,
+    email: decoded.email ?? null,
+    // Never trust the address without this — see server/access.ts.
+    emailVerified: decoded.email_verified === true,
+    unverifiedPassword: decoded.firebase?.sign_in_provider === "password" && decoded.email_verified !== true,
+  };
+}
 
 async function verifyBearerToken(req: Request): Promise<Identity | null> {
   const authHeader = req.headers.authorization || "";
   const idToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
   if (!idToken) return null;
   try {
-    const decoded = await adminAuth.verifyIdToken(idToken);
-    return {
-      uid: decoded.uid,
-      email: decoded.email ?? null,
-      // Never trust the address without this — see server/access.ts.
-      emailVerified: decoded.email_verified === true,
-    };
+    return identityFromToken(await adminAuth.verifyIdToken(idToken));
   } catch {
     return null;
   }
@@ -260,6 +271,23 @@ async function verifyBearerToken(req: Request): Promise<Identity | null> {
 export async function hasValidSignIn(req: Request): Promise<boolean> {
   if (!isFirebaseAdminConfigured()) return false;
   return (await verifyBearerToken(req)) !== null;
+}
+
+export const EMAIL_NOT_VERIFIED_CODE = "EMAIL_NOT_VERIFIED";
+
+/**
+ * An email-and-password account is used once its address is confirmed, with
+ * the launch lock on or off: the sign-up sends the link, and the app shows
+ * "Verify your email address" until it's opened (src/main.tsx). Google
+ * accounts come verified.
+ */
+export function verifiedEmailCheck(who: Identity, res: Response): boolean {
+  if (!who.unverifiedPassword) return true;
+  res.status(403).json({
+    error: "Verify your email address first: open the link we emailed you, then try again.",
+    code: EMAIL_NOT_VERIFIED_CODE,
+  });
+  return false;
 }
 
 /** Refuses everyone without a grant while the launch lock is on. */
@@ -280,6 +308,7 @@ export async function requireFirebaseAuth(req: Request, res: Response, next: Nex
   if (!who) {
     return res.status(401).json({ error: "Sign in required.", code: "AUTH_REQUIRED" });
   }
+  if (!verifiedEmailCheck(who, res)) return;
   if (!launchLockCheck(who, res)) return;
   req.uid = who.uid;
   req.email = who.email;
@@ -544,6 +573,7 @@ export async function requireAuthAndQuota(req: Request, res: Response, next: Nex
   if (!who) {
     return res.status(401).json({ error: "Sign in required.", code: "AUTH_REQUIRED" });
   }
+  if (!verifiedEmailCheck(who, res)) return;
   if (!launchLockCheck(who, res)) return;
   const uid = who.uid;
 

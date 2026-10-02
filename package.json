@@ -11,7 +11,7 @@
     "lint": "tsc --noEmit",
     "test:flash": "node test/avrFlash.sim.mjs",
     "test:webusb": "node test/webusb.sim.mjs",
-    "test": "npm run test:flash && npm run test:webusb && npm run test:esp32 && npm run test:serial && npm run test:pump && npm run test:scrub && npm run test:commands && npm run test:monitor && npm run test:markup && npm run test:context && npm run test:tiers && npm run test:baud && npm run test:detect && npm run test:libraries && npm run test:builduser && npm run test:billing && npm run test:buildqueue && npm run test:adminmetrics && npm run test:buildcache && npm run test:asyncerrors && npm run test:buildrun && npm run test:bodylimits && npm run test:hidesecrets && npm run test:share && npm run test:sitefiles && npm run test:adminconfig && npm run test:referrals && npm run test:teams",
+    "test": "npm run test:flash && npm run test:webusb && npm run test:esp32 && npm run test:serial && npm run test:pump && npm run test:scrub && npm run test:commands && npm run test:monitor && npm run test:markup && npm run test:context && npm run test:tiers && npm run test:baud && npm run test:detect && npm run test:libraries && npm run test:builduser && npm run test:billing && npm run test:buildqueue && npm run test:adminmetrics && npm run test:buildcache && npm run test:asyncerrors && npm run test:buildrun && npm run test:bodylimits && npm run test:hidesecrets && npm run test:share && npm run test:sitefiles && npm run test:adminconfig && npm run test:referrals && npm run test:teams && npm run test:connection && npm run test:aifailures && npm run test:emailverify && npm run test:legacycss",
     "test:esp32": "node test/esp32.sim.mjs",
     "test:pump": "node test/pump.sim.mjs",
     "test:serial": "node test/serialLines.sim.mjs",
@@ -37,7 +37,11 @@
     "test:sitefiles": "tsx test/siteFiles.mjs",
     "test:adminconfig": "tsx test/adminConfig.mjs",
     "test:referrals": "tsx test/referrals.mjs",
-    "test:teams": "tsx test/teams.mjs"
+    "test:teams": "tsx test/teams.mjs",
+    "test:connection": "tsx test/connection.mjs",
+    "test:aifailures": "tsx test/aiFailures.mjs",
+    "test:emailverify": "tsx test/emailVerification.mjs",
+    "test:legacycss": "tsx test/legacyCss.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -74,10 +78,15 @@
     "vite": "^6.2.3"
   },
   "devDependencies": {
+    "@csstools/postcss-cascade-layers": "6.0.1",
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
+    "lightningcss": "1.32.0",
+    "postcss": "8.5.26",
+    "postcss-selector-parser": "6.0.10",
+    "postcss-value-parser": "4.2.0",
     "pptxgenjs": "^4.0.1",
     "puppeteer": "^25.3.0",
     "tailwindcss": "^4.1.14",

@@ -73,6 +73,11 @@ export interface ChatMessage {
   /** Images the user attached, as data URLs. Sent to the model; not kept in
    *  saved projects, which have a size limit an image would blow through. */
   images?: string[];
+  /** A reply that didn't come through (the AI service or the connection
+   *  failed): shown with Try again, and never sent to the model. */
+  failed?: boolean;
+  /** The mode the message it answers was sent in, for Try again. */
+  retryMode?: "plan" | "implement";
   suggestedProjectUpdate?: {
     code?: string;
     description?: string;

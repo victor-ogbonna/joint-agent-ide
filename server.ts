@@ -32,9 +32,8 @@ import { registerGithubRoutes } from './server/github';
 import { registerFirebaseAuthProxy } from './server/firebaseAuthProxy';
 import { detectLibDeps, isSafeLibDep } from './server/libraryDeps';
 import { registerLibraryRoutes, prepareLibraries, mergeLibDeps, missingLibraryHint, libraryNoteFor, NO_LIBRARIES } from './server/libraries';
-import { loadBoardCatalog, getBoardCatalog, getBoardById, boardFamily, resolveBoard, describeBoardForPrompt, describeFamilyForPrompt, BoardInfo } from './server/boards';
-import { getCachedContentName } from './server/geminiCache';
-import { streamChat, completeChat, isDeepSeekConfigured, DEEPSEEK_MODEL, ChatMessage, ToolSpec, modelFor } from './server/deepseek';
+import { loadBoardCatalog, getBoardCatalog, getBoardById, boardFamily, resolveBoard, describeBoardForPrompt, BoardInfo } from './server/boards';
+import { streamChat, completeChat, isDeepSeekConfigured, DEEPSEEK_MODEL, ChatMessage, ToolSpec, modelFor, AiTimeoutError, AiServiceError } from './server/deepseek';
 import { CONTEXT_BUDGET_TOKENS, ConversationMessage, planCompaction, SUMMARY_INSTRUCTION, transcriptOf, KEEP_RECENT_MESSAGES, attachedImages } from './server/context';
 
 
@@ -460,6 +459,7 @@ app.get("/api/boards", (req, res) => {
 import { WORKSPACE_COMMANDS, isWorkspaceCommand, toWorkspaceCommand } from "./server/commands.js";
 import { scrubToolchainNames } from "./server/scrub.js";
 import { siteFiles } from "./server/siteFiles.js";
+import { holdOpen } from "./server/holdOpen.js";
 import { buildEnv } from "./server/buildEnv.js";
 import { setUpBuildAccount, compilerOptions, handOver, buildIsolation } from "./server/buildUser.js";
 import { buildQueue, ServerBusyError } from "./server/buildQueue.js";
@@ -483,80 +483,8 @@ app.post("/api/terminal/execute", requireFirebaseAuth, (_req, res) => {
 });
 
 
-// Tool declarations for implement-mode function calling — pulled out to a
-// module-level constant (rather than rebuilt per-request) since it's static
-// and, together with buildChatSystemInstruction's output, is what gets
-// handed to getCachedContentName below.
-const IMPLEMENT_MODE_TOOLS = [{
-  functionDeclarations: [
-    {
-      name: "generate_project",
-      description: "Generate microcontroller code and a full circuit schematic (components + wiring) for the current MCU.",
-      parameters: {
-        type: Type.OBJECT,
-        properties: {
-          code: { type: Type.STRING, description: "Complete C++ code (.ino format)." },
-          description: { type: Type.STRING, description: "A short paragraph describing the generated project." },
-          components: {
-            type: Type.ARRAY,
-            description: "Electronic components used in the schematic, excluding the microcontroller board itself (the board is implicit, referenced as 'mcu' in connections).",
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                id: { type: Type.STRING, description: "Unique component ID, e.g. 'led1', 'resistor1', 'dht1'." },
-                type: {
-                  type: Type.STRING,
-                  description: "Exact component type from the supported components list.",
-                  enum: ["led", "resistor", "dht11", "servo", "lcd", "button", "relay", "buzzer", "potentiometer", "pir", "neopixel", "ultrasonic", "keypad", "oled"]
-                } as any,
-                label: { type: Type.STRING, description: "Friendly display name, e.g. 'Red LED', '220 Ohm Resistor'." },
-                value: { type: Type.STRING, description: "Value or rating, e.g. '220R', 'DHT11', 'SG90'." }
-              }, required: ["id", "type", "label"]
-            }
-          },
-          connections: {
-            type: Type.ARRAY,
-            description: "Wiring connections between components and the microcontroller. Use the literal ID 'mcu' for the microcontroller board.",
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                id: { type: Type.STRING, description: "Unique wire ID, e.g. 'wire1'." },
-                fromComponentId: { type: Type.STRING, description: "Source component ID, or 'mcu' for the microcontroller board." },
-                fromPin: { type: Type.STRING, description: "Pin name on the source. If source is 'mcu', must be a valid pin from the Microcontroller Reference." },
-                toComponentId: { type: Type.STRING, description: "Target component ID, or 'mcu' for the microcontroller board." },
-                toPin: { type: Type.STRING, description: "Pin name on the target." },
-                color: { type: Type.STRING, description: "Hex wire color, e.g. '#EF4444' power, '#000000' GND, '#3B82F6' signal." }
-              }, required: ["id", "fromComponentId", "fromPin", "toComponentId", "toPin", "color"]
-            }
-          }
-        },
-        required: ["code", "description", "components", "connections"]
-      }
-    },
-    {
-      name: "execute_terminal_command",
-      description: "Run one of the workspace's built-in commands. This is NOT a shell. It accepts only the exact words listed and nothing else — no pipes, no &&, no redirection, no paths, no flags, no inspecting the machine.",
-      parameters: {
-        type: Type.OBJECT,
-        properties: {
-          command: {
-            type: Type.STRING,
-            enum: [...WORKSPACE_COMMANDS],
-            description: "One of: help, compile, flash, clear, monitor, engine, web3 status, ret"
-          }
-        },
-        required: ["command"]
-      }
-    }
-  ]
-}];
-
-// Shared by the live per-board system instruction (used whenever context
-// caching is unavailable — today, always, on the free tier) and the
-// family-generic variant offered to getCachedContentName. The two differ
-// only in what `mcuDescription` describes (a specific board's real specs vs.
-// just its family's pin list) — mcuPowerPin is already family-derived
-// either way, so it's identical in both.
+// The agent's system instruction for one board: `mcuDescription` is that
+// board's real specs, and mcuPowerPin is derived from its family.
 function buildChatSystemInstruction(mcuDescription: string, mcuPowerPin: string, chatMode: string): string {
   let systemInstruction = `You are Joint-Agent, an expert embedded systems AI agent and circuit designer.
 You help users write code, debug hardware issues, design circuit schematics, manage their cloud IDE, and execute terminal commands.
@@ -677,9 +605,34 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
   const send = (event: Record<string, any>) => res.write(`data: ${JSON.stringify(event)}\n\n`);
+  // A comment line every 15 seconds while the reply is under way. Without
+  // it, nothing travels while the AI thinks or waits its turn, and a
+  // connection silent for minutes gets dropped on the way (phone networks,
+  // routers, antivirus software): the browser's "network error". The app
+  // skips lines that aren't "data:".
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded && !res.destroyed) res.write(": keep-alive\n\n");
+  }, 15_000);
+  // The browser has gone (closed the tab, lost its connection, or pressed
+  // Stop): the reply stops with it rather than running on unseen, and the
+  // app's own retry (src/lib/aiClient.ts) is never answered twice.
+  const clientGone = new AbortController();
+  res.on("close", () => {
+    clearInterval(heartbeat);
+    if (!res.writableEnded) clientGone.abort();
+  });
+  // What the AI wrote, for counting a reply that was stopped part-way, and
+  // how much of it was text on the person's screen.
+  let writtenChars = 0;
+  let textChars = 0;
+  let compactionTokens = 0;
+  // The AI service didn't answer and is being asked again (server/deepseek.ts).
+  const onRetry = () => send({ type: "tool_progress", text: "The AI service isn't answering right now. Trying again…" });
 
   if (!isDeepSeekConfigured()) {
-    send({ type: "text_delta", text: "AI Agent is offline — DEEPSEEK_API_KEY is not configured." });
+    console.error("[AI] ACTION NEEDED: DEEPSEEK_API_KEY is not set, so the agent can't reply.");
+    send({ type: "text_delta", text: chatFailureText(new AiServiceError("not configured", null, "refused"), false) });
+    send({ type: "failed" });
     send({ type: "done" });
     return res.end();
   }
@@ -700,22 +653,6 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
         images: attachedImages(m.images),
       }));
 
-    // Context caching: only worth attempting in implement mode (plan mode's
-    // instruction is too short to ever clear Gemini's ~1024-token caching
-    // minimum) and, on the API's free tier, never actually succeeds — its
-    // cached-content storage quota is zero there, confirmed directly against
-    // the real API. getCachedContentName tries once per board family, then
-    // permanently stops trying if it fails, so this never adds retry
-    // overhead. When it's unavailable (true today), everything below falls
-    // through to the exact inline systemInstruction call that already
-    // worked before caching existed — same tokens, same latency, no change.
-    let cachedContentName: string | null = null;
-    if (chatMode !== "plan") {
-      const family_ = describeFamilyForPrompt(family);
-      const familyInstruction = buildChatSystemInstruction(family_.description, family_.powerPin, chatMode);
-      cachedContentName = await getCachedContentName(ai, `implement-${family}`, "gemini-flash-latest", familyInstruction, IMPLEMENT_MODE_TOOLS);
-    }
-
     // Wrapped rather than awaited directly: a 503 lands when the stream is
     // opened, before any token reaches the client, so retrying here is safe —
     // nothing has been streamed out yet that we'd duplicate.
@@ -732,7 +669,6 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     // Full at AUTOCOMPACT_AT: fold everything but the recent tail into a
     // summary, tell the browser which messages it replaced, and carry on.
     let history = conversation;
-    let compactionTokens = 0;
     const codeNote = currentCode
       ? "The sketch currently in the user's editor is below. \"The code\" means this sketch: when asked for a change, " +
         "change this code and keep everything else in it — pins, wiring, timing, behaviour — exactly as it is, unless the " +
@@ -747,7 +683,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
         const summary = await completeChat([
           { role: "system", content: SUMMARY_INSTRUCTION },
           { role: "user", content: transcriptOf(plan.older) },
-        ], {}, model);
+        ], { signal: clientGone.signal, patient: true, onRetry }, model);
         compactionTokens = summary.outputTokens;
         const text = summary.text.trim();
         if (text) {
@@ -759,6 +695,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
           });
         }
       } catch (err: any) {
+        if (clientGone.signal.aborted) throw err;
         // Better an oversized request than none: the model's own window is
         // larger than the budget, so this still goes through.
         console.error("[Context] compaction failed:", err?.message || err);
@@ -789,12 +726,19 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
       msgs,
       chatMode === "plan" ? undefined : DEEPSEEK_IMPLEMENT_TOOLS,
       {
-        onText: (text) => send({ type: "text_delta", text }),
+        onText: (text) => {
+          writtenChars += text.length;
+          textChars += text.length;
+          send({ type: "text_delta", text });
+        },
         // Throttled so a long tool call does not spam the stream — the user
         // needs to know work is happening, not a byte counter.
         onToolProgress: (() => {
           let last = 0;
-          return (toolName: string) => {
+          let counted = 0;
+          return (toolName: string, argsSoFar: number) => {
+            writtenChars += Math.max(0, argsSoFar - counted);
+            counted = Math.max(counted, argsSoFar);
             const now = Date.now();
             if (now - last < 1200) return;
             last = now;
@@ -808,6 +752,14 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
         })(),
       },
       model,
+      {
+        signal: clientGone.signal,
+        // The AI service holds a request while it's busy: say so, rather
+        // than leave the person looking at nothing.
+        onWaiting: () => send({ type: "tool_progress", text: "The AI service is busy right now. Your message is in its queue and will start shortly…" }),
+        patient: true,
+        onRetry,
+      },
     );
 
     let result = await runChat(dsMessages);
@@ -902,33 +854,59 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     send({ type: "done" });
     res.end();
   } catch (error: any) {
-    console.error("API Error: ", error.message);
-    let msg = error.message || "Failed.";
-    try {
-      // if it's a JSON string like '[API Error]: {"error":{...}}'
-      if (msg.includes('{"error":')) {
-        const match = msg.match(/({.*})/);
-        if (match) {
-          const parsed = JSON.parse(match[1]);
-          if (parsed.error && parsed.error.message) {
-            msg = parsed.error.message;
-          }
-        }
-      }
-    } catch (e) { }
-    // Reaching here means the retries above were already spent, so don't
-    // imply a quick retry will fix it — by this point we've tried four times
-    // across ~6.5 seconds and the model is genuinely saturated.
-    if (msg.includes('503') || msg.includes('high demand') || msg.includes('UNAVAILABLE')) {
-      msg = "Gemini is overloaded right now — I retried a few times and it's still busy. Give it a minute and send your message again.";
+    if (clientGone.signal.aborted) {
+      // Nobody is reading any more. What was written before it stopped is
+      // counted (about 4 characters a token), as a finished reply would be.
+      const tokens = compactionTokens + Math.ceil(writtenChars / 4);
+      if (tokens > 0) await incrementTokenUsage(req.uid!, req.quota, tokens);
+      if (!res.writableEnded) res.end();
+      return;
     }
-    send({ type: "text_delta", text: `[API Error]: ${msg}` });
+    if (error instanceof AiTimeoutError) {
+      console.warn(`[AI] chat reply stopped: ${error.kind}`);
+    } else if (error instanceof AiServiceError && error.kind === "refused") {
+      console.error(`[AI] ACTION NEEDED: the AI service turned Joint-Agent away (${error.status}). Check the DeepSeek API key and the account's balance. ${error.message}`);
+    } else {
+      console.error("[AI] chat reply failed:", error?.stack || error?.message || error);
+    }
+    // No complete reply, so nothing is counted; the app shows Try again
+    // beside this ("failed").
+    send({ type: "text_delta", text: (textChars > 0 ? "\n\n" : "") + chatFailureText(error, writtenChars > 0) });
+    send({ type: "failed" });
     send({ type: "done" });
     res.end();
   }
 });
 
+/**
+ * What the person reads when the agent couldn't reply. In plain words, never
+ * the service's own error text, and always with Try again beside it.
+ */
+function chatFailureText(error: any, partWay: boolean): string {
+  if ((error instanceof AiTimeoutError && error.kind === "stalled") || (partWay && !(error instanceof AiTimeoutError))) {
+    return "The AI service stopped part-way through this reply. Nothing was used from your allowance. Press Try again for the whole reply.";
+  }
+  if (error instanceof AiTimeoutError) {
+    return "The AI service is very busy right now, so your reply didn't start in time. Nothing was used from your allowance. Press Try again in a minute.";
+  }
+  const kind = error instanceof AiServiceError ? error.kind : null;
+  if (kind === "unavailable") {
+    return "The AI service isn't answering right now, even after trying for about two minutes. Nothing was used from your allowance. Press Try again in a minute.";
+  }
+  if (kind === "refused") {
+    return "The AI service isn't taking requests from Joint-Agent right now. That's on our side, not yours, and nothing was used from your allowance. Press Try again in a little while.";
+  }
+  if (kind === "rejected") {
+    return "The AI service couldn't take this request. Nothing was used from your allowance. Press Try again. If it happens again, try a shorter message.";
+  }
+  return "Something went wrong on our side while writing your reply. Nothing was used from your allowance. Press Try again.";
+}
+
 app.post("/api/ai/generate", requireAuthAndQuota, async (req, res) => {
+  // Kept alive while the AI writes (server/holdOpen.ts); stopped if the person leaves.
+  holdOpen(res);
+  const clientGone = new AbortController();
+  res.on("close", () => { if (!res.writableEnded) clientGone.abort(); });
   const { prompt, mcu, boardId } = req.body || {};
 
   if (typeof prompt !== "string" || !prompt.trim()) {
@@ -1005,7 +983,7 @@ Wire colours: #EF4444 power, #000000 GND, #3B82F6 signal.
 All four top-level keys are required. Do not wrap the JSON in markdown fences.`,
       },
       { role: "user", content: `Create: ${prompt}` },
-    ], { jsonMode: true }, modelFor(req.quota!.tier === "free"));
+    ], { jsonMode: true, signal: clientGone.signal }, modelFor(req.quota!.tier === "free"));
 
     await incrementTokenUsage(req.uid!, req.quota, response.outputTokens);
     countStat("ai_generate");
@@ -1021,6 +999,10 @@ All four top-level keys are required. Do not wrap the JSON in markdown fences.`,
     const data = JSON.parse(resultText.trim());
     return res.json(data);
   } catch (error: any) {
+    if (clientGone.signal.aborted) return;
+    if (error instanceof AiTimeoutError) {
+      return res.status(503).json({ error: "The AI service is very busy right now. Try again in a minute.", code: "AI_BUSY" });
+    }
     console.error("Generation Error: ", error.message);
     // Return mock fallback as recovery so user gets a seamless experience
     const mockData = getMockProject(prompt, mcu === "esp32" ? "esp32" : "arduino");
@@ -1033,6 +1015,10 @@ All four top-level keys are required. Do not wrap the JSON in markdown fences.`,
 
 // Debug code
 app.post("/api/ai/debug", requireAuthAndQuota, async (req, res) => {
+  // Kept alive while the AI writes the fix (server/holdOpen.ts); stopped if the person leaves.
+  holdOpen(res);
+  const clientGone = new AbortController();
+  res.on("close", () => { if (!res.writableEnded) clientGone.abort(); });
   const { code, error, mcu } = req.body || {};
 
   if (typeof code !== "string" || !code || typeof error !== "string" || !error) {
@@ -1077,7 +1063,7 @@ Respond with a single JSON object and nothing else, in exactly this shape:
 Both keys are required. Do not wrap the JSON in markdown fences.`,
       },
       { role: "user", content: `CODE:\n${code}\n\nERROR:\n${error}` },
-    ], { jsonMode: true }, modelFor(req.quota!.tier === "free"));
+    ], { jsonMode: true, signal: clientGone.signal, patient: true }, modelFor(req.quota!.tier === "free"));
 
     await incrementTokenUsage(req.uid!, req.quota, response.outputTokens);
     countStat("ai_debug");
@@ -1093,10 +1079,23 @@ Both keys are required. Do not wrap the JSON in markdown fences.`,
     const data = JSON.parse(resultText.trim());
     return res.json(data);
   } catch (err: any) {
-    console.error("Debugging Error: ", err.message);
-    return res.json({
-      code: code + "\n\n// Fallback Debug Fix\n#define DIAGNOSTIC_RECOVERY 1\n",
-      explanation: `[Gemini Error - using offline recovery] Code analyzed and wrapped in stability safeguards. Refactored I/O loop timing.`
+    if (clientGone.signal.aborted) return;
+    if (err instanceof AiTimeoutError) {
+      // No fix came back in time: say so, rather than hand back a non-fix.
+      return res.status(503).json({ error: "The AI service is very busy right now and couldn't write a fix in time. Try again in a minute.", code: "AI_BUSY" });
+    }
+    if (err instanceof AiServiceError && err.kind === "refused") {
+      console.error(`[AI] ACTION NEEDED: the AI service turned Joint-Agent away (${err.status}). Check the DeepSeek API key and the account's balance. ${err.message}`);
+    } else {
+      console.error("Debugging Error: ", err?.message || err);
+    }
+    // Said plainly. It used to hand back the same code with a made-up "fix"
+    // added, which the app then reported as resolved.
+    return res.status(503).json({
+      error: err instanceof AiServiceError && err.kind === "unavailable"
+        ? "The AI service isn't answering right now, so no fix was written. Nothing was used from your allowance. Try again in a minute."
+        : "The AI couldn't write a fix this time. Nothing was used from your allowance. Try again.",
+      code: "AI_UNAVAILABLE",
     });
   }
 });
@@ -1350,6 +1349,8 @@ const TRANSCRIBE_ATTEMPTS: Array<{ model: string; thinkingLow: boolean }> = [
 ];
 
 app.post("/api/ai/transcribe", requireAuthAndQuota, async (req, res) => {
+  // Kept alive while a long voice note is written out (server/holdOpen.ts).
+  holdOpen(res);
   try {
     const { audioData, mimeType } = req.body || {};
     if (!audioData) return res.status(400).json({ error: "No audio data provided." });
@@ -1407,6 +1408,9 @@ app.post("/api/ai/transcribe", requireAuthAndQuota, async (req, res) => {
 // Compilation Endpoint
 // ----------------------------------------------------
 app.post("/api/compile", requireFirebaseAuth, async (req, res) => {
+  // A compile can wait its turn and then build for minutes with nothing to
+  // send: kept alive meanwhile (server/holdOpen.ts).
+  holdOpen(res);
   const { code, mcu, boardId } = req.body || {};
   if (typeof code !== "string" || !code || typeof mcu !== "string" || !mcu) {
     return res.status(400).json({ error: "Code and MCU are required." });
@@ -1749,6 +1753,13 @@ async function startServer() {
   }
   // Last: turns an error from any route into one JSON answer.
   app.use(jsonErrorHandler);
+
+  // Caddy keeps connections to this server open between requests for up to
+  // 30 seconds (Caddyfile). Node's own limit was 5 seconds, so it could close
+  // one just as Caddy sent a request down it, and that request failed with a
+  // 502. Waiting longer than Caddy does means Caddy always closes first.
+  httpServer.keepAliveTimeout = 65_000;
+  httpServer.headersTimeout = 66_000;
 
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`AI Microcontroller Web3 IDE Server running on http://0.0.0.0:${PORT}`);

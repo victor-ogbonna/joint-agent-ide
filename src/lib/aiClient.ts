@@ -1,4 +1,5 @@
 import { auth } from "./firebase";
+import { fetchWithRetry, isNetworkError, beforeRetry, NETWORK_ERROR_MESSAGE, RETRY_DELAYS_MS } from "./resilientFetch";
 
 export interface QuotaBlockedInfo {
   tier: "free" | "paid";
@@ -60,7 +61,9 @@ async function authedFetch(path: string, body: any, signal?: AbortSignal, forceR
 // For routes that need auth but not the AI-quota semantics above — compile,
 // flash, serial. Plain authenticated fetch (GET or POST) with a single
 // retry on a stale/expired token, no 402-blocked handling since these
-// routes don't touch the Gemini token cap at all.
+// routes don't touch the Gemini token cap at all. A dropped connection is
+// retried, and a slow answer the server kept alive is unwrapped
+// (src/lib/resilientFetch.ts).
 export async function authedApiRequest(path: string, opts?: { method?: "GET" | "POST"; body?: any; signal?: AbortSignal }): Promise<Response> {
   const method = opts?.method || (opts?.body !== undefined ? "POST" : "GET");
   const doFetch = async (forceRefresh = false) => {
@@ -77,8 +80,8 @@ export async function authedApiRequest(path: string, opts?: { method?: "GET" | "
       signal: opts?.signal,
     });
   };
-  let response = await doFetch();
-  if (response.status === 401) response = await doFetch(true);
+  let response = await fetchWithRetry(() => doFetch(), opts?.signal);
+  if (response.status === 401) response = await fetchWithRetry(() => doFetch(true), opts?.signal);
   return response;
 }
 
@@ -92,10 +95,10 @@ async function authedRequest(path: string, body: any, signal?: AbortSignal): Pro
   if (known) return { blocked: known };
 
   try {
-    let response = await authedFetch(path, body, signal);
+    let response = await fetchWithRetry(() => authedFetch(path, body, signal), signal);
 
     if (response.status === 401) {
-      response = await authedFetch(path, body, signal, true);
+      response = await fetchWithRetry(() => authedFetch(path, body, signal, true), signal);
     }
 
     if (response.status === 402) {
@@ -119,7 +122,7 @@ async function authedRequest(path: string, body: any, signal?: AbortSignal): Pro
     return { response };
   } catch (err: any) {
     if (err?.name === "AbortError") throw err;
-    return { error: err.message || "Network error." };
+    return { error: isNetworkError(err) ? NETWORK_ERROR_MESSAGE : err.message || NETWORK_ERROR_MESSAGE };
   }
 }
 
@@ -132,7 +135,7 @@ export async function callAiEndpoint<T = any>(path: string, body: any, opts?: { 
     const data = await result.response.json();
     return { ok: true, blocked: false, data };
   } catch (err: any) {
-    return { ok: false, blocked: false, error: err.message || "Malformed response." };
+    return { ok: false, blocked: false, error: isNetworkError(err) ? NETWORK_ERROR_MESSAGE : err.message || "Malformed response." };
   }
 }
 
@@ -144,46 +147,79 @@ export type ChatStreamEvent =
   | { type: "context"; used: number; limit: number }
   | { type: "tier"; tier: string }
   | { type: "context_compacted"; summary: string; compactedIds: string[] }
+  /** The reply couldn't be written; the text before it says why (Try again). */
+  | { type: "failed" }
   | { type: "done" };
 
 // For /api/ai/chat specifically — reads the server-sent-events stream and
 // invokes onEvent as each chunk arrives, so the UI can render text as it's
 // generated instead of waiting for the full response.
+//
+// A reply always ends with a "done" event. If the connection drops first (a
+// phone network or router cutting it, a laptop sleeping, the server
+// restarting for an update), the request is sent again, after onRetry lets
+// the caller clear what it showed of the cut-off reply. canRetry says when
+// that's still safe; by default, only while nothing but progress has
+// arrived. The server stops a reply whose browser has gone, so nothing is
+// written twice.
 export async function streamChatEndpoint(
   path: string,
   body: any,
   onEvent: (event: ChatStreamEvent) => void,
-  opts?: { signal?: AbortSignal }
+  opts?: { signal?: AbortSignal; canRetry?: () => boolean; onRetry?: () => void }
 ): Promise<{ blocked: boolean; info?: QuotaBlockedInfo; error?: string }> {
-  const result = await authedRequest(path, body, opts?.signal);
-  if ("blocked" in result) return { blocked: true, info: result.blocked };
-  if ("error" in result) return { blocked: false, error: result.error };
+  for (let attempt = 0; ; attempt++) {
+    const result = await authedRequest(path, body, opts?.signal);
+    if ("blocked" in result) return { blocked: true, info: result.blocked };
+    if ("error" in result) return { blocked: false, error: result.error };
 
-  const reader = result.response.body?.getReader();
-  if (!reader) return { blocked: false, error: "No response stream." };
+    const reader = result.response.body?.getReader();
+    if (!reader) return { blocked: false, error: "No response stream." };
 
-  try {
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const events = buffer.split("\n\n");
-      buffer = events.pop() || "";
-      for (const raw of events) {
-        const line = raw.trim();
-        if (!line.startsWith("data:")) continue;
-        try {
-          onEvent(JSON.parse(line.slice(5).trim()));
-        } catch {
-          // ignore a malformed chunk rather than aborting the whole stream
+    // Only progress so far: the reply can start again without anything on
+    // screen being lost.
+    let onlyProgress = true;
+    let finished = false;
+    try {
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+        for (const raw of events) {
+          // Lines that aren't data (": keep-alive" every few seconds) only
+          // keep the connection open.
+          const line = raw.trim();
+          if (!line.startsWith("data:")) continue;
+          let event: ChatStreamEvent;
+          try {
+            event = JSON.parse(line.slice(5).trim());
+          } catch {
+            continue; // ignore a malformed chunk rather than aborting the whole stream
+          }
+          if (event.type === "done") finished = true;
+          else if (event.type !== "tier" && event.type !== "context" && event.type !== "tool_progress") onlyProgress = false;
+          try {
+            onEvent(event);
+          } catch {
+            // the page's own handling of one event must not end the stream
+          }
         }
       }
+      // Ended without its "done": the connection was cut short.
+      if (!finished) throw new TypeError("network error");
+      return { blocked: false };
+    } catch (err: any) {
+      if (err?.name === "AbortError") throw err;
+      if (!isNetworkError(err)) return { blocked: false, error: err.message || "Stream interrupted." };
+      const mayRetry = attempt < RETRY_DELAYS_MS.length && (opts?.canRetry ? opts.canRetry() : onlyProgress);
+      if (!mayRetry) return { blocked: false, error: NETWORK_ERROR_MESSAGE };
+      try { reader.cancel().catch(() => {}); } catch { /* already closed */ }
+      opts?.onRetry?.();
+      await beforeRetry(attempt, opts?.signal);
     }
-    return { blocked: false };
-  } catch (err: any) {
-    if (err?.name === "AbortError") throw err;
-    return { blocked: false, error: err.message || "Stream interrupted." };
   }
 }

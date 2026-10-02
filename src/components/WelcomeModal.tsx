@@ -12,6 +12,11 @@ interface WelcomeModalProps {
   onClose: () => void;
   /** boardId -> display name, so the list names the actual board. */
   boardNames?: Map<string, string>;
+  /**
+   * Shown before a build, to someone with no project open yet: says why,
+   * and what each choice does with the work on screen.
+   */
+  forBuild?: boolean;
 }
 
 const RECENT_SHOWN = 4;
@@ -29,7 +34,7 @@ const when = (ts: any): string => {
 };
 
 export default function WelcomeModal({
-  displayName, projects, loading, onNewProject, onOpenProject, onBrowseAll, onClose, boardNames,
+  displayName, projects, loading, onNewProject, onOpenProject, onBrowseAll, onClose, boardNames, forBuild = false,
 }: WelcomeModalProps) {
   const recent = projects.slice(0, RECENT_SHOWN);
 
@@ -39,10 +44,12 @@ export default function WelcomeModal({
         <div className="flex items-start justify-between px-5 pt-5 pb-4">
           <div className="min-w-0">
             <h2 className="font-display font-bold text-base text-[var(--text-main)] truncate">
-              Welcome back{displayName ? `, ${displayName}` : ""}
+              {forBuild ? "Choose a project to build in" : `Welcome back${displayName ? `, ${displayName}` : ""}`}
             </h2>
             <p className="text-xs text-[var(--text-muted)] mt-0.5">
-              {recent.length > 0 ? "Pick up where you left off, or start something new." : "Start your first project."}
+              {forBuild
+                ? "Your work isn't in a project yet. Start a new project to keep it there, and the build carries on. Or open a saved project instead."
+                : recent.length > 0 ? "Pick up where you left off, or start something new." : "Start your first project."}
             </p>
           </div>
           <button type="button" onClick={onClose} title="Close" className="text-[var(--text-muted)] hover:text-[var(--text-main)] shrink-0 -mr-1">
@@ -57,7 +64,7 @@ export default function WelcomeModal({
             className="w-full flex items-center justify-center gap-1.5 text-white text-sm font-semibold py-2.5 rounded-lg transition shadow-sm btn-lift"
             style={{ background: "var(--gradient-accent)" }}
           >
-            <Plus size={15} /> Start a new project
+            <Plus size={15} /> {forBuild ? "Start a new project with this work" : "Start a new project"}
           </button>
 
           {loading ? (

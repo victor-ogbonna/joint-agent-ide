@@ -6,17 +6,32 @@ import {
   MessageSquare, FileCode2, FlaskConical, Activity, Chrome, Bell, Check, Smartphone, Play, Pause
 } from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
+import { useResetOnReturn } from "./components/GoogleSignInButton";
 import { useDocumentScroll } from "./useDocumentScroll";
 
 type AuthMode = "signin" | "signup";
 
+/**
+ * Back from signing in with Google in this tab, with an error: the sign-in
+ * box opens again to show it. Its own component so that HomePage itself never
+ * calls useAuth() (in waitlist mode it renders outside the AuthProvider).
+ */
+function OpenOnReturnedError({ onOpen }: { onOpen: () => void }) {
+  const { returnedWithError } = useAuth();
+  useEffect(() => {
+    if (returnedWithError) onOpen();
+  }, [returnedWithError]);
+  return null;
+}
+
 function AuthModal({ mode, onClose, onSwitchMode }: { mode: AuthMode; onClose: () => void; onSwitchMode: (m: AuthMode) => void }) {
-  const { signInWithEmail, signUpWithEmail, signInWithGoogle, error, clearError } = useAuth();
+  const { signInWithEmail, signUpWithEmail, signInWithGoogle, signInWithGoogleHere, offerSignInHere, error, clearError } = useAuth();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [googleSubmitting, setGoogleSubmitting] = useState(false);
+  useResetOnReturn(() => setGoogleSubmitting(false));
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -34,10 +49,10 @@ function AuthModal({ mode, onClose, onSwitchMode }: { mode: AuthMode; onClose: (
     }
   };
 
-  const handleGoogle = async () => {
+  const handleGoogle = async (inThisTab = false) => {
     setGoogleSubmitting(true);
     try {
-      await signInWithGoogle();
+      await (inThisTab ? signInWithGoogleHere() : signInWithGoogle());
     } catch (err) {
       // handled in context
     } finally {
@@ -131,7 +146,7 @@ function AuthModal({ mode, onClose, onSwitchMode }: { mode: AuthMode; onClose: (
 
         <div className="px-6 pb-6">
           <button
-            onClick={handleGoogle}
+            onClick={() => void handleGoogle()}
             disabled={submitting || googleSubmitting}
             className="w-full flex items-center justify-center gap-2 bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] border border-[var(--border-main)] text-[var(--text-main)] text-sm font-medium py-2.5 rounded-lg transition disabled:opacity-60"
           >
@@ -147,6 +162,17 @@ function AuthModal({ mode, onClose, onSwitchMode }: { mode: AuthMode; onClose: (
             )}
             Continue with Google
           </button>
+          {/* The pop-up closed before it finished (see the message above). */}
+          {offerSignInHere && !googleSubmitting && (
+            <button
+              type="button"
+              onClick={() => void handleGoogle(true)}
+              disabled={submitting}
+              className="mt-2 w-full flex items-center justify-center bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] border border-[var(--border-main)] text-[var(--accent-secondary)] text-sm font-medium py-2.5 rounded-lg transition disabled:opacity-60"
+            >
+              Continue with Google in this tab
+            </button>
+          )}
         </div>
 
         <div className="px-6 pb-6 text-center text-xs text-[var(--text-muted)]">
@@ -1161,9 +1187,9 @@ export default function HomePage({
         </a>
       </footer>
 
-      {/* Never mounted in waitlist mode — AuthModal is the only thing here that
-          calls useAuth(), so keeping it out lets this page render outside the
-          AuthProvider entirely. */}
+      {/* Never mounted in waitlist mode — AuthModal and OpenOnReturnedError are
+          the only things here that call useAuth(), so keeping them out lets
+          this page render outside the AuthProvider entirely. */}
       {accessDenied && (
         <div className="fixed inset-x-0 top-0 z-40 px-4 pt-3 flex justify-center pointer-events-none">
           <div className="pointer-events-auto max-w-md w-full rounded-xl border border-[var(--accent-primary)]/40 bg-[var(--bg-panel)] shadow-2xl px-4 py-3 text-center">
@@ -1176,6 +1202,9 @@ export default function HomePage({
         </div>
       )}
 
+      {(!waitlistMode || inviteSignIn) && (
+        <OpenOnReturnedError onOpen={() => setAuthModal((m) => m ?? "signin")} />
+      )}
       {(!waitlistMode || inviteSignIn) && authModal && (
         <AuthModal mode={authModal} onClose={() => setAuthModal(null)} onSwitchMode={setAuthModal} />
       )}

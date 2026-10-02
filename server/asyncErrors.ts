@@ -43,9 +43,11 @@ export function catchAsyncErrors(app: express.Express): void {
 /** The last stop for an error: log it, and answer the one request that hit it. */
 export function jsonErrorHandler(err: any, req: express.Request, res: express.Response, _next: express.NextFunction): void {
   const status = Number(err?.status || err?.statusCode);
+  // A slow answer already under way (server/holdOpen.ts) still answers in JSON.
+  const held = res.locals?.heldOpen === true && !res.writableEnded;
   // A body the parser refused (too large, not JSON) is the caller's mistake.
   if (status >= 400 && status < 500) {
-    if (!res.headersSent) {
+    if (!res.headersSent || held) {
       const [error, code] = status === 413 ? ["That request is too large.", "TOO_LARGE"]
         : status === 404 ? ["Not found.", "NOT_FOUND"]
         : ["That request couldn't be read.", "BAD_REQUEST"];
@@ -54,7 +56,7 @@ export function jsonErrorHandler(err: any, req: express.Request, res: express.Re
     return;
   }
   console.error(`[Server] ${req.method} ${req.path} failed:`, err?.stack || err?.message || err);
-  if (res.headersSent) {
+  if (res.headersSent && !held) {
     // A stream (such as the agent's reply) was already under way: end it.
     try { res.end(); } catch { /* already closed */ }
     return;

@@ -7,6 +7,8 @@ interface NewProjectModalProps {
   onCreate: (name: string, board: BoardInfo) => Promise<void> | void;
   initialName?: string;
   mode?: "create" | "import";
+  /** A line under the name field: what happens with the project (e.g. work moving into it). */
+  note?: string;
   /** Catalogue board id the connected USB device identified itself as, if any. */
   detectedBoardId?: string | null;
   detectedFamily?: MCUType | null;
@@ -60,7 +62,7 @@ const rankBoards = (list: BoardInfo[], query: string): BoardInfo[] => {
     .map((x) => x.b);
 };
 
-export default function NewProjectModal({ onClose, onCreate, initialName, mode = "create", detectedBoardId, detectedFamily, detectedName }: NewProjectModalProps) {
+export default function NewProjectModal({ onClose, onCreate, initialName, mode = "create", note, detectedBoardId, detectedFamily, detectedName }: NewProjectModalProps) {
   const [step, setStep] = useState<"name" | "board">("name");
   const [name, setName] = useState(initialName || "");
   const [creating, setCreating] = useState(false);
@@ -172,6 +174,7 @@ export default function NewProjectModal({ onClose, onCreate, initialName, mode =
               placeholder="Project name (e.g. Smart Thermostat)"
               className="w-full bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-lg px-3 py-2.5 text-sm text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] transition"
             />
+            {note && <p className="text-xs text-[var(--text-muted)] -mt-1">{note}</p>}
             <button
               type="submit"
               className="w-full flex items-center justify-center gap-1.5 text-white text-sm font-semibold py-2.5 rounded-lg transition shadow-sm"

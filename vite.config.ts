@@ -2,10 +2,13 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig} from 'vite';
+import {legacyCss} from './vite.legacyCss';
 
 export default defineConfig(() => {
   return {
-    plugins: [react(), tailwindcss()],
+    // legacyCss: a copy of the stylesheet for older browsers (old Windows
+    // laptops' Chrome among them), loaded only where it's needed.
+    plugins: [react(), tailwindcss(), legacyCss()],
     // Stamped into the bundle so the running build can identify itself. A
     // phone quietly serving a superseded bundle cost several rounds of
     // debugging symptoms that had already been fixed; now every terminal log
