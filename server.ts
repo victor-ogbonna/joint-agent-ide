@@ -26,7 +26,7 @@ import { adminDb, isFirebaseAdminConfigured } from './server/firebaseAdmin';
 import { registerWaitlistRoutes } from './server/waitlist';
 import { registerFeedbackRoutes } from './server/feedback';
 import { registerCreatorRoutes } from './server/creators';
-import { registerTeamRoutes, teamForStatus, invitationFor, type TeamStatus, type WaitingInvite } from './server/teams';
+import { registerTeamRoutes, teamForStatus, invitationForStatus, type TeamStatus, type WaitingInvite } from './server/teams';
 import { registerTeamProjectRoutes } from './server/teamProjects';
 import { canUseCode, firstMonthOfferUntil, firstMonthOfferOpensAt } from './server/referrals';
 import { registerGithubRoutes } from './server/github';
@@ -437,7 +437,7 @@ app.get("/api/quota/status", requireFirebaseAuth, async (req, res) => {
     team = await teamForStatus(adminDb, who, doc, Date.now());
     // With what it was paid for: a year's license keeps PRO 30 days after it ends, not 2.
     doc = { ...doc, teamId: team ? team.id : null, teamPaidUntil: team ? team.paidUntil : null, teamPaidFor: team ? team.paidFor : null };
-    if (!team) invitation = await invitationFor(adminDb, who, Date.now());
+    if (!team) invitation = await invitationForStatus(adminDb, who, Date.now());
   } catch (err: any) {
     console.error(`[Teams] Status for uid=${req.uid} failed:`, err?.message || err);
   }

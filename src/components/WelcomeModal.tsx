@@ -17,8 +17,11 @@ interface WelcomeModalProps {
    * and what each choice does with the work on screen.
    */
   forBuild?: boolean;
-  /** The saved projects couldn't be loaded (no connection): said, never "your first project". */
-  failed?: boolean;
+  /**
+   * The saved projects couldn't be loaded: said, never "your first
+   * project". "offline": no connection; "refused": the database said no.
+   */
+  failed?: "offline" | "refused" | null;
   onRetry?: () => void;
 }
 
@@ -37,7 +40,7 @@ const when = (ts: any): string => {
 };
 
 export default function WelcomeModal({
-  displayName, projects, loading, onNewProject, onOpenProject, onBrowseAll, onClose, boardNames, forBuild = false, failed = false, onRetry,
+  displayName, projects, loading, onNewProject, onOpenProject, onBrowseAll, onClose, boardNames, forBuild = false, failed = null, onRetry,
 }: WelcomeModalProps) {
   const recent = projects.slice(0, RECENT_SHOWN);
 
@@ -108,7 +111,7 @@ export default function WelcomeModal({
             </div>
           ) : failed ? (
             <p className="text-center text-xs text-[var(--text-muted)]" role="status" data-welcome-failed="">
-              Couldn't load your saved projects just now. They're safe: check your connection.{" "}
+              Couldn't load your saved projects just now. They're safe: {failed === "offline" ? "check your connection." : "try again in a moment."}{" "}
               {onRetry && (
                 <button type="button" onClick={onRetry} className="font-semibold text-[var(--accent-primary)] hover:underline">Try again</button>
               )}

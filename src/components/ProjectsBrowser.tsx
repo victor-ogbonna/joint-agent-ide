@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { X, FolderOpen, Plus, Trash2, Cpu, Loader2, FileCode, Search, RotateCcw } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import {
-  listProjects, listTrashedProjects, trashProject, restoreProject, deleteProject,
+  listProjectsAndTrash, trashProject, restoreProject, deleteProject,
   trashExpiresAt, ProjectSummary, TRASH_DAYS, ProjectsUnreachableError,
 } from "../lib/projects";
 
@@ -60,7 +60,7 @@ export default function ProjectsBrowser({ onClose, onOpenProject, onNewProject, 
     setError(null);
     setLoadFailed(false);
     try {
-      const [live, trashed] = await Promise.all([listProjects(user.uid), listTrashedProjects(user.uid)]);
+      const { live, trashed } = await listProjectsAndTrash(user.uid);
       setProjects(live);
       setTrash(trashed);
     } catch (err: any) {

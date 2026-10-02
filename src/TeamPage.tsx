@@ -45,13 +45,18 @@ interface TeamView {
 }
 interface PageData {
   team: TeamView | null;
-  invites: { teamId: string; teamName: string; role: TeamRole; state?: LicenseState; full?: boolean }[];
+  /** `blocked`: why the server would refuse it now (server/teams.ts inviteBlock). */
+  invites: { teamId: string; teamName: string; role: TeamRole; state?: LicenseState; blocked?: InviteBlock | null }[];
   verified: boolean;
   prices: { seatPrice: number; currency: string; minSeats: number; maxSeats: number };
   payments: boolean;
 }
 type Call = (path: string, body?: unknown) => Promise<{ ok: boolean; data: any }>;
 type ProPrice = { amount: number; currency: string };
+/** Why an invitation can't be accepted yet (server/teams.ts InviteBlock). */
+type InviteBlock = "on_team" | "unpaid" | "ended" | "full";
+/** Someone joined a team, by an invitation or a code. */
+type OnJoined = (teamId: string, teamName: string) => void;
 
 // Shown for paying by invoice or bank transfer instead (as on /privacy).
 const CONTACT_EMAIL = "victorogbonna313@gmail.com";
@@ -579,12 +584,20 @@ function LeaveButton({ team, call, reload }: { team: TeamView; call: Call; reloa
   );
 }
 
+/** Why an invitation can't be accepted yet, as the server says. */
+const BLOCKED_TEXT: Record<InviteBlock, string> = {
+  on_team: "Leave your current team to join it.",
+  unpaid: "It can be accepted once the team's license is paid.",
+  ended: "It can be accepted once the team's license is renewed.",
+  full: "Every seat is taken: it can be accepted once its admin adds seats.",
+};
+
 /**
  * Invitations to the person's address. Nobody is put on a team without
  * saying so: Accept joins it (with PRO while it's paid), Decline turns it
  * down. One that can't be accepted yet says why.
  */
-function WaitingInvites({ data, call, reload, onJoined }: { data: PageData; call: Call; reload: () => Promise<void>; onJoined: (teamName: string) => void }) {
+function WaitingInvites({ data, call, reload, onJoined }: { data: PageData; call: Call; reload: () => Promise<void>; onJoined: OnJoined }) {
   const { busy, error, note, run } = useAction(call, reload);
   if (!data.invites.length) return null;
   return (
@@ -593,15 +606,7 @@ function WaitingInvites({ data, call, reload, onJoined }: { data: PageData; call
       <ul className="mt-2 divide-y divide-[var(--border-main)] text-[13px]">
         {data.invites.map((i) => {
           // Why it can't be accepted now, if it can't.
-          const blocked = data.team
-            ? "Leave your current team to join it."
-            : i.role !== "admin" && i.state === "unpaid"
-              ? "It can be accepted once the team's license is paid."
-              : i.role !== "admin" && i.state === "ended"
-                ? "It can be accepted once the team's license is renewed."
-                : i.full
-                  ? "Every seat is taken: it can be accepted once its admin adds seats."
-                  : null;
+          const blocked = (i.blocked && BLOCKED_TEXT[i.blocked]) || null;
           return (
             <li key={i.teamId} className="py-3" data-invitation={i.teamId}>
               <p className="min-w-0">
@@ -612,7 +617,7 @@ function WaitingInvites({ data, call, reload, onJoined }: { data: PageData; call
                 {!blocked && (
                   <button
                     type="button" className={primary} style={{ background: "var(--gradient-hero)" }} disabled={busy !== null}
-                    onClick={() => void run(`a:${i.teamId}`, "/api/team/invites/accept", { teamId: i.teamId }, () => { onJoined(i.teamName); return null; })}
+                    onClick={() => void run(`a:${i.teamId}`, "/api/team/invites/accept", { teamId: i.teamId }, () => { onJoined(i.teamId, i.teamName); return null; })}
                   >
                     {busy === `a:${i.teamId}` ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />} Accept
                   </button>
@@ -630,7 +635,7 @@ function WaitingInvites({ data, call, reload, onJoined }: { data: PageData; call
   );
 }
 
-function NoTeam({ data, call, reload, joinFromLink, proMonthly, onJoined }: { data: PageData; call: Call; reload: () => Promise<void>; joinFromLink: string; proMonthly: ProPrice | null; onJoined: (teamName: string) => void }) {
+function NoTeam({ data, call, reload, joinFromLink, proMonthly, onJoined }: { data: PageData; call: Call; reload: () => Promise<void>; joinFromLink: string; proMonthly: ProPrice | null; onJoined: OnJoined }) {
   const join = useAction(call, reload);
   const create = useAction(call, reload);
   const [code, setCode] = useState(joinFromLink);
@@ -660,7 +665,7 @@ function NoTeam({ data, call, reload, joinFromLink, proMonthly, onJoined }: { da
               const url = new URL(window.location.href);
               url.searchParams.delete("join");
               window.history.replaceState(null, "", url.toString());
-              onJoined(d.name);
+              onJoined(d.teamId, d.name);
               return null;
             });
           }}
@@ -778,10 +783,10 @@ export default function TeamPage() {
 
   const team = data?.team ?? null;
   const lock = team ? lockOf(team.state) : null;
-  // "You joined …", shown above the team: the card it was pressed in goes
-  // once the page shows the team.
-  const [joined, setJoined] = useState<string | null>(null);
-  const onJoined = useCallback((teamName: string) => setJoined(`You joined ${teamName}.`), []);
+  // "You joined …", shown above the team joined (the card it was pressed in
+  // goes once the page shows it), and only that team: not one made later.
+  const [joined, setJoined] = useState<{ teamId: string; text: string } | null>(null);
+  const onJoined = useCallback<OnJoined>((teamId, teamName) => setJoined({ teamId, text: `You joined ${teamName}.` }), []);
 
   return (
     <div className="min-h-full w-full bg-[var(--bg-root)] text-[var(--text-main)] px-4 py-10 sm:px-6">
@@ -819,7 +824,7 @@ export default function TeamPage() {
         ) : (
           <div className="mt-6 space-y-4">
             {error && <p role="alert" className="text-[14px] text-red-500">{error}</p>}
-            {joined && team && <p role="status" className="text-[14px] font-medium text-green-500" data-joined="">{joined}</p>}
+            {joined && team && team.id === joined.teamId && <p role="status" className="text-[14px] font-medium text-green-500" data-joined="">{joined.text}</p>}
             <WaitingInvites data={data} call={call} reload={load} onJoined={onJoined} />
             {!team ? (
               <NoTeam data={data} call={call} reload={load} joinFromLink={joinFromLink} proMonthly={proMonthly} onJoined={onJoined} />

@@ -104,16 +104,26 @@ async function listAll(uid: string): Promise<ProjectSummary[]> {
   });
 }
 
+/**
+ * The account's projects, from one read: the live ones (most recently
+ * updated first), and the ones in Trash (most recently deleted first).
+ */
+export async function listProjectsAndTrash(uid: string): Promise<{ live: ProjectSummary[]; trashed: ProjectSummary[] }> {
+  const all = await listAll(uid);
+  return {
+    live: all.filter((p) => !p.deletedAt),
+    trashed: all.filter((p) => p.deletedAt).sort((a, b) => millis(b.deletedAt) - millis(a.deletedAt)),
+  };
+}
+
 /** The account's projects, not counting the ones in Trash. */
 export async function listProjects(uid: string): Promise<ProjectSummary[]> {
-  return (await listAll(uid)).filter((p) => !p.deletedAt);
+  return (await listProjectsAndTrash(uid)).live;
 }
 
 /** Projects in Trash, most recently deleted first. */
 export async function listTrashedProjects(uid: string): Promise<ProjectSummary[]> {
-  return (await listAll(uid))
-    .filter((p) => p.deletedAt)
-    .sort((a, b) => millis(b.deletedAt) - millis(a.deletedAt));
+  return (await listProjectsAndTrash(uid)).trashed;
 }
 
 function millis(ts: any): number {
@@ -161,10 +171,11 @@ export async function restoreProject(uid: string, projectId: string): Promise<vo
 
 /**
  * Deletes for good the projects that have been in Trash longer than
- * TRASH_DAYS days. Run when the app opens; returns how many went.
+ * TRASH_DAYS days. Run when the app opens, on the Trash it has just listed
+ * (`trashed`), or read here; returns how many went.
  */
-export async function purgeExpiredTrash(uid: string, now = Date.now()): Promise<number> {
-  const expired = (await listAll(uid)).filter((p) => p.deletedAt && trashExpiresAt(p.deletedAt) <= now);
+export async function purgeExpiredTrash(uid: string, now = Date.now(), trashed?: ProjectSummary[]): Promise<number> {
+  const expired = (trashed ?? (await listAll(uid))).filter((p) => p.deletedAt && trashExpiresAt(p.deletedAt) <= now);
   for (const p of expired) await deleteDoc(projectDoc(uid, p.id));
   return expired.length;
 }

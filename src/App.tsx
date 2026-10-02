@@ -45,7 +45,7 @@ import { WINDOW_HOURS, FREE_WINDOW_TOKENS, PRO_WINDOW_TOKENS, FREE_PROJECT_LIMIT
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
 import { isWebUsbAvailable, requestUsbSerialPort, getGrantedUsbSerialPorts, describeVisibleUsbDevices } from "./lib/webusbSerial";
-import { createProject, getProject, updateProject, renameProject, listProjects, trashProject, purgeExpiredTrash, ProjectSummary, ProjectsUnreachableError, trimMessagesForStorage, TRASH_DAYS } from "./lib/projects";
+import { createProject, getProject, updateProject, renameProject, listProjectsAndTrash, trashProject, purgeExpiredTrash, ProjectSummary, ProjectsUnreachableError, trimMessagesForStorage, TRASH_DAYS } from "./lib/projects";
 import { sketchBaudRate, sketchOpensSerial, sketchSerial } from "./lib/sketchBaud";
 import { usbChipName } from "./lib/usbChips";
 import { callAiEndpoint, streamChatEndpoint, authedApiRequest, clearLastKnownBlock, primeLastKnownBlock, QuotaBlockedInfo } from "./lib/aiClient";
@@ -963,7 +963,13 @@ export default function App() {
   // straight away, and the invitation's notice goes.
   useEffect(() => {
     if (!user || !teamInvitation) return;
-    const again = () => { if (document.visibilityState === "visible") void refreshPlanStatus(); };
+    // Coming back fires both focus and visibilitychange: asked once.
+    let askedAt = 0;
+    const again = () => {
+      if (document.visibilityState !== "visible" || Date.now() - askedAt < 2000) return;
+      askedAt = Date.now();
+      void refreshPlanStatus();
+    };
     window.addEventListener("focus", again);
     document.addEventListener("visibilitychange", again);
     return () => {
@@ -3059,13 +3065,10 @@ export default function App() {
   const atProjectLimit = async (fresh = false): Promise<boolean> => {
     if (!user || accountTier !== "free") return false;
     if (!fresh && recentProjects.length < FREE_PROJECT_LIMIT) return false;
-    try {
-      const list = await listProjects(user.uid);
-      setRecentProjects(list);
-      return list.length >= FREE_PROJECT_LIMIT;
-    } catch {
-      return false;
-    }
+    // Read as Recent is, so Recent shows the same list (and a failure the
+    // same way). A list that couldn't load never blocks.
+    const list = await refreshRecentProjects();
+    return list !== null && list.length >= FREE_PROJECT_LIMIT;
   };
   const openNewProject = async () => {
     if (await atProjectLimit()) {
@@ -3200,14 +3203,14 @@ export default function App() {
     }
   };
 
-  // Projects in Trash longer than TRASH_DAYS days are deleted for good, once
-  // per sign-in. Best effort: anything left is tried again next time.
-  useEffect(() => {
-    if (!user) return;
-    purgeExpiredTrash(user.uid).catch(() => { /* retried next sign-in */ });
-  }, [user]);
-
-  const refreshRecentProjects = React.useCallback(async () => {
+  /**
+   * Read the account's projects for Recent. The list read (for a count,
+   * even when a newer read has taken over Recent), or null when it couldn't
+   * be read. The first list of a sign-in also clears out Trash: projects
+   * there longer than TRASH_DAYS days are deleted for good (best effort:
+   * anything left goes next sign-in).
+   */
+  const refreshRecentProjects = React.useCallback(async (): Promise<ProjectSummary[] | null> => {
     const ticket = ++recentRequestRef.current;
     if (!user) {
       setRecentProjects([]);
@@ -3215,19 +3218,23 @@ export default function App() {
       setRecentFailures(0);
       setLoadingRecent(false);
       recentLoadedForRef.current = null;
-      return;
+      return null;
     }
     setLoadingRecent(true);
     try {
-      const list = await listProjects(user.uid);
-      if (ticket !== recentRequestRef.current) return;
+      const { live: list, trashed } = await listProjectsAndTrash(user.uid);
+      if (ticket !== recentRequestRef.current) return list;
+      if (recentLoadedForRef.current !== user.uid) {
+        purgeExpiredTrash(user.uid, Date.now(), trashed).catch(() => { /* tried again next sign-in */ });
+      }
       setRecentProjects(list);
       setRecentFailed(null);
       setRecentFailures(0);
       recentLoadedForRef.current = user.uid;
       setRecentFetched(true);
+      return list;
     } catch (err: any) {
-      if (ticket !== recentRequestRef.current) return;
+      if (ticket !== recentRequestRef.current) return null;
       // Not loaded: the list on screen stays as it was, and Recent says it
       // couldn't load rather than "no projects". The reason goes to the
       // console (no connection, or the database refusing).
@@ -3241,6 +3248,7 @@ export default function App() {
       } else {
         setRecentFailed("refused");
       }
+      return null;
     } finally {
       if (ticket === recentRequestRef.current) setLoadingRecent(false);
     }
@@ -4829,7 +4837,7 @@ export default function App() {
           displayName={user.displayName?.split(" ")[0] || ""}
           projects={recentProjects}
           loading={loadingRecent}
-          failed={!!recentFailed && recentProjects.length === 0}
+          failed={recentProjects.length === 0 ? recentFailed : null}
           onRetry={() => void refreshRecentProjects()}
           forBuild={pendingBuild !== null}
           onNewProject={() => { setShowWelcome(false); void openNewProject(); }}
