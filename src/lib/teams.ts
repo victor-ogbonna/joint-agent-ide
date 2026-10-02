@@ -3,6 +3,8 @@
  * (server/teams.ts) and the arithmetic the pages show before paying, which
  * mirrors server/teamRules.ts. The server always prices the payment itself.
  */
+import { formatMoney, nairaToDollars } from "./plans";
+
 const DAY = 24 * 60 * 60 * 1000;
 
 export type LicenseState = "unpaid" | "active" | "grace" | "ended";
@@ -37,6 +39,15 @@ export function readTeamStatus(raw: any): TeamStatusView | null {
     graceUntil: time(raw.graceUntil),
   };
 }
+
+/**
+ * Joining, invitations and team projects are locked before a team's first
+ * payment ("unpaid"), and after its license ends until it's renewed
+ * ("ended"); open while it's paid or in its grace days. As the server
+ * decides (server/teams.ts licensePaid).
+ */
+export type TeamLock = "unpaid" | "ended" | null;
+export const lockOf = (state: LicenseState): TeamLock => (state === "unpaid" || state === "ended" ? state : null);
 
 /** Whole days left until `at`, at least 1 while it's still ahead. */
 export function daysLeft(at: number, now = Date.now()): number {
@@ -75,10 +86,29 @@ export interface TeamSavings {
 }
 
 /**
+ * A team's prices as the pages show them. Prices are shown in dollars: a
+ * naira amount in proportion to the seat price, at $7 to ₦9,300 for the seat
+ * itself, so a ₦6,643 seat reads $5 and 6 of them for a month read $30, not a
+ * cent off. `naira` is what Paystack charges, for the line under a pay
+ * button; null when the price isn't in naira (a team priced in dollars).
+ */
+export function teamMoney(seatPrice: number, currency: string): { seat: number; currency: string; show: (amount: number) => string; naira: (amount: number) => string | null } {
+  const inNaira = currency.toUpperCase() === "NGN" && seatPrice > 0;
+  const seat = inNaira ? nairaToDollars(seatPrice) : seatPrice;
+  const shown = inNaira ? "USD" : currency;
+  return {
+    seat,
+    currency: shown,
+    show: (amount) => formatMoney(inNaira ? Math.round((amount * seat) / seatPrice) : amount, shown),
+    naira: (amount) => (inNaira ? formatMoney(amount, "NGN") : null),
+  };
+}
+
+/**
  * What a team saves a month against everyone paying for PRO on their own.
  * `pro` is PRO's monthly price, tried in order (from Paystack, then the
- * listed ₦9,300 and $7); the first in the team's currency counts. Null when
- * none is, or a seat costs no less.
+ * listed $7); the first in the currency given counts. Null when none is, or
+ * a seat costs no less.
  */
 export function teamSavings(seats: number, seatPrice: number, currency: string, pro: ({ amount: number; currency: string } | null)[]): TeamSavings | null {
   const match = pro.find((p) => p && Number.isFinite(p.amount) && p.amount > 0 && p.currency.toUpperCase() === currency.toUpperCase());

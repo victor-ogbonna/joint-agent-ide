@@ -34,7 +34,9 @@ const afterRemove = loadAdminConfig();
 check(!("paystackYearlyPlanCode" in afterRemove) && afterRemove.paystackPlanCode === "PLN_x", "the yearly plan can be removed, the monthly one stays");
 
 // Checking a plan with Paystack (server/paystack.ts), with Paystack stood in for.
-const { checkPlan } = await import("../server/paystack.ts");
+const { checkPlan, isPaystackReference } = await import("../server/paystack.ts");
+check(isPaystackReference("T685312322670591") && isPaystackReference("ref-2026.10=a_b") && !isPaystackReference("../transaction/list") && !isPaystackReference("a b")
+  && !isPaystackReference("x".repeat(201)) && !isPaystackReference(""), "a payment check takes only a Paystack reference (never a path or anything longer)");
 const reply = (status, body) => async () => ({ status, ok: status >= 200 && status < 300, json: async () => body });
 const yearly = await checkPlan("sk_live_x", "PLN_year", reply(200, { status: true, data: { name: "PRO yearly", amount: 8928000, currency: "NGN", interval: "annually" } }));
 check(yearly.ok && yearly.amount === 8928000 && yearly.currency === "NGN" && yearly.interval === "annually" && yearly.name === "PRO yearly", "a plan Paystack knows: its name, price and interval");
@@ -47,7 +49,7 @@ const express = (await import("express")).default;
 const { registerPaystackRoutes } = await import("../server/paystack.ts");
 const app = express();
 app.use(express.json());
-registerPaystackRoutes(app, (_req, _res, next) => next());
+registerPaystackRoutes(app, (_req, _res, next) => next(), (_req, password) => (password === "right-pass" ? "ok" : password === "locked" ? "locked" : "wrong"));
 const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
 const base = `http://127.0.0.1:${server.address().port}`;
 const call = async (method, p, body) => {
@@ -62,13 +64,62 @@ check(r.status === 200 && r.body.durable === true && r.body.publicKey === "pk_li
 r = await call("GET", "/api/admin/paystack-config");
 check(r.body.maskedSecretKey?.startsWith("sk_liv") && r.body.maskedSecretKey.endsWith("cret") && r.body.sources.secretKey === "admin" && r.body.sources.planCode === "admin",
   "the page shows the secret masked, and where each setting comes from");
-r = await call("GET", "/api/admin/paystack-secret");
-check(r.body.secretKey === "sk_live_abc123secret", "Show: the secret key in full, only when asked");
+const plainGet = await fetch(base + "/api/admin/paystack-secret");
+check(plainGet.status === 404 && !(await plainGet.text()).includes("abc123secret"), "the secret key can't be fetched with a plain GET any more");
+r = await call("POST", "/api/admin/paystack-secret", {});
+check(r.status === 403 && !JSON.stringify(r.body).includes("abc123secret"), "Show without the admin password: refused, the key not sent");
+r = await call("POST", "/api/admin/paystack-secret", { password: "wrong-pass" });
+check(r.status === 403 && /isn't the admin password/.test(r.body.error), "a wrong password: refused");
+r = await call("POST", "/api/admin/paystack-secret", { password: "locked" });
+check(r.status === 429, "too many wrong passwords: locked out for a while");
+r = await call("POST", "/api/admin/paystack-secret", { password: "right-pass" });
+check(r.status === 200 && r.body.secretKey === "sk_live_abc123secret", "Show with the admin password typed again: the secret key in full");
 r = await call("POST", "/api/admin/paystack-config", { clearYearlyPlanCode: true });
 check(r.status === 200 && r.body.yearlyPlanCode === null && r.body.planCode === "PLN_x", "Remove: the yearly plan goes, the monthly stays");
 r = await call("POST", "/api/admin/paystack-config", { planCode: "nope" });
 check(r.status === 400 && /PLN_/.test(r.body.error), "a plan code that isn't one is refused");
+r = await call("POST", "/api/admin/paystack-config", { publicKey: "pk_test_abc" });
+check(r.status === 400, "one test key beside a live one is still refused");
+r = await call("POST", "/api/admin/paystack-config", { secretKey: "sk_test_abc123secret", publicKey: "pk_test_abc" });
+check(r.status === 200 && r.body.publicKey === "pk_test_abc" && r.body.maskedSecretKey?.startsWith("sk_tes"), "both keys together: live to test works (the admin card asks for both)");
+r = await call("POST", "/api/admin/paystack-config", { secretKey: "sk_live_abc123secret", publicKey: "pk_live_abc" });
+check(r.status === 200 && r.body.publicKey === "pk_live_abc" && r.body.maskedSecretKey?.startsWith("sk_liv"), "and test back to live");
+// Keys of different kinds already (one from the server's .env file, say): a plan code can still be saved.
+await saveAdminConfig({ paystackPublicKey: "pk_test_fromenv" });
+r = await call("POST", "/api/admin/paystack-config", { planCode: "PLN_newmonth" });
+check(r.status === 200 && r.body.planCode === "PLN_newmonth", "with the keys mismatched, a plan code still saves (only a key change is checked)");
+await saveAdminConfig({ paystackPublicKey: "pk_live_abc", paystackPlanCode: "PLN_x" });
 await new Promise((resolve) => server.close(resolve));
+
+// On Render, a setting is also kept in Render's own settings; one removed here goes from there too.
+{
+  const realFetch = globalThis.fetch;
+  const sent = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes("/env-vars") && (!opts.method || opts.method === "GET")) {
+      return { ok: true, json: async () => [
+        { envVar: { key: "PAYSTACK_YEARLY_PLAN_CODE", value: "PLN_yr" }, cursor: "a" },
+        { envVar: { key: "PAYSTACK_PLAN_CODE", value: "PLN_x" }, cursor: "b" },
+        { envVar: { key: "OTHER", value: "kept" }, cursor: "c" },
+      ] };
+    }
+    sent.push({ url: u, method: opts.method, body: opts.body ? JSON.parse(opts.body) : null });
+    return { ok: true, json: async () => ({}), text: async () => "" };
+  };
+  process.env.RENDER_API_KEY = "rnd_test";
+  process.env.RENDER_SERVICE_ID = "srv-test";
+  try {
+    const out = await saveAdminConfig({ paystackYearlyPlanCode: undefined });
+    const put = sent.find((x) => x.method === "PUT");
+    const keys = (put?.body ?? []).map((v) => v.key).sort().join();
+    check(out.durable && keys === "OTHER,PAYSTACK_PLAN_CODE", "the yearly plan removed: gone from Render's settings, the rest kept", keys);
+  } finally {
+    globalThis.fetch = realFetch;
+    delete process.env.RENDER_API_KEY;
+    delete process.env.RENDER_SERVICE_ID;
+  }
+}
 
 fs.rmSync(dir, { recursive: true, force: true });
 console.log(bad ? `\n${bad} FAILED` : "\nall ok");

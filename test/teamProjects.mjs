@@ -55,6 +55,8 @@ class Query {
     if (op !== "==") throw new Error("only == in the stand-in");
     return new Query(this.db, this.col, [...this.filters, [field, value]]);
   }
+  // The fields asked for: the stand-in returns them all, as a superset.
+  select() { this.selected = true; this.db.selects = (this.db.selects ?? 0) + 1; return this; }
   _snap() {
     const docs = [];
     for (const [key, d] of this.db.store) {
@@ -95,7 +97,7 @@ const [ada, ben, chi, dee, eve] = ["ada", "ben", "chi", "dee", "eve"].map(who);
 
 // Lagos Robotics: Ada (admin), Ben, Chi. Another team: Dee (its admin). Eve: no team.
 put("teams/T1", { name: "Lagos Robotics", kind: "school", seats: 5, paidUntil: NOW + 30 * 86400000, joinCode: "ABCD2345", memberCount: 3, createdAt: NOW });
-put("teams/T2", { name: "Abuja Makers", kind: "team", seats: 5, paidUntil: null, joinCode: "WXYZ6789", memberCount: 1, createdAt: NOW });
+put("teams/T2", { name: "Abuja Makers", kind: "team", seats: 5, paidUntil: NOW + 30 * 86400000, joinCode: "WXYZ6789", memberCount: 1, createdAt: NOW });
 put("teamMembers/ada", { teamId: "T1", role: "admin", email: "ada@school.ng", emailVerified: true, joinedAt: NOW - 3 });
 put("teamMembers/ben", { teamId: "T1", role: "member", email: "ben@school.ng", emailVerified: true, joinedAt: NOW - 2 });
 put("teamMembers/chi", { teamId: "T1", role: "member", email: "chi@school.ng", emailVerified: true, joinedAt: NOW - 1 });
@@ -116,25 +118,25 @@ put("users/chi/projects/c1", { name: "Chi's blink", code: "void setup(){}", mcu:
 const PROJECT_FIELDS = ["name", "code", "description", "components", "connections", "mcu", "boardId", "messages", "createdAt", "updatedAt", "deletedAt"];
 
 console.log("Admins see a member's projects only when the member allows it");
-check(await throwsWith(() => memberProjects(db, ada, "ben"), /haven't chosen/), "before Ben chooses: Ada (admin) can't");
+check(await throwsWith(() => memberProjects(db, ada, "ben", NOW), /haven't chosen/), "before Ben chooses: Ada (admin) can't");
 check(await throwsWith(() => setAdminsCanView(db, ben, "yes"), /allow it or not/), "the choice is on or off");
 check(await throwsWith(() => setAdminsCanView(db, eve, true), /not on a team/), "someone on no team has nothing to allow");
 check(await setAdminsCanView(db, ben, true) === true && read("teamMembers/ben").adminsCanView === true && read("teamMembers/ben").teamId === "T1", "Ben allows it (his membership otherwise unchanged)");
-const list = await memberProjects(db, ada, "ben");
+const list = await memberProjects(db, ada, "ben", NOW);
 check(list.length === 1 && list[0].id === "p1" && list[0].name === "Weather station", "Ada sees his projects (not the one in Trash)");
-const seen = await memberProject(db, ada, "ben", "p1");
+const seen = await memberProject(db, ada, "ben", "p1", NOW);
 check(seen.code.includes("WiFi.begin") && !seen.code.includes("hunter2secret") && !("messages" in seen), "read-only: the code with the password hidden, never the conversation");
-check(await throwsWith(() => memberProject(db, ada, "ben", "p2"), /isn't there/), "not a project in Trash");
-check(await throwsWith(() => memberProjects(db, chi, "ben"), /Only the team's admins/), "Chi (not an admin) can't");
-check(await throwsWith(() => memberProjects(db, dee, "ben"), /isn't on your team/), "another team's admin can't");
+check(await throwsWith(() => memberProject(db, ada, "ben", "p2", NOW), /isn't there/), "not a project in Trash");
+check(await throwsWith(() => memberProjects(db, chi, "ben", NOW), /Only the team's admins/), "Chi (not an admin) can't");
+check(await throwsWith(() => memberProjects(db, dee, "ben", NOW), /isn't on your team/), "another team's admin can't");
 await setAdminsCanView(db, ben, false);
-check(await throwsWith(() => memberProject(db, ada, "ben", "p1"), /haven't chosen/), "Ben turns it off: Ada can't any more");
+check(await throwsWith(() => memberProject(db, ada, "ben", "p1", NOW), /haven't chosen/), "Ben turns it off: Ada can't any more");
 const pageBen = await teamPage(db, ben, NOW);
 const pageAda = await teamPage(db, ada, NOW);
 check(pageBen.team?.adminsCanView === false && pageAda.team?.members.find((m) => m.uid === "ben")?.adminsCanView === false, "the /team page shows each person's choice (to them, and to admins)");
 
 console.log("Sharing a project with the team: the owner's choice, project by project");
-check((await projectsToShare(db, ben)).map((p) => `${p.id}:${p.shared}`).join() === "p1:false", "Ben's projects to share (not the one in Trash)");
+check((await projectsToShare(db, ben, NOW)).map((p) => `${p.id}:${p.shared}`).join() === "p1:false", "Ben's projects to share (not the one in Trash)");
 check(await throwsWith(() => shareProject(db, ben, "p2", NOW), /can't be found/), "not one in Trash");
 check(await throwsWith(() => shareProject(db, ben, "c1", NOW), /can't be found/), "not someone else's");
 check(await throwsWith(() => shareProject(db, eve, "x1", NOW), /not on a team/), "not without a team");
@@ -144,7 +146,7 @@ const copy0 = read(`${TEAM_PROJECTS}/${tp}`);
 check(copy0.teamId === "T1" && copy0.version === 1 && copy0.name === "Weather station" && copy0.code.includes("WiFi.begin") && !copy0.code.includes("hunter2secret") && !("messages" in copy0),
   "the team gets its own copy: the password hidden, no conversation");
 check(read("users/ben/projects/p1").code === BEN_CODE, "Ben's own project is unchanged");
-check((await projectsToShare(db, ben))[0].shared === true, "and is marked shared");
+check((await projectsToShare(db, ben, NOW))[0].shared === true, "and is marked shared");
 check(await throwsWith(() => shareProject(db, ben, "p1", NOW), /already/), "the same project isn't shared twice");
 
 console.log("Everyone on the team sees it; nobody else does");
@@ -152,8 +154,8 @@ const rowChi = (await listTeamProjects(db, chi, NOW))[0];
 check(rowChi?.id === tp && rowChi.sharedBy === "ben@school.ng" && rowChi.editing === null && !rowChi.canRemove && !rowChi.canFree, "Chi sees it, free to edit; she can't remove it");
 const rowAda = (await listTeamProjects(db, ada, NOW))[0];
 check(rowAda.canRemove && !rowAda.canFree, "Ada (admin) can remove it");
-check((await listTeamProjects(db, dee, NOW)).length === 0 && await throwsWith(() => viewTeamProject(db, dee, tp), /no longer shared with your team/), "another team sees nothing of it");
-const view = await viewTeamProject(db, chi, tp);
+check((await listTeamProjects(db, dee, NOW)).length === 0 && await throwsWith(() => viewTeamProject(db, dee, tp, NOW), /no longer shared with your team/), "another team sees nothing of it");
+const view = await viewTeamProject(db, chi, tp, NOW);
 check(view.name === "Weather station" && !view.code.includes("hunter2secret") && view.components.length === 1, "Chi can look at it");
 
 console.log("One person edits at a time");
@@ -195,13 +197,64 @@ check(await throwsWith(() => freeTeamProject(db, ben, tp), /Only the team's admi
 await freeTeamProject(db, ada, tp);
 check(read(`${TEAM_PROJECTS}/${tp}`).editor === null, "Ada (admin) ends Chi's turn");
 await editTeamProject(db, chi, tp, NOW + 7000 + EDIT_HOLD_MS);
+check((await listTeamProjects(db, ben, NOW + 7001 + EDIT_HOLD_MS))[0].editing?.by === "chi@school.ng", "while Chi is on the team, Ben sees her editing it");
 db.store.delete("teamMembers/chi");
+const afterLeaving = (await listTeamProjects(db, ben, NOW + 7001 + EDIT_HOLD_MS))[0];
+check(afterLeaving.editing === null, "once she has left, it shows as free to edit (Edit isn't held back)");
 check((await editTeamProject(db, ben, tp, NOW + 7001 + EDIT_HOLD_MS)).copyId.length > 0, "someone who left the team doesn't keep a turn");
 db.doc("teamMembers/chi")._write({ teamId: "T1", role: "member", email: "chi@school.ng", emailVerified: true, joinedAt: NOW });
 const benCopyId = read(`${TEAM_PROJECTS}/${tp}`).editor.copyId;
 db.doc(`users/ben/projects/${benCopyId}`)._write({ deletedAt: stamp(NOW) }, { merge: true });
 check(await throwsWith(() => sendTeamProject(db, ben, tp, NOW + 8000 + EDIT_HOLD_MS), /isn't in your projects any more/), "a working copy moved to Trash can't be sent");
 await stopEditingTeamProject(db, ben, tp);
+
+console.log("Only while the license is paid, or in its grace days");
+const DAY = 86400000;
+const license = (paidUntil, paidFor) => db.doc("teams/T1")._write({ paidUntil, paidFor }, { merge: true });
+const paidT1 = read("teams/T1").paidUntil;
+license(NOW - DAY, "month");
+check((await listTeamProjects(db, chi, NOW)).some((r) => r.id === tp), "a month's license, 1 day after it ended (2 grace days): still works");
+license(NOW - 20 * DAY, "year");
+check((await listTeamProjects(db, chi, NOW)).some((r) => r.id === tp), "a year's license, 20 days after it ended (30 grace days): still works");
+license(NOW - DAY, "month");
+const e5 = await editTeamProject(db, chi, tp, NOW);
+license(NOW - 3 * DAY, "month");
+const ENDED_MEMBER = /Your team's license has ended\. Team projects come back once an admin renews it\. Your own projects are kept\./;
+const ENDED_ADMIN = /The license has ended\. Renew it on the Team page/;
+check(await throwsWith(() => listTeamProjects(db, chi, NOW), ENDED_MEMBER), "past the grace days: a member is told to ask an admin to renew");
+check(await throwsWith(() => listTeamProjects(db, ada, NOW), ENDED_ADMIN), "and an admin, to renew it on the Team page");
+check(await throwsWith(() => sendTeamProject(db, chi, tp, NOW), ENDED_MEMBER), "changes can't be sent (Chi's work stays in her own projects)");
+check(read(`users/chi/projects/${e5.copyId}`) !== undefined, "her working copy is still hers");
+let allLocked = true;
+for (const [what, fn] of [
+  ["view", () => viewTeamProject(db, chi, tp, NOW)],
+  ["edit", () => editTeamProject(db, ben, tp, NOW)],
+  ["copy", () => copyTeamProject(db, chi, tp, NOW)],
+  ["projects to share", () => projectsToShare(db, ben, NOW)],
+  ["share", () => shareProject(db, chi, "c1", NOW)],
+]) if (!(await throwsWith(fn, /license has ended/))) { allLocked = false; console.log(`    not locked: ${what}`); }
+check(allLocked, "view, edit, copy and share are all locked");
+await setAdminsCanView(db, ben, true);
+check(read("teamMembers/ben").adminsCanView === true, "each member's own choice still works");
+check(await throwsWith(() => memberProjects(db, ada, "ben", NOW), ENDED_ADMIN) && await throwsWith(() => memberProject(db, ada, "ben", "p1", NOW), ENDED_ADMIN), "admins can't see members' projects either");
+await setAdminsCanView(db, ben, false);
+check((await teamCopyOf(db, chi, e5.copyId, NOW))?.editing === true, "the app still knows Chi's working copy (to show why it can't be sent)");
+await stopEditingTeamProject(db, chi, tp);
+check(read(`${TEAM_PROJECTS}/${tp}`).editor === null, "Stop editing still works, so nobody is stuck holding it");
+license(null, null);
+const UNPAID_MEMBER = /Team projects start once your team's license is paid\. Ask an admin to pay for it\./;
+check(await throwsWith(() => listTeamProjects(db, chi, NOW), UNPAID_MEMBER) && await throwsWith(() => shareProject(db, chi, "c1", NOW), UNPAID_MEMBER), "never paid: a member is told to ask an admin to pay");
+check(await throwsWith(() => listTeamProjects(db, ada, NOW), /Team projects start once the license is paid\. Pay for it on the Team page\./), "and an admin, to pay on the Team page");
+try { await listTeamProjects(db, chi, NOW); } catch (e) { check(e.status === 402 && e.reason === "unpaid", "refused as unpaid (402)"); }
+license(paidT1, null);
+check((await listTeamProjects(db, chi, NOW)).some((r) => r.id === tp), "paid again: everything is back");
+
+console.log("Too big, and reading only what's needed");
+put("users/chi/projects/huge", { name: "Huge", code: "x".repeat(500_001), mcu: "arduino", boardId: "uno", components: [], connections: [], createdAt: stamp(NOW), updatedAt: stamp(NOW) });
+try { await shareProject(db, chi, "huge", NOW); check(false, "code over 500,000 characters is refused, never cut short"); }
+catch (e) { check(e instanceof TeamError && e.status === 413 && /too long to share/.test(e.message), "code over 500,000 characters is refused, never cut short"); }
+check(db.selects > 0, "lists ask for the row fields only (not every project's code)");
+check(read("teamMembers/chi")?.teamCopies?.[e1.copyId] === tp, "Edit records which team project a working copy is, so opening a project reads one document");
 
 console.log("Copies, removing, and the limit");
 const mine = await copyTeamProject(db, chi, tp, NOW);

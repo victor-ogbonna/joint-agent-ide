@@ -4,7 +4,7 @@ import { Toolbar, ErrorNote, Loading } from "./Toolbar";
 import { useAdminData, type AdminGet } from "./data";
 import { full, date } from "./format";
 import { formatMoney } from "../lib/plans";
-import { stateLabel, type LicenseState, type TeamRole, type TeamKind } from "../lib/teams";
+import { stateLabel, TEAM_PRICES, type LicenseState, type TeamRole, type TeamKind } from "../lib/teams";
 import type { AdminPost } from "./CreatorsTab";
 
 /**
@@ -127,7 +127,7 @@ function AddTeam({ post, defaults, onAdded }: { post: AdminPost; defaults: Teams
           <input id="tm-price" className={input} inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} placeholder={(defaults.seatPrice / 100).toFixed(2)} />
         </div>
         <div>
-          <label htmlFor="tm-currency" className={label}>Currency</label>
+          <label htmlFor="tm-currency" className={label}>Currency (other than {defaults.currency}: set a special price)</label>
           <input id="tm-currency" className={`${input} uppercase`} value={currency} maxLength={3} onChange={(e) => setCurrency(e.target.value.toUpperCase().replace(/[^A-Z]/g, ""))} />
         </div>
       </div>
@@ -347,7 +347,7 @@ function TeamCard({ t, get, post, onChanged }: { t: TeamSummary; get: AdminGet; 
             <input id={`ed-price-${t.id}`} className={input} inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} />
           </div>
           <div>
-            <label htmlFor={`ed-cur-${t.id}`} className={label}>Currency</label>
+            <label htmlFor={`ed-cur-${t.id}`} className={label}>Currency (other than {TEAM_PRICES.currency}: set a special price)</label>
             <input id={`ed-cur-${t.id}`} className={`${input} uppercase`} value={currency} maxLength={3} onChange={(e) => setCurrency(e.target.value.toUpperCase().replace(/[^A-Z]/g, ""))} />
           </div>
           <div>
@@ -390,7 +390,9 @@ function TeamCard({ t, get, post, onChanged }: { t: TeamSummary; get: AdminGet; 
 export default function TeamsTab({ get, post }: { get: AdminGet; post: AdminPost }) {
   const { data, error, loading, reload } = useAdminData<TeamsResponse>(get, "/api/admin/teams");
   const members = (data?.teams ?? []).reduce((n, t) => n + t.memberCount, 0);
-  const defaults = data?.defaults ?? { seatPrice: 500, currency: "USD", minSeats: 5 };
+  // Until the server answers, its own prices (src/lib/teams.ts mirrors them):
+  // the add form keeps the currency it starts with.
+  const defaults = data?.defaults ?? { seatPrice: TEAM_PRICES.seatPrice, currency: TEAM_PRICES.currency, minSeats: TEAM_PRICES.minSeats };
 
   return (
     <div>

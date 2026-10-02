@@ -130,7 +130,13 @@ export function ConsentCard({ teamName, allowed, call, reload }: { teamName: str
 
 // ---- Admins: a member's projects, once the member allows it ----
 
-export function MemberProjects({ uid, email, call }: { uid: string; email: string | null; call: Call }) {
+export function MemberProjects({ uid, email, call, locked = null }: {
+  uid: string;
+  email: string | null;
+  call: Call;
+  /** While the license isn't paid: what to show instead of their projects. */
+  locked?: React.ReactNode;
+}) {
   const [open, setOpen] = useState(false);
   const [list, setList] = useState<{ id: string; name: string; mcu: string; boardId: string; updatedAt: number | null }[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -138,6 +144,7 @@ export function MemberProjects({ uid, email, call }: { uid: string; email: strin
   const toggle = async () => {
     if (open) { setOpen(false); return; }
     setOpen(true);
+    if (locked) return;
     setError(null);
     setList(null);
     try {
@@ -155,12 +162,12 @@ export function MemberProjects({ uid, email, call }: { uid: string; email: strin
       <button type="button" className={button} onClick={() => void toggle()} aria-expanded={open}>
         <FolderOpen size={14} /> {open ? "Hide projects" : "View projects"}
       </button>
-      {open && (
+      {open && locked ? locked : open && (
         <div className="mt-2 rounded-lg border border-[var(--border-main)] p-2">
           {error ? <p role="alert" className="text-[12px] text-red-500">{error}</p> : !list ? (
             <p className={`flex items-center gap-2 ${small}`}><Loader2 size={13} className="animate-spin" /> Loading…</p>
           ) : list.length === 0 ? (
-            <p className={small}>{email || "They"} has no projects yet.</p>
+            <p className={small}>{email ? `${email} has no projects yet.` : "They have no projects yet."}</p>
           ) : (
             <ul className="divide-y divide-[var(--border-main)]">
               {list.map((p) => (
@@ -198,7 +205,12 @@ interface TeamProjectRow {
 /** Opens one of the person's own projects in the app. */
 const openInApp = (projectId: string) => { window.location.href = `/?open=${encodeURIComponent(projectId)}`; };
 
-export function TeamProjectsCard({ teamName, call }: { teamName: string; call: Call }) {
+export function TeamProjectsCard({ teamName, call, locked = null }: {
+  teamName: string;
+  call: Call;
+  /** While the license isn't paid, or after it ends: why it's locked, shown instead of the projects. */
+  locked?: React.ReactNode;
+}) {
   const [rows, setRows] = useState<TeamProjectRow[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -206,6 +218,7 @@ export function TeamProjectsCard({ teamName, call }: { teamName: string; call: C
   const [viewing, setViewing] = useState<{ id: string; name: string } | null>(null);
   const [picking, setPicking] = useState(false);
   const [mine, setMine] = useState<{ id: string; name: string; mcu: string; boardId: string; shared: boolean }[] | null>(null);
+  const [pickError, setPickError] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -216,7 +229,12 @@ export function TeamProjectsCard({ teamName, call }: { teamName: string; call: C
       setError("Couldn't reach the server. Try again.");
     }
   }, [call]);
-  useEffect(() => { void reload(); }, [reload]);
+  // Nothing to load while it's locked; once it's paid (the page reloads), the list loads.
+  const isLocked = !!locked;
+  useEffect(() => {
+    if (isLocked) return;
+    void reload();
+  }, [reload, isLocked]);
 
   const act = async (what: string, path: string, done: (data: any) => React.ReactNode | void, body: unknown = {}) => {
     setBusy(what);
@@ -239,12 +257,13 @@ export function TeamProjectsCard({ teamName, call }: { teamName: string; call: C
     if (picking) { setPicking(false); return; }
     setPicking(true);
     setMine(null);
+    setPickError(null);
     try {
       const r = await call("/api/team/projects-to-share");
       if (r.ok) setMine(r.data.projects || []);
-      else setError(r.data.error || "Your projects couldn't be listed.");
+      else setPickError(r.data.error || "Your projects couldn't be listed.");
     } catch {
-      setError("Couldn't reach the server. Try again.");
+      setPickError("Couldn't reach the server. Try again.");
     }
   };
   const share = (p: { id: string; name: string }) => {
@@ -262,7 +281,7 @@ export function TeamProjectsCard({ teamName, call }: { teamName: string; call: C
         Projects someone on the team chose to share. One person edits at a time: Edit opens your own working copy in the app, and Send there makes your version the team's. Passwords, keys and tokens in shared code are hidden.
       </p>
 
-      {rows === null && !error ? (
+      {locked ? locked : rows === null && !error ? (
         <p className={`mt-3 flex items-center gap-2 ${small}`}><Loader2 size={14} className="animate-spin" /> Loading…</p>
       ) : rows && rows.length === 0 ? (
         <p className="mt-3 text-[13px] text-[var(--text-muted)]">Nothing shared yet.</p>
@@ -323,13 +342,15 @@ export function TeamProjectsCard({ teamName, call }: { teamName: string; call: C
         </ul>
       ) : null}
 
-      <div className="mt-3 border-t border-[var(--border-main)] pt-3">
+      {!locked && <div className="mt-3 border-t border-[var(--border-main)] pt-3">
         <button type="button" className={button} onClick={() => void openPicker()} aria-expanded={picking}>
           <Share2 size={14} /> {picking ? "Close" : "Share one of my projects"}
         </button>
         {picking && (
           <div className="mt-2 rounded-lg border border-[var(--border-main)] p-2">
-            {!mine ? (
+            {pickError ? (
+              <p role="alert" className="text-[12px] text-red-500">{pickError}</p>
+            ) : !mine ? (
               <p className={`flex items-center gap-2 ${small}`}><Loader2 size={13} className="animate-spin" /> Loading your projects…</p>
             ) : mine.length === 0 ? (
               <p className={small}>You have no projects yet. Make one in the app first.</p>
@@ -351,9 +372,9 @@ export function TeamProjectsCard({ teamName, call }: { teamName: string; call: C
             )}
           </div>
         )}
-      </div>
-      <Notes error={error} note={note} />
-      {viewing && <ProjectViewer title={viewing.name} load={load} onClose={close} />}
+      </div>}
+      {!locked && <Notes error={error} note={note} />}
+      {!locked && viewing && <ProjectViewer title={viewing.name} load={load} onClose={close} />}
     </section>
   );
 }

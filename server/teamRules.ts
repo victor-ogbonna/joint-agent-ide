@@ -17,8 +17,10 @@ const DAY = 24 * 60 * 60 * 1000;
 
 /**
  * A seat a month, in the currency's smallest unit, by currency: ₦6,643 (what
- * $5 is at ₦9,300 to $7, PRO's own price), and $5.00 for teams priced in
- * dollars before. A team in any other currency needs a special price.
+ * $5 is at ₦9,300 to $7, PRO's own price), and $5.00. Every team at the
+ * normal price pays in DEFAULT_TEAM_CURRENCY, the currency Paystack takes
+ * (server/teams.ts teamOf); switching that to "USD" once Paystack takes
+ * dollars moves them all to $5. Another currency needs a special price.
  */
 export const SEAT_PRICES: Readonly<Record<string, number>> = { NGN: 664_300, USD: 500 };
 /** What new teams pay in. */

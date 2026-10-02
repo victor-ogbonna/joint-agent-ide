@@ -281,6 +281,31 @@ function recordFailedAttempt(ip: string) {
   loginAttempts.set(ip, entry);
 }
 
+/**
+ * Whether a password is the admin password. Compared as fixed-length digests,
+ * so neither the password nor its length can be worked out from timing.
+ */
+function adminPasswordMatches(password: unknown): boolean {
+  if (!ADMIN_PASSWORD) return false;
+  const digest = (v: string) => crypto.createHash("sha256").update(v).digest();
+  return crypto.timingSafeEqual(digest(String(password ?? "")), digest(ADMIN_PASSWORD));
+}
+
+/**
+ * The admin password asked again before something sensitive (the Paystack
+ * secret key in full), with the login's own limit on wrong tries per IP: a
+ * stolen admin session alone isn't enough.
+ */
+function confirmAdminPassword(req: express.Request, password: unknown): "ok" | "wrong" | "locked" {
+  const ip = req.ip || req.socket.remoteAddress || "unknown";
+  if (isRateLimited(ip)) return "locked";
+  if (!adminPasswordMatches(password)) {
+    recordFailedAttempt(ip);
+    return "wrong";
+  }
+  return "ok";
+}
+
 function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
@@ -301,10 +326,7 @@ app.post("/api/admin/login", (req, res) => {
     return res.status(503).json({ error: "Admin access is not configured (ADMIN_PASSWORD not set on the server)." });
   }
   const { password } = req.body;
-  const providedBuf = Buffer.from(String(password || ""));
-  const expectedBuf = Buffer.from(ADMIN_PASSWORD);
-  const valid = providedBuf.length === expectedBuf.length && crypto.timingSafeEqual(providedBuf, expectedBuf);
-  if (!valid) {
+  if (!adminPasswordMatches(password)) {
     recordFailedAttempt(ip);
     return res.status(401).json({ error: "Incorrect password." });
   }
@@ -379,7 +401,7 @@ app.post("/api/admin/access-lists", requireAdmin, async (req, res) => {
   res.json(readAccessLists());
 });
 
-registerPaystackRoutes(app, requireAdmin);
+registerPaystackRoutes(app, requireAdmin, confirmAdminPassword);
 registerWaitlistRoutes(app, requireAdmin);
 registerFeedbackRoutes(app, requireFirebaseAuth, requireAdmin);
 registerCreatorRoutes(app, requireAdmin);

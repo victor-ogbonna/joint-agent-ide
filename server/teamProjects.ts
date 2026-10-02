@@ -19,11 +19,20 @@
  *     Admins then see them read-only, as a share link shows a project: the
  *     code and circuit, with secrets hidden, never the conversation.
  *
+ * Both work only while the team's license is paid, or in its grace days
+ * (licensePaid): not before the first payment, nor after a license ends
+ * until it's renewed. Stopping, freeing and removing always work, and so
+ * does each member's choice, so nobody is stuck holding a project and
+ * privacy can always be switched back on.
+ *
  * Firestore, server-only (the browser can't read or write these):
  *   teamProjects/{id}            the team's copy, who shared it, who is
  *                                editing it, and each editor's working copy
  *                                (which version of the team's copy it is)
- *   teamMembers/{uid}            adminsCanView, the member's own choice
+ *   teamMembers/{uid}            adminsCanView, the member's own choice, and
+ *                                teamCopies (each working copy's team project,
+ *                                so opening a project reads one document, not
+ *                                every team project)
  *   users/{uid}/projects/{id}    working copies are written here, among the
  *                                person's own projects, with only the fields
  *                                a project always has (so the Firestore rules
@@ -38,7 +47,7 @@ import { adminDb, isFirebaseAdminConfigured } from "./firebaseAdmin";
 import { requireFirebaseAuth } from "./quota";
 import { hideSecrets } from "./hideSecrets";
 import { sharedView } from "./share";
-import { MEMBERS, TEAMS, TeamError, memberOf, teamOf, type MemberRecord, type Who } from "./teams";
+import { MEMBERS, TEAMS, TeamError, licensePaid, memberOf, teamOf, type MemberRecord, type Who } from "./teams";
 
 export const TEAM_PROJECTS = "teamProjects";
 /** Most projects one team can share. */
@@ -75,14 +84,33 @@ async function membership(get: (ref: any) => Promise<any>, db: Db, uid: string):
   return m;
 }
 
+/** Refused unless the person's team is paid now, or in its grace days: what to do instead depends on their role. */
+async function paidTeam(get: (ref: any) => Promise<any>, db: Db, me: MemberRecord, now: number): Promise<void> {
+  const snap = await get(db.collection(TEAMS).doc(me.teamId));
+  if (!snap.exists) throw new TeamError("You're not on a team.", 404, "gone");
+  const team = teamOf(me.teamId, snap.data());
+  if (licensePaid(team, now)) return;
+  const admin = me.role === "admin";
+  throw new TeamError(team.paidUntil === null
+    ? (admin ? "Team projects start once the license is paid. Pay for it on the Team page." : "Team projects start once your team's license is paid. Ask an admin to pay for it.")
+    : (admin ? "The license has ended. Renew it on the Team page to use team projects again. Everyone's own projects are kept." : "Your team's license has ended. Team projects come back once an admin renews it. Your own projects are kept."),
+  402, "unpaid");
+}
+
+/** Most code a team project holds; a longer one is refused, never cut short. */
+const MAX_SHARED_CODE = 500_000;
+
 /** What a project carries into a team's copy: never the conversation, never a secret in the code. */
 function sharedContent(p: Record<string, any>) {
   const mcu = p.mcu === "arduino" ? "arduino" : "esp32";
+  if (typeof p.code === "string" && p.code.length > MAX_SHARED_CODE) {
+    throw new TeamError("This project's code is too long to share with the team (over 500,000 characters).", 413);
+  }
   return {
     mcu,
     boardId: text(p.boardId, 64) || (mcu === "arduino" ? "uno" : "esp32dev"),
     description: text(p.description, 5000),
-    code: hideSecrets(text(p.code, 500_000)),
+    code: hideSecrets(text(p.code, MAX_SHARED_CODE)),
     components: Array.isArray(p.components) ? p.components : [],
     connections: Array.isArray(p.connections) ? p.connections : [],
   };
@@ -168,8 +196,13 @@ export interface TeamProjectRow {
   canFree: boolean;
 }
 
-function rowOf(t: TeamProjectRecord, me: MemberRecord, now: number): TeamProjectRow {
-  const held = heldNow(t, now) && t.editor ? t.editor : null;
+/**
+ * Whom a hold counts for: the person themself, or someone still on the team
+ * (`onTeam`). A hold by someone who has left doesn't block anyone, as Edit
+ * lets the next person take it over.
+ */
+function rowOf(t: TeamProjectRecord, me: MemberRecord, now: number, onTeam: Set<string>): TeamProjectRow {
+  const held = heldNow(t, now) && t.editor && (t.editor.uid === me.uid || onTeam.has(t.editor.uid)) ? t.editor : null;
   const mine = !!held && held.uid === me.uid;
   return {
     id: t.id,
@@ -194,6 +227,21 @@ async function readTeamProject(get: (ref: any) => Promise<any>, db: Db, id: stri
   return t;
 }
 
+/** Of the people holding these projects for editing, those still on the person's team. */
+async function holdersOnTeam(db: Db, records: TeamProjectRecord[], me: MemberRecord, now: number): Promise<Set<string>> {
+  const uids = [...new Set(records.filter((t) => heldNow(t, now) && t.editor && t.editor.uid !== me.uid).map((t) => t.editor!.uid))];
+  const onTeam = new Set<string>();
+  await Promise.all(uids.map(async (uid) => {
+    const snap = await memberRef(db, uid).get();
+    if (snap.exists && memberOf(uid, snap.data()).teamId === me.teamId) onTeam.add(uid);
+  }));
+  return onTeam;
+}
+
+// Only the fields a list needs: never the code of every shared project.
+const ROW_FIELDS = ["teamId", "name", "mcu", "boardId", "sharedBy", "sharedAt", "updatedBy", "updatedAt", "version", "editor"];
+const OWN_ROW_FIELDS = ["name", "mcu", "boardId", "updatedAt", "deletedAt"];
+
 // ---- The member's choice: may the team's admins see my projects? ----
 
 export async function setAdminsCanView(db: Db, who: Who, allow: unknown): Promise<boolean> {
@@ -208,11 +256,12 @@ export async function setAdminsCanView(db: Db, who: Who, allow: unknown): Promis
 // ---- Team projects ----
 
 /** The person's own projects, to choose one to share; each says whether it's shared already. */
-export async function projectsToShare(db: Db, who: Who): Promise<{ id: string; name: string; mcu: string; boardId: string; updatedAt: number | null; shared: boolean }[]> {
+export async function projectsToShare(db: Db, who: Who, now: number): Promise<{ id: string; name: string; mcu: string; boardId: string; updatedAt: number | null; shared: boolean }[]> {
   const me = await membership((r) => r.get(), db, who.uid);
+  await paidTeam((r) => r.get(), db, me, now);
   const [own, shared] = await Promise.all([
-    ownProjects(db, who.uid).get(),
-    db.collection(TEAM_PROJECTS).where("teamId", "==", me.teamId).get(),
+    ownProjects(db, who.uid).select(...OWN_ROW_FIELDS).get(),
+    db.collection(TEAM_PROJECTS).where("teamId", "==", me.teamId).select("source").get(),
   ]);
   const sharedIds = new Set(shared.docs.map((d: any) => teamProjectOf(d.id, d.data())).filter((t: TeamProjectRecord) => t.source?.uid === who.uid).map((t: TeamProjectRecord) => t.source!.projectId));
   return own.docs
@@ -228,17 +277,24 @@ export async function projectsToShare(db: Db, who: Who): Promise<{ id: string; n
 /** The owner shares one of their projects: the team gets its own copy. */
 export async function shareProject(db: Db, who: Who, rawProjectId: unknown, now: number): Promise<string> {
   const projectId = cleanId(rawProjectId, PROJECT_ID, "project");
+  const first = await membership((r) => r.get(), db, who.uid);
+  await paidTeam((r) => r.get(), db, first, now);
+  // Checked before the transaction, from what each shared project was shared
+  // from: a share then holds only the person's own project, never every
+  // team project (which would hold up everyone's Edit and Send meanwhile).
+  const existing = await db.collection(TEAM_PROJECTS).where("teamId", "==", first.teamId).select("source").get();
+  const team = existing.docs.map((d: any) => teamProjectOf(d.id, d.data()));
+  if (team.some((t: TeamProjectRecord) => t.source?.uid === who.uid && t.source.projectId === projectId)) {
+    throw new TeamError("That project is shared with your team already. To change the team's copy, press Edit on it.", 409);
+  }
+  if (team.length >= MAX_TEAM_PROJECTS) throw new TeamError(`Your team has ${MAX_TEAM_PROJECTS} shared projects, the most it can have. Remove one first.`, 409);
   const ref = db.collection(TEAM_PROJECTS).doc();
   return db.runTransaction(async (tx: any) => {
     const me = await membership((r) => tx.get(r), db, who.uid);
+    if (me.teamId !== first.teamId) throw new TeamError("Your team changed. Refresh the page, then try again.", 409);
+    await paidTeam((r) => tx.get(r), db, me, now);
     const own = await tx.get(ownProjectRef(db, who.uid, projectId));
     if (!own.exists || own.get("deletedAt")) throw new TeamError("That project can't be found in your projects.", 404);
-    const existing = await tx.get(db.collection(TEAM_PROJECTS).where("teamId", "==", me.teamId));
-    const team = existing.docs.map((d: any) => teamProjectOf(d.id, d.data()));
-    if (team.some((t: TeamProjectRecord) => t.source?.uid === who.uid && t.source.projectId === projectId)) {
-      throw new TeamError("That project is shared with your team already. To change the team's copy, press Edit on it.", 409);
-    }
-    if (team.length >= MAX_TEAM_PROJECTS) throw new TeamError(`Your team has ${MAX_TEAM_PROJECTS} shared projects, the most it can have. Remove one first.`, 409);
     const p = own.data() || {};
     const by = { uid: who.uid, email: who.email };
     tx.set(ref, {
@@ -261,16 +317,20 @@ export async function shareProject(db: Db, who: Who, rawProjectId: unknown, now:
 /** Everything shared with the person's team, most recently changed first. */
 export async function listTeamProjects(db: Db, who: Who, now: number): Promise<TeamProjectRow[]> {
   const me = await membership((r) => r.get(), db, who.uid);
-  const snap = await db.collection(TEAM_PROJECTS).where("teamId", "==", me.teamId).get();
-  return snap.docs
-    .map((d: any) => rowOf(teamProjectOf(d.id, d.data()), me, now))
+  await paidTeam((r) => r.get(), db, me, now);
+  const snap = await db.collection(TEAM_PROJECTS).where("teamId", "==", me.teamId).select(...ROW_FIELDS).get();
+  const records: TeamProjectRecord[] = snap.docs.map((d: any) => teamProjectOf(d.id, d.data()));
+  const onTeam = await holdersOnTeam(db, records, me, now);
+  return records
+    .map((t) => rowOf(t, me, now, onTeam))
     .sort((a: TeamProjectRow, b: TeamProjectRow) => b.updatedAt - a.updatedAt);
 }
 
 /** A team project to look at (its secrets were hidden when it was shared). */
-export async function viewTeamProject(db: Db, who: Who, rawId: unknown) {
+export async function viewTeamProject(db: Db, who: Who, rawId: unknown, now: number) {
   const id = cleanId(rawId, TEAM_PROJECT_ID, "project");
   const me = await membership((r) => r.get(), db, who.uid);
+  await paidTeam((r) => r.get(), db, me, now);
   const t = await readTeamProject((r) => r.get(), db, id, me);
   return {
     name: t.name, description: t.description, mcu: t.mcu, boardId: t.boardId, code: t.code,
@@ -306,6 +366,7 @@ export async function editTeamProject(db: Db, who: Who, rawId: unknown, now: num
   const id = cleanId(rawId, TEAM_PROJECT_ID, "project");
   return db.runTransaction(async (tx: any) => {
     const me = await membership((r) => tx.get(r), db, who.uid);
+    await paidTeam((r) => tx.get(r), db, me, now);
     const t = await readTeamProject((r) => tx.get(r), db, id, me);
     if (t.editor && t.editor.uid !== who.uid && heldNow(t, now)) {
       // Held by someone still on the team: it's their turn.
@@ -322,6 +383,8 @@ export async function editTeamProject(db: Db, who: Who, rawId: unknown, now: num
       editor: { uid: who.uid, email: who.email, since: now, copyId },
       copies: { ...t.copies, [who.uid]: { copyId, version: t.version } },
     }, { merge: true });
+    // Which team project this working copy is, for teamCopyOf.
+    tx.set(memberRef(db, who.uid), { teamCopies: { [copyId]: id } }, { merge: true });
     return { copyId, fresh: !reuse };
   });
 }
@@ -331,6 +394,7 @@ export async function sendTeamProject(db: Db, who: Who, rawId: unknown, now: num
   const id = cleanId(rawId, TEAM_PROJECT_ID, "project");
   return db.runTransaction(async (tx: any) => {
     const me = await membership((r) => tx.get(r), db, who.uid);
+    await paidTeam((r) => tx.get(r), db, me, now);
     const t = await readTeamProject((r) => tx.get(r), db, id, me);
     if (!t.editor || t.editor.uid !== who.uid) {
       throw new TeamError(t.editor && heldNow(t, now)
@@ -394,6 +458,7 @@ export async function copyTeamProject(db: Db, who: Who, rawId: unknown, now: num
   const id = cleanId(rawId, TEAM_PROJECT_ID, "project");
   return db.runTransaction(async (tx: any) => {
     const me = await membership((r) => tx.get(r), db, who.uid);
+    await paidTeam((r) => tx.get(r), db, me, now);
     const t = await readTeamProject((r) => tx.get(r), db, id, me);
     return newOwnProject(tx, db, who.uid, t, `${t.name} (copy)`, now);
   });
@@ -405,11 +470,17 @@ export async function teamCopyOf(db: Db, who: Who, rawProjectId: unknown, now: n
   const mine = await memberRef(db, who.uid).get();
   const me = mine.exists ? memberOf(who.uid, mine.data()) : null;
   if (!me || !me.teamId) return null;
-  const snap = await db.collection(TEAM_PROJECTS).where("teamId", "==", me.teamId).get();
-  const t = snap.docs.map((d: any) => teamProjectOf(d.id, d.data())).find((x: TeamProjectRecord) => x.copies[who.uid]?.copyId === projectId);
-  if (!t) return null;
+  // Asked each time the app opens a project: one look in the member's own
+  // record, then the one team project, never every team project.
+  const index = mine.get("teamCopies");
+  const teamProjectId = index && typeof index === "object" ? index[projectId] : null;
+  if (typeof teamProjectId !== "string" || !TEAM_PROJECT_ID.test(teamProjectId)) return null;
+  const snap = await teamProjectRef(db, teamProjectId).get();
+  const t = snap.exists ? teamProjectOf(teamProjectId, snap.data()) : null;
+  if (!t || t.teamId !== me.teamId || t.copies[who.uid]?.copyId !== projectId) return null;
   const team = await db.collection(TEAMS).doc(me.teamId).get();
-  const held = heldNow(t, now) ? t.editor : null;
+  const onTeam = await holdersOnTeam(db, [t], me, now);
+  const held = heldNow(t, now) && t.editor && (t.editor.uid === who.uid || onTeam.has(t.editor.uid)) ? t.editor : null;
   const editing = !!held && held.uid === who.uid && held.copyId === projectId;
   return {
     teamProjectId: t.id,
@@ -422,10 +493,11 @@ export async function teamCopyOf(db: Db, who: Who, rawProjectId: unknown, now: n
 
 // ---- Admins seeing a member's projects, when the member allows it ----
 
-async function consentingMember(db: Db, who: Who, rawUid: unknown): Promise<MemberRecord> {
+async function consentingMember(db: Db, who: Who, rawUid: unknown, now: number): Promise<MemberRecord> {
   const uid = cleanId(rawUid, UID, "member");
   const me = await membership((r) => r.get(), db, who.uid);
   if (me.role !== "admin") throw new TeamError("Only the team's admins can do that.", 403, "not_admin");
+  await paidTeam((r) => r.get(), db, me, now);
   const snap = await memberRef(db, uid).get();
   const them = snap.exists ? memberOf(uid, snap.data()) : null;
   if (!them || them.teamId !== me.teamId) throw new TeamError("That person isn't on your team.", 404);
@@ -433,9 +505,9 @@ async function consentingMember(db: Db, who: Who, rawUid: unknown): Promise<Memb
   return them;
 }
 
-export async function memberProjects(db: Db, who: Who, rawUid: unknown): Promise<{ id: string; name: string; mcu: string; boardId: string; updatedAt: number | null }[]> {
-  const them = await consentingMember(db, who, rawUid);
-  const snap = await ownProjects(db, them.uid).get();
+export async function memberProjects(db: Db, who: Who, rawUid: unknown, now: number): Promise<{ id: string; name: string; mcu: string; boardId: string; updatedAt: number | null }[]> {
+  const them = await consentingMember(db, who, rawUid, now);
+  const snap = await ownProjects(db, them.uid).select(...OWN_ROW_FIELDS).get();
   return snap.docs
     .filter((d: any) => !d.get("deletedAt"))
     .map((d: any) => {
@@ -445,8 +517,8 @@ export async function memberProjects(db: Db, who: Who, rawUid: unknown): Promise
     .sort((a: any, b: any) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
 }
 
-export async function memberProject(db: Db, who: Who, rawUid: unknown, rawProjectId: unknown) {
-  const them = await consentingMember(db, who, rawUid);
+export async function memberProject(db: Db, who: Who, rawUid: unknown, rawProjectId: unknown, now: number) {
+  const them = await consentingMember(db, who, rawUid, now);
   const projectId = cleanId(rawProjectId, PROJECT_ID, "project");
   const snap = await ownProjectRef(db, them.uid, projectId).get();
   if (!snap.exists || snap.get("deletedAt")) throw new TeamError("That project isn't there any more.", 404);
@@ -470,6 +542,10 @@ function tooMany(key: string, max: number, now: number): boolean {
 
 function sendError(res: express.Response, err: unknown, what: string) {
   if (err instanceof TeamError) return res.status(err.status).json({ error: err.message });
+  // Firestore keeps a document up to 1 MB.
+  if (/exceeds the maximum allowed size/i.test(String((err as any)?.message ?? ""))) {
+    return res.status(413).json({ error: "This project is too big to keep as a team project (over 1 MB). Make it smaller, then try again." });
+  }
   console.error(`[Team projects] ${what} failed:`, (err as any)?.message || err);
   return res.status(500).json({ error: "Something went wrong. Try again." });
 }
@@ -487,9 +563,17 @@ export function registerTeamProjectRoutes(app: express.Express) {
     res.status(429).json({ error: "Too many tries. Wait a while, then try again." });
     return true;
   };
+  // Reads too: each reads team projects from the database (a list, up to
+  // 200), so a script can't run up the bill. The app asks once per project
+  // opened; a person stays far below this.
+  const readLimited = (req: express.Request, res: express.Response) => {
+    if (!tooMany(`teamprojects-read:${req.uid}`, 1200, Date.now())) return false;
+    res.status(429).json({ error: "Too many tries. Wait a while, then try again." });
+    return true;
+  };
   const get = (path: string, what: string, fn: (req: express.Request) => Promise<unknown>) =>
     app.get(path, requireFirebaseAuth, async (req, res) => {
-      if (!ready(res)) return;
+      if (!ready(res) || readLimited(req, res)) return;
       res.setHeader("Cache-Control", "no-store");
       try { res.json(await fn(req)); } catch (err) { sendError(res, err, what); }
     });
@@ -502,9 +586,9 @@ export function registerTeamProjectRoutes(app: express.Express) {
   post("/api/team/consent", "Changing who sees projects", async (req) => ({ adminsCanView: await setAdminsCanView(adminDb, whoOf(req), req.body?.adminsCanView) }));
 
   get("/api/team/projects", "Listing team projects", async (req) => ({ projects: await listTeamProjects(adminDb, whoOf(req), Date.now()) }));
-  get("/api/team/projects-to-share", "Listing projects to share", async (req) => ({ projects: await projectsToShare(adminDb, whoOf(req)) }));
+  get("/api/team/projects-to-share", "Listing projects to share", async (req) => ({ projects: await projectsToShare(adminDb, whoOf(req), Date.now()) }));
   post("/api/team/projects", "Sharing a project", async (req) => ({ id: await shareProject(adminDb, whoOf(req), req.body?.projectId, Date.now()) }));
-  get("/api/team/projects/:id", "Opening a team project", async (req) => viewTeamProject(adminDb, whoOf(req), req.params.id));
+  get("/api/team/projects/:id", "Opening a team project", async (req) => viewTeamProject(adminDb, whoOf(req), req.params.id, Date.now()));
   post("/api/team/projects/:id/edit", "Editing a team project", async (req) => editTeamProject(adminDb, whoOf(req), req.params.id, Date.now()));
   post("/api/team/projects/:id/send", "Sending changes", async (req) => sendTeamProject(adminDb, whoOf(req), req.params.id, Date.now()));
   post("/api/team/projects/:id/stop", "Stopping editing", async (req) => { await stopEditingTeamProject(adminDb, whoOf(req), req.params.id); return { ok: true }; });
@@ -514,6 +598,6 @@ export function registerTeamProjectRoutes(app: express.Express) {
 
   get("/api/team/copy/:projectId", "Checking a working copy", async (req) => ({ copy: await teamCopyOf(adminDb, whoOf(req), req.params.projectId, Date.now()) }));
 
-  get("/api/team/members/:uid/projects", "Listing a member's projects", async (req) => ({ projects: await memberProjects(adminDb, whoOf(req), req.params.uid) }));
-  get("/api/team/members/:uid/projects/:projectId", "Opening a member's project", async (req) => memberProject(adminDb, whoOf(req), req.params.uid, req.params.projectId));
+  get("/api/team/members/:uid/projects", "Listing a member's projects", async (req) => ({ projects: await memberProjects(adminDb, whoOf(req), req.params.uid, Date.now()) }));
+  get("/api/team/members/:uid/projects/:projectId", "Opening a member's project", async (req) => memberProject(adminDb, whoOf(req), req.params.uid, req.params.projectId, Date.now()));
 }

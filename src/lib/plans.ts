@@ -12,11 +12,11 @@ export const FREE_WINDOW_COMPILES = 8;
 export const FREE_DAILY_COMPILES = 25;
 export const PRO_PRICE = "$7/month";
 /**
- * PRO's monthly price as amounts (kobo, cents), for sums such as what a team
- * saves when Paystack's own can't be read: ₦9,300 on the Paystack plan,
- * which is the $7 of PRO_PRICE.
+ * PRO a month in cents and in kobo: the $7 of PRO_PRICE, which Paystack
+ * charges as ₦9,300. Prices are shown in dollars everywhere, and this is the
+ * rate a naira amount is shown at.
  */
-export const PRO_MONTHLY_PRICES = [{ amount: 930_000, currency: "NGN" }, { amount: 700, currency: "USD" }];
+export const PRO_MONTHLY = { cents: 700, kobo: 930_000 };
 /** Projects a Free account can have at once. Nothing is ever deleted to fit: past it, a new one waits for a free slot. */
 export const FREE_PROJECT_LIMIT = 5;
 
@@ -73,4 +73,25 @@ export function formatMoney(minor: number, currency: string): string {
       return `${currency} ${major.toFixed(2)}`;
     }
   }
+}
+
+/** A naira amount (kobo) in dollars (cents), at PRO's rate of $7 to ₦9,300, to the cent. */
+export function nairaToDollars(kobo: number): number {
+  return Math.round((kobo * PRO_MONTHLY.cents) / PRO_MONTHLY.kobo);
+}
+
+const isNaira = (currency: string) => currency.toUpperCase() === "NGN";
+
+/** A price as the app shows it: in dollars (a naira amount at $7 to ₦9,300), any other currency as it is. */
+export function showPrice(minor: number, currency: string): string {
+  return isNaira(currency) ? formatMoney(nairaToDollars(minor), "USD") : formatMoney(minor, currency);
+}
+
+/**
+ * What Paystack's payment window will charge, in naira, for the line under a
+ * pay button ("Charged in naira at checkout: ₦9,300 a month."). Null when the
+ * price isn't in naira, so the button already says what's charged.
+ */
+export function nairaNote(minor: number, currency: string, per = ""): string | null {
+  return isNaira(currency) ? `Charged in naira at checkout: ${formatMoney(minor, "NGN")}${per ? ` ${per}` : ""}.` : null;
 }

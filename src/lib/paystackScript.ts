@@ -18,7 +18,12 @@ export function loadPaystack(): Promise<boolean> {
       script.src = PAYSTACK_SRC;
       script.async = true;
       script.onload = () => {
-        if (!window.PaystackPop) loading = null;
+        // Loaded but not working (blocked part-way): taken out, so the next
+        // try adds it once, not once more beside it.
+        if (!window.PaystackPop) {
+          script.remove();
+          loading = null;
+        }
         resolve(!!window.PaystackPop);
       };
       script.onerror = () => {

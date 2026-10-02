@@ -6,8 +6,12 @@ import { formatMoney } from "../lib/plans";
  * Paystack on the admin page (server/paystack.ts): the keys every payment
  * goes through (PRO monthly, PRO yearly, team licenses) and the two PRO
  * plans, each shown as it is and editable on its own. The secret key is
- * masked until Show; each plan is checked with Paystack, so the page says
- * what customers are really charged.
+ * masked until Show, which asks for the admin password again (a stolen admin
+ * session alone can't read it), and hides it again after a minute; each
+ * plan is checked with Paystack, so the page says
+ * what customers are really charged. Moving from test keys to live ones (or
+ * back) changes both keys at once: the server refuses a test key beside a
+ * live one, so a new key of the other kind asks for its partner too.
  */
 
 type Get = (path: string) => Promise<Response | null>;
@@ -37,6 +41,10 @@ const EVERY: Record<string, string> = {
   hourly: "every hour", daily: "every day", weekly: "every week", monthly: "every month",
   quarterly: "every 3 months", biannually: "every 6 months", annually: "every year",
 };
+
+/** "test" or "live", from a key's prefix (sk_test_, pk_live_...), as the server reads it. */
+const modeOf = (key: string | null | undefined): "test" | "live" | null =>
+  (!key ? null : /^[sp]k_test_/.test(key) ? "test" : /^[sp]k_live_/.test(key) ? "live" : null);
 
 const input = "w-full min-w-0 bg-[var(--bg-surface)] border border-[var(--border-main)] rounded-lg px-3 py-2 text-sm font-mono text-[var(--text-main)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent-primary)] transition";
 const smallButton = "inline-flex items-center gap-1 rounded-md border border-[var(--border-main)] px-2 py-1 text-[11px] font-medium text-[var(--text-main)] hover:bg-[var(--bg-hover)] disabled:opacity-50";
@@ -72,8 +80,19 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
   const [checked, setChecked] = useState<Checked | null | undefined>(undefined);
   const [editing, setEditing] = useState<Field | null>(null);
   const [value, setValue] = useState("");
+  /** The other key, when the one typed is of the other kind (test or live): both are saved together. */
+  const [pair, setPair] = useState("");
   const [showTyped, setShowTyped] = useState(false);
   const [secret, setSecret] = useState<string | null>(null);
+  /** Show pressed: the admin password, asked again before the secret key is shown. */
+  const [askPassword, setAskPassword] = useState(false);
+  const [password, setPassword] = useState("");
+  // Shown for a minute at most, so it isn't left on the screen.
+  useEffect(() => {
+    if (!secret) return;
+    const t = setTimeout(() => setSecret(null), 60_000);
+    return () => clearTimeout(t);
+  }, [secret]);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -106,19 +125,29 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
     setShowTyped(false);
     setMessage(null);
     setValue(field === "secretKey" ? "" : (config?.[field] ?? ""));
+    setPair("");
   };
 
-  const send = async (body: Record<string, unknown>, done: string) => {
+  // The secret key's kind, from its masked start ("sk_liv…", "sk_tes…").
+  const secretMode = config?.maskedSecretKey?.startsWith("sk_tes") ? "test" : config?.maskedSecretKey?.startsWith("sk_liv") ? "live" : null;
+  const partner: Field | null = editing === "secretKey" ? "publicKey" : editing === "publicKey" ? "secretKey" : null;
+  const typedMode = modeOf(value.trim());
+  const partnerMode = partner === "publicKey" ? modeOf(config?.publicKey) : partner === "secretKey" ? secretMode : null;
+  const needsPartner = !!partner && !!typedMode && !!partnerMode && typedMode !== partnerMode;
+
+  /** Saves, and says how it went; the saved settings, or null if it didn't save. */
+  const send = async (body: Record<string, unknown>, done: string): Promise<Config | null> => {
     setBusy(true);
     setMessage(null);
     try {
       const res = await post("/api/admin/paystack-config", body);
-      if (!res) return;
+      if (!res) return null;
       const data = await res.json();
-      if (!res.ok) { setMessage({ type: "error", text: data.error || "That couldn't be saved." }); return; }
+      if (!res.ok) { setMessage({ type: "error", text: data.error || "That couldn't be saved." }); return null; }
       setConfig(data);
       setEditing(null);
       setValue("");
+      setPair("");
       setSecret(null);
       setMessage({
         type: "success",
@@ -127,8 +156,10 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
           : `${done} It works straight away, but this server keeps it only until it restarts: add it to the server's .env file too.`,
       });
       void runCheck();
+      return data;
     } catch {
       setMessage({ type: "error", text: "Could not reach the server." });
+      return null;
     } finally {
       setBusy(false);
     }
@@ -139,24 +170,51 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
     if (!editing) return;
     const v = value.trim();
     if (!v) { setMessage({ type: "error", text: `Paste the ${HINTS[editing].label.toLowerCase()} first.` }); return; }
+    if (needsPartner && partner) {
+      const p = pair.trim();
+      const other = HINTS[partner].label.toLowerCase();
+      if (!p) { setMessage({ type: "error", text: `Paste the ${typedMode} ${other} too: the two keys change together.` }); return; }
+      if (modeOf(p) !== typedMode) { setMessage({ type: "error", text: `The ${other} has to be a ${typedMode} key too (it starts with ${partner === "secretKey" ? "sk" : "pk"}_${typedMode}_).` }); return; }
+      void send({ [editing]: v, [partner]: p }, `Secret key and public key saved (${typedMode} keys).`);
+      return;
+    }
     if (editing !== "secretKey" && v === config?.[editing]) { setEditing(null); return; }
     void send({ [editing]: v }, `${HINTS[editing].label} saved.`);
   };
 
   const removeYearly = () => {
     if (!window.confirm("Remove the yearly plan? The Plans page then offers monthly only. People already paying yearly keep their plan.")) return;
-    void send({ clearYearlyPlanCode: true }, "Yearly plan removed.");
+    void send({ clearYearlyPlanCode: true }, "Yearly plan removed.").then((saved) => {
+      // The server's .env file can set one too; that one is still used.
+      if (saved?.yearlyPlanCode) {
+        setMessage({ type: "error", text: `Removed from here, but the server's .env file sets a yearly plan too (PAYSTACK_YEARLY_PLAN_CODE=${saved.yearlyPlanCode}), so it's still offered. To stop offering yearly, delete that line from .env, then restart the server.` });
+      }
+    });
   };
 
-  const toggleSecret = async () => {
+  const toggleSecret = () => {
     if (secret) { setSecret(null); return; }
+    setMessage(null);
+    setPassword("");
+    setAskPassword((v) => !v);
+  };
+  const showSecret = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!password) { setMessage({ type: "error", text: "Type the admin password first." }); return; }
+    setBusy(true);
+    setMessage(null);
     try {
-      const res = await get("/api/admin/paystack-secret");
+      const res = await post("/api/admin/paystack-secret", { password });
       if (!res) return;
-      const data = await res.json();
-      if (res.ok && data.secretKey) setSecret(data.secretKey);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.secretKey) { setMessage({ type: "error", text: data.error || "The secret key couldn't be shown." }); return; }
+      setSecret(data.secretKey);
+      setAskPassword(false);
     } catch {
       setMessage({ type: "error", text: "Could not reach the server." });
+    } finally {
+      setPassword("");
+      setBusy(false);
     }
   };
   const copySecret = async () => {
@@ -175,7 +233,7 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
         {editing !== field && (
           <div className="flex shrink-0 flex-wrap gap-1.5">
             {field === "secretKey" && config?.hasSecretKey && (
-              <button type="button" className={smallButton} onClick={() => void toggleSecret()}>{secret ? <EyeOff size={11} /> : <Eye size={11} />} {secret ? "Hide" : "Show"}</button>
+              <button type="button" className={smallButton} onClick={toggleSecret}>{secret ? <EyeOff size={11} /> : <Eye size={11} />} {secret ? "Hide" : "Show"}</button>
             )}
             {field === "secretKey" && secret && (
               <button type="button" className={smallButton} onClick={() => void copySecret()}>{copied ? <Check size={11} /> : <Copy size={11} />} {copied ? "Copied" : "Copy"}</button>
@@ -189,6 +247,26 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
           </div>
         )}
       </div>
+      {field === "secretKey" && askPassword && !secret && editing !== field && (
+        <form onSubmit={showSecret} className="mt-2 flex flex-wrap items-center gap-2" data-paystack-password="">
+          <label htmlFor="paystack-admin-password" className="basis-full text-[11px] text-[var(--text-muted)]">Type the admin password again to show the secret key.</label>
+          <input
+            id="paystack-admin-password"
+            type="password"
+            autoFocus
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="current-password"
+            className={`${input} flex-1 basis-48`}
+          />
+          <button type="submit" disabled={busy} className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50">
+            {busy ? <Loader2 size={13} className="animate-spin" /> : <Eye size={13} />} Show
+          </button>
+          <button type="button" onClick={() => { setAskPassword(false); setPassword(""); }} className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-main)] px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)]">
+            <X size={13} /> Cancel
+          </button>
+        </form>
+      )}
       {editing === field ? (
         <form onSubmit={save} className="mt-2 flex flex-wrap items-center gap-2">
           <label htmlFor={`paystack-${field}`} className="sr-only">{HINTS[field].label}</label>
@@ -210,10 +288,28 @@ export default function PaystackSettings({ get, post }: { get: Get; post: Post }
               </button>
             )}
           </div>
+          {needsPartner && partner && (
+            <div className="basis-full" data-paystack-pair="">
+              <p className="mb-1 text-[11px] text-orange-400">
+                That's a {typedMode} key, and the {HINTS[partner].label.toLowerCase()} is a {partnerMode} key. Paste the {typedMode} {HINTS[partner].label.toLowerCase()} too: both are saved together.
+              </p>
+              <label htmlFor="paystack-pair" className="sr-only">{HINTS[partner].label}</label>
+              <input
+                id="paystack-pair"
+                type={partner === "secretKey" && !showTyped ? "password" : "text"}
+                value={pair}
+                onChange={(e) => setPair(e.target.value)}
+                placeholder={`${partner === "secretKey" ? "sk" : "pk"}_${typedMode}_...`}
+                autoComplete="off"
+                spellCheck={false}
+                className={input}
+              />
+            </div>
+          )}
           <button type="submit" disabled={busy} className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3 py-2 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50">
             {busy ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Save
           </button>
-          <button type="button" onClick={() => { setEditing(null); setValue(""); }} className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-main)] px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)]">
+          <button type="button" onClick={() => { setEditing(null); setValue(""); setPair(""); }} className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-main)] px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)]">
             <X size={13} /> Cancel
           </button>
         </form>

@@ -45,7 +45,7 @@ const USERS = "users";
 type Db = any;
 
 /** Why a team action was refused, for code that needs to tell refusals apart. */
-export type TeamRefusal = "on_team" | "full" | "gone" | "not_admin" | "other";
+export type TeamRefusal = "on_team" | "full" | "gone" | "not_admin" | "unpaid" | "other";
 
 /** A refusal meant for the person: its message is shown as it is. */
 export class TeamError extends Error {
@@ -100,13 +100,18 @@ const time = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 
 
 export function teamOf(id: string, d: any): TeamRecord {
   d = d || {};
+  const seatPrice = typeof d.seatPrice === "number" && Number.isFinite(d.seatPrice) ? d.seatPrice : null;
   return {
     id,
     name: typeof d.name === "string" && d.name ? d.name : "Team",
     kind: d.kind === "school" ? "school" : "team",
     seats: num(d.seats, MIN_SEATS),
-    seatPrice: typeof d.seatPrice === "number" && Number.isFinite(d.seatPrice) ? d.seatPrice : null,
-    currency: typeof d.currency === "string" && /^[A-Z]{3}$/.test(d.currency) ? d.currency : DEFAULT_TEAM_CURRENCY,
+    seatPrice,
+    // The normal price is always in DEFAULT_TEAM_CURRENCY, the currency
+    // Paystack takes: a team made in dollars before teams were priced in
+    // naira pays ₦6,643 a seat, the same $5. Another currency comes only
+    // with a special price (priceOrRefuse).
+    currency: seatPrice === null ? DEFAULT_TEAM_CURRENCY : typeof d.currency === "string" && /^[A-Z]{3}$/.test(d.currency) ? d.currency : DEFAULT_TEAM_CURRENCY,
     paidUntil: time(d.paidUntil),
     paidFor: isPeriod(d.paidFor) ? d.paidFor : null,
     joinCode: typeof d.joinCode === "string" ? d.joinCode : "",
@@ -137,10 +142,10 @@ export function memberOf(uid: string, d: any): MemberRecord {
  */
 export const seatPriceOf = (t: TeamRecord) => t.seatPrice ?? normalSeatPrice(t.currency) ?? 0;
 
-/** A currency needs a special price unless it has a normal one. */
+/** The normal price is in DEFAULT_TEAM_CURRENCY; another currency needs a special price. */
 function priceOrRefuse(currency: string, seatPrice: number | null): void {
-  if (seatPrice === null && normalSeatPrice(currency) === null) {
-    throw new TeamError(`There's no normal seat price in ${currency}. Set a special price for this team, or use NGN.`);
+  if (seatPrice === null && currency !== DEFAULT_TEAM_CURRENCY) {
+    throw new TeamError(`A team at the normal price pays in ${DEFAULT_TEAM_CURRENCY}. To charge it in ${currency}, set a special price for it.`);
   }
 }
 
@@ -206,6 +211,16 @@ function seatsOrRefuse(raw: unknown, atLeast: number): number {
 const teamRef = (db: Db, id: string) => db.collection(TEAMS).doc(id);
 const memberRef = (db: Db, uid: string) => db.collection(MEMBERS).doc(uid);
 const userRef = (db: Db, uid: string) => db.collection(USERS).doc(uid);
+/**
+ * Whether the team's license is paid now, or in its grace days. Joining,
+ * invitations and team projects work only then: before the first payment,
+ * and after a license ends until it's renewed, they're locked.
+ */
+export function licensePaid(team: Pick<TeamRecord, "paidUntil" | "paidFor">, now: number): boolean {
+  const { state } = licenseStanding(team.paidUntil, now, team.paidFor);
+  return state === "active" || state === "grace";
+}
+
 /** An invite's id: the team, then the address (an address has no "/"). */
 export const inviteId = (teamId: string, email: string) => `${teamId}:${email}`;
 const inviteRef = (db: Db, teamId: string, email: string) => db.collection(INVITES).doc(inviteId(teamId, email));
@@ -309,8 +324,15 @@ async function joinTeam(db: Db, who: Who, teamId: string, via: { code?: string }
     } else if (!invite?.exists) {
       throw new TeamError("That invitation is no longer open.", 404, "gone");
     }
-    if (team.memberCount >= team.seats) throw new TeamError("This team is full. Ask its admin to add seats.", 409, "full");
     const role: TeamRole = invite?.exists && invite.data()?.role === "admin" ? "admin" : "member";
+    // Nobody joins a team that isn't paid, except an admin invited from the
+    // admin page: they join to pay for it.
+    if (role !== "admin" && !licensePaid(team, now)) {
+      throw new TeamError(team.paidUntil === null
+        ? "This team's license isn't paid yet, so nobody can join it. Ask its admin to pay for it first."
+        : "This team's license has ended, so nobody can join it until it's renewed. Ask its admin to renew it.", 402, "unpaid");
+    }
+    if (team.memberCount >= team.seats) throw new TeamError("This team is full. Ask its admin to add seats.", 409, "full");
     tx.set(memberRef(db, who.uid), { teamId, email: who.email ? who.email.trim().toLowerCase() : null, emailVerified: who.emailVerified, role, joinedAt: now });
     tx.set(userRef(db, who.uid), { teamId }, { merge: true });
     tx.set(teamRef(db, teamId), { memberCount: team.memberCount + 1 }, { merge: true });
@@ -349,8 +371,9 @@ async function invitesFor(db: Db, email: string): Promise<InviteRow[]> {
 
 /**
  * Take up the oldest invitation to the account's verified address, for an
- * account on no team. One for a full team waits until it has a free seat;
- * one for a team that's gone is cleared. The team joined, or null.
+ * account on no team. One for a full team waits until it has a free seat,
+ * and one for a team that isn't paid until it's paid; one for a team that's
+ * gone is cleared. The team joined, or null.
  */
 export async function acceptInvites(db: Db, who: Who, now: number): Promise<TeamRecord | null> {
   if (!who.emailVerified || !who.email) return null;
@@ -362,7 +385,7 @@ export async function acceptInvites(db: Db, who: Who, now: number): Promise<Team
       if (!(err instanceof TeamError)) throw err;
       if (err.reason === "on_team") return null;
       if (err.reason === "gone") await inviteRef(db, inv.teamId, email).delete().catch(() => {});
-      // Full: it waits for a seat. Anything else: try the next.
+      // Full or not paid: it waits. Anything else: try the next.
     }
   }
   return null;
@@ -458,6 +481,11 @@ export async function inviteEmails(db: Db, adminUid: string, text: unknown, now:
   return db.runTransaction(async (tx: any) => {
     const admin = await adminMembership(tx, db, adminUid);
     const team = await readTeam(tx, db, admin.teamId);
+    if (!licensePaid(team, now)) {
+      throw new TeamError(team.paidUntil === null
+        ? "Pay for the license first. Then you can invite people."
+        : "The license has ended. Renew it first, then invite people.", 402, "unpaid");
+    }
     const result = await addInvites(tx, db, team, emails, "member", now);
     return { ...result, invalid };
   });
@@ -672,8 +700,11 @@ export async function adminUpdateTeam(db: Db, rawTeamId: unknown, patch: { name?
     const team = await readTeam(tx, db, teamId);
     if (patch.seats !== undefined) changes.seats = seatsOrRefuse(patch.seats, team.memberCount);
     if (!Object.keys(changes).length) throw new TeamError("Nothing to change.");
-    const next = teamOf(team.id, { ...team, ...changes });
-    priceOrRefuse(next.currency, next.seatPrice);
+    const nextPrice = changes.seatPrice !== undefined ? (changes.seatPrice as number | null) : team.seatPrice;
+    const nextCurrency = changes.currency !== undefined ? (changes.currency as string) : team.currency;
+    priceOrRefuse(nextCurrency, nextPrice);
+    // Stored as it's read (a team at the normal price, in naira).
+    changes.currency = nextCurrency;
     tx.set(teamRef(db, team.id), changes, { merge: true });
     return teamOf(team.id, { ...team, ...changes });
   });
@@ -799,16 +830,26 @@ export async function teamDetail(db: Db, rawTeamId: unknown, now: number): Promi
   };
 }
 
+/** An invitation to the person's address, waiting: for a free seat, or for the team's license to be paid (`state`). */
+export interface WaitingInvite {
+  teamId: string;
+  teamName: string;
+  role: TeamRole;
+  state: LicenseState;
+}
+
 /** The /team page: the person's team (and as an admin sees it, if they are one), and invitations waiting. */
-export async function teamPage(db: Db, who: Who, now: number): Promise<{ team: TeamView | TeamAdminView | null; invites: { teamId: string; teamName: string; role: TeamRole }[]; verified: boolean }> {
+export async function teamPage(db: Db, who: Who, now: number): Promise<{ team: TeamView | TeamAdminView | null; invites: WaitingInvite[]; verified: boolean }> {
   let mine = await memberRef(db, who.uid).get();
   if (!mine.exists && (await acceptInvites(db, who, now))) mine = await memberRef(db, who.uid).get();
   const email = who.emailVerified && who.email ? who.email.trim().toLowerCase() : null;
   const waiting = email ? await invitesFor(db, email) : [];
-  const invites: { teamId: string; teamName: string; role: TeamRole }[] = [];
+  const invites: WaitingInvite[] = [];
   for (const inv of waiting.slice(0, 10)) {
     const t = await teamRef(db, inv.teamId).get();
-    if (t.exists) invites.push({ teamId: inv.teamId, teamName: teamOf(inv.teamId, t.data()).name, role: inv.role });
+    if (!t.exists) continue;
+    const team = teamOf(inv.teamId, t.data());
+    invites.push({ teamId: inv.teamId, teamName: team.name, role: inv.role, state: licenseStanding(team.paidUntil, now, team.paidFor).state });
   }
   if (!mine.exists) return { team: null, invites, verified: who.emailVerified };
   const me = memberOf(who.uid, mine.data());
@@ -904,7 +945,9 @@ export async function teamLicenseMap(db: Db): Promise<Map<string, { paidUntil: n
   return map;
 }
 
-// Starting or joining a team is cheap to try, so each is limited per account.
+// Every team action is cheap to try and costs database reads and writes, so
+// each is limited per account, an hour at a time: far above what a person
+// does, well below what a script could.
 const tries = new Map<string, { count: number; start: number }>();
 const TRY_WINDOW_MS = 60 * 60 * 1000;
 
@@ -912,6 +955,8 @@ function tooMany(key: string, max: number, now: number): boolean {
   const e = tries.get(key);
   if (!e || now - e.start > TRY_WINDOW_MS) {
     tries.set(key, { count: 1, start: now });
+    // Never grows without end: the oldest entry goes first.
+    if (tries.size > 20000) tries.delete(tries.keys().next().value as string);
     return false;
   }
   e.count += 1;
@@ -931,6 +976,40 @@ export interface TeamRouteDeps {
   paystackPublicKey: () => string | null;
 }
 
+/**
+ * Teams paid before what a license is paid for was kept (paidFor) read as
+ * paid for a month: 2 grace days. Once at start, each such team takes it
+ * from its latest renewal, online or by invoice (a year from 12 months,
+ * else a month), so one that paid for a year keeps its 30 days. A team
+ * with no payment recorded stays as it is. The number of teams updated.
+ */
+export async function backfillPaidFor(db: Db): Promise<number> {
+  const teams = await db.collection(TEAMS).get();
+  let updated = 0;
+  for (const d of teams.docs) {
+    const data = d.data() || {};
+    if (isPeriod(data.paidFor) || time(data.paidUntil) === null) continue;
+    const pays = await db.collection(PAYMENTS).where("teamId", "==", d.id).get();
+    const renewals = pays.docs.map((p: any) => p.data() || {}).filter((p: any) => p.action !== "add_seats" && num(p.months) > 0);
+    if (!renewals.length) continue;
+    const latest = renewals.reduce((a: any, b: any) => (num(b.paidAt) > num(a.paidAt) ? b : a));
+    const paidFor: TeamPeriod = isPeriod(latest.period) ? latest.period : paidForMonths(num(latest.months, 1));
+    const wrote = await db.runTransaction(async (tx: any) => {
+      // A payment that came in meanwhile has set it already.
+      const now = await tx.get(teamRef(db, d.id));
+      const cur = now.exists ? now.data() || {} : {};
+      if (!now.exists || isPeriod(cur.paidFor) || time(cur.paidUntil) === null) return false;
+      tx.set(teamRef(db, d.id), { paidFor }, { merge: true });
+      return true;
+    });
+    if (wrote) {
+      forgetTeam(d.id);
+      updated++;
+    }
+  }
+  return updated;
+}
+
 export function registerTeamRoutes(app: express.Express, requireAdmin: express.RequestHandler, deps: TeamRouteDeps) {
   const ready = (res: express.Response) => {
     if (isFirebaseAdminConfigured()) return true;
@@ -938,10 +1017,22 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
     return false;
   };
 
+  const limited = (res: express.Response, key: string, max: number) => {
+    if (!tooMany(key, max, Date.now())) return false;
+    res.status(429).json({ error: "Too many tries. Wait a while, then try again." });
+    return true;
+  };
+
+  if (isFirebaseAdminConfigured()) {
+    backfillPaidFor(adminDb)
+      .then((n) => { if (n) console.log(`[Teams] Recorded what ${n} team license(s) were paid for, for their grace days.`); })
+      .catch((err) => console.error("[Teams] Recording what licenses were paid for failed:", err?.message || err));
+  }
+
   // ---- The /team page ----
 
   app.get("/api/team/me", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `me:${req.uid}`, 600)) return;
     res.setHeader("Cache-Control", "no-store");
     try {
       await getOrCreateUserDoc(req.uid!);
@@ -990,7 +1081,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   });
 
   app.post("/api/team/leave", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `leave:${req.uid}`, 30)) return;
     try {
       await leaveTeam(adminDb, req.uid!);
       res.json({ ok: true });
@@ -1000,7 +1091,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   });
 
   app.post("/api/team/invites/decline", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `decline:${req.uid}`, 60)) return;
     try {
       await declineInvite(adminDb, whoOf(req), req.body?.teamId);
       res.json({ ok: true });
@@ -1012,7 +1103,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   // ---- A team's admins ----
 
   app.post("/api/team/settings", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `settings:${req.uid}`, 60)) return;
     try {
       const body = req.body || {};
       await updateTeamSettings(adminDb, req.uid!, { name: body.name, joinOpen: body.joinOpen, newCode: body.newCode });
@@ -1023,7 +1114,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   });
 
   app.post("/api/team/invites", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `invite:${req.uid}`, 60)) return;
     try {
       res.json({ ok: true, ...(await inviteEmails(adminDb, req.uid!, req.body?.emails, Date.now())) });
     } catch (err) {
@@ -1032,7 +1123,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   });
 
   app.post("/api/team/invites/cancel", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `uninvite:${req.uid}`, 200)) return;
     try {
       await cancelInvite(adminDb, req.uid!, req.body?.email);
       res.json({ ok: true });
@@ -1042,7 +1133,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   });
 
   app.post("/api/team/members/remove", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `remove:${req.uid}`, 200)) return;
     try {
       await removeMember(adminDb, req.uid!, req.body?.uid);
       res.json({ ok: true });
@@ -1052,7 +1143,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   });
 
   app.post("/api/team/members/role", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `role:${req.uid}`, 200)) return;
     try {
       await setRole(adminDb, req.uid!, req.body?.uid, req.body?.role);
       res.json({ ok: true });
@@ -1064,7 +1155,7 @@ export function registerTeamRoutes(app: express.Express, requireAdmin: express.R
   // The price to pay online, and what the checkout needs. The payment is
   // applied by /api/paystack/verify and the webhook (server/paystack.ts).
   app.post("/api/team/checkout", requireFirebaseAuth, async (req, res) => {
-    if (!ready(res)) return;
+    if (!ready(res) || limited(res, `checkout:${req.uid}`, 30)) return;
     const publicKey = deps.paystackPublicKey();
     if (!publicKey) return res.status(503).json({ error: "Online payments aren't set up yet. Contact us to pay by invoice." });
     if (!req.email) return res.status(400).json({ error: "Your account needs an email address to pay online." });
