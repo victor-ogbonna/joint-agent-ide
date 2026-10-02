@@ -5,11 +5,11 @@ import { useAuth } from "./contexts/AuthContext";
 import GoogleSignInButton from "./components/GoogleSignInButton";
 import { formatMoney, formatDay, PRO_MONTHLY_PRICE } from "./lib/plans";
 import { loadPaystack } from "./lib/paystackScript";
-import { TEAM_PRICES, renewalPrice, addSeatsPrice, daysLeft, stateLabel, teamSavings, type TeamPeriod, type LicenseState, type TeamRole, type TeamKind } from "./lib/teams";
+import { TEAM_PRICES, PERIOD_MONTHS, renewalPrice, addSeatsPrice, daysLeft, stateLabel, teamSavings, type TeamPeriod, type LicenseState, type TeamRole, type TeamKind } from "./lib/teams";
 
 /**
  * Team and school licenses (/team), by server/teams.ts. A team's admins pay
- * for its seats a month at a time, invite people and manage who's on it;
+ * for its seats for a month or a year, invite people and manage who's on it;
  * every member has PRO while it's paid, and for 7 days after. Anyone signed
  * in can start one, or join one by its code or an invitation to their address.
  */
@@ -136,6 +136,7 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
   const seatPrice = team.seatPrice ?? prices.seatPrice;
   const currency = team.currency ?? prices.currency;
   const least = Math.max(prices.minSeats, team.memberCount);
+  const [period, setPeriod] = useState<TeamPeriod>("month");
   const [seats, setSeats] = useState(String(Math.max(team.seats, least)));
   // After a payment or a change of members, start from the team's new count.
   useEffect(() => { setSeats(String(Math.max(team.seats, least))); }, [team.seats, least]);
@@ -148,7 +149,7 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
   const seatsOk = Number.isInteger(seatCount) && seatCount >= least && seatCount <= prices.maxSeats;
   const extraCount = Number(extra);
   const extraOk = Number.isInteger(extraCount) && extraCount >= 1 && team.seats + extraCount <= prices.maxSeats;
-  const renewAmount = seatsOk ? renewalPrice(seatCount, seatPrice, "month") : 0;
+  const renewAmount = seatsOk ? renewalPrice(seatCount, seatPrice, period) : 0;
   const addAmount = extraOk ? addSeatsPrice(extraCount, seatPrice, team.paidUntil) : 0;
 
   const pay = async (what: string, body: Record<string, unknown>) => {
@@ -204,12 +205,24 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
     <section className={card}>
       <h2 className={heading}><CreditCard size={16} aria-hidden="true" /> {team.state === "unpaid" ? "Pay for the license" : "Renew"}</h2>
       <p className={`mt-1 ${small}`}>
-        {formatMoney(seatPrice, currency)} a seat a month, paid a month at a time. Nothing renews by itself: you renew here each month.
-        {team.state === "active" ? " Renewing now adds a month after the current end." : " It runs for a month from the day you pay."}
-        {" "}When a month ends unpaid, everyone keeps PRO for 7 more days.
+        {formatMoney(seatPrice, currency)} a seat a month, paid ahead for a month, or for a year at 12 months for the price of 11. Nothing renews by itself: you renew here when it's due.
+        {team.state === "active" ? " Renewing now adds the time after the current end." : " It runs from the day you pay."}
+        {" "}When it ends unpaid, everyone keeps PRO for 7 more days.
       </p>
 
-      <div className="mt-4 flex flex-wrap items-end gap-3">
+      <fieldset className="mt-4">
+        <legend className="mb-2 text-[12px] font-medium text-[var(--text-muted)]">How long</legend>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {(Object.keys(PERIOD_MONTHS) as TeamPeriod[]).map((p) => (
+            <label key={p} className={`flex min-h-[44px] cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-[13px] ${period === p ? "border-[var(--accent-primary)] bg-[var(--accent-primary-soft)]" : "border-[var(--border-main)]"}`}>
+              <input type="radio" name="period" value={p} checked={period === p} onChange={() => setPeriod(p)} className="accent-[var(--accent-primary)]" />
+              <span>{p === "year" ? <>1 year <span className="text-[var(--text-muted)]">(12 months for the price of 11)</span></> : "1 month"}</span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
+      <div className="mt-3 flex flex-wrap items-end gap-3">
         <div className="w-32">
           <label htmlFor="renew-seats" className="mb-1 block text-[12px] font-medium text-[var(--text-muted)]">Seats</label>
           <input id="renew-seats" className={input} inputMode="numeric" value={seats} onChange={(e) => setSeats(e.target.value.replace(/[^0-9]/g, ""))} />
@@ -219,10 +232,10 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
           className={primary}
           style={{ background: "var(--gradient-hero)" }}
           disabled={!paymentsOn || !seatsOk || paying !== null}
-          onClick={() => void pay("renew", { action: "renew", period: "month", seats: seatCount })}
+          onClick={() => void pay("renew", { action: "renew", period, seats: seatCount })}
         >
           {paying === "renew" ? <Loader2 size={16} className="animate-spin" /> : <CreditCard size={16} />}
-          {seatsOk ? `Pay ${formatMoney(renewAmount, currency)} for 1 month` : "Pay"}
+          {seatsOk ? `Pay ${formatMoney(renewAmount, currency)} for ${PERIOD_MONTHS[period].label}` : "Pay"}
         </button>
       </div>
       {!seatsOk && <p className={`mt-1 ${small}`}>Choose {least} to {prices.maxSeats} seats{team.memberCount > prices.minSeats ? `: the team has ${team.memberCount} members` : ""}.</p>}
@@ -266,6 +279,7 @@ function SavingsCard({ seats, seatPrice, currency, proMonthly }: { seats: number
       </p>
       <p className={`mt-1 ${small}`}>
         {seats} seats: {money(s.teamPays)} a month instead of {money(s.onTheirOwn)}. That's {money(s.saved)} saved every month.
+        {" "}Paying for a year at once is 12 months for the price of 11: one more month, {money(s.teamPays)}, saved.
       </p>
     </section>
   );
@@ -530,7 +544,7 @@ function NoTeam({ data, call, reload, joinFromLink, proMonthly }: { data: PageDa
         <h2 className={heading}><Users size={16} aria-hidden="true" /> Start a school or team license</h2>
         <p className={`mt-1 ${small}`}>
           PRO for everyone on it: {formatMoney(data.prices.seatPrice, data.prices.currency)} a seat a month, at least {data.prices.minSeats} seats.
-          Paid a month at a time. When a license ends, everyone keeps PRO for 7 more days.
+          Pay for a month, or for a year at 12 months for the price of 11. When a license ends, everyone keeps PRO for 7 more days.
         </p>
         <form
           className="mt-4 space-y-3"
@@ -556,7 +570,7 @@ function NoTeam({ data, call, reload, joinFromLink, proMonthly }: { data: PageDa
             <input id="new-team-seats" className={input} inputMode="numeric" value={seats} onChange={(e) => setSeats(e.target.value.replace(/[^0-9]/g, ""))} />
           </div>
           <p className={small}>
-            {shownSeats} seats: {price("month")} a month. You pay on the next step; members get PRO once it's paid.
+            {shownSeats} seats: {price("month")} a month, or {price("year")} a year. You pay on the next step; members get PRO once it's paid.
           </p>
           <button type="submit" className={primary} style={{ background: "var(--gradient-hero)" }} disabled={create.busy !== null || name.trim().length < 2 || !seatsOk}>
             {create.busy ? <Loader2 size={16} className="animate-spin" /> : null} Start the license

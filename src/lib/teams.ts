@@ -8,8 +8,8 @@ const DAY = 24 * 60 * 60 * 1000;
 export type LicenseState = "unpaid" | "active" | "grace" | "ended";
 export type TeamRole = "admin" | "member";
 export type TeamKind = "school" | "team";
-/** Monthly only, for now. */
-export type TeamPeriod = "month";
+/** A month, or a year (12 months for the price of 11). */
+export type TeamPeriod = "month" | "year";
 
 /** What /api/quota/status says about the account's team. */
 export interface TeamStatusView {
@@ -45,6 +45,7 @@ export function daysLeft(at: number, now = Date.now()): number {
 
 export const PERIOD_MONTHS: Record<TeamPeriod, { months: number; chargedMonths: number; label: string; short: string }> = {
   month: { months: 1, chargedMonths: 1, label: "1 month", short: "a month" },
+  year: { months: 12, chargedMonths: 11, label: "1 year", short: "a year" },
 };
 
 /**

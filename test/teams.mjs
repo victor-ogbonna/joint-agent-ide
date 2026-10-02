@@ -98,10 +98,10 @@ const random = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 2332
 
 console.log("Prices and seats");
 check(DEFAULT_SEAT_PRICE === 500 && MIN_SEATS === 5, "$5.00 a seat a month, at least 5 seats");
-check(renewalPrice(5, 500, "month") === 2500 && renewalPrice(6, 500, "month") === 3000, "5 seats: $25 a month; 6 seats: $30");
-check(Object.keys(PERIODS).join() === "month" && PERIODS.month.months === 1 && PERIODS.month.chargedMonths === 1,
-  "paid a month at a time: no school term, no year");
-check(isPeriod("month") && !isPeriod("term") && !isPeriod("year") && !isPeriod(undefined), "only a month is a period");
+check(renewalPrice(5, 500, "month") === 2500 && renewalPrice(5, 500, "year") === 27500, "5 seats: $25 a month, $275 a year (12 months for 11)");
+check(Object.keys(PERIODS).join() === "month,year" && PERIODS.month.months === 1 && PERIODS.month.chargedMonths === 1 && PERIODS.year.months === 12 && PERIODS.year.chargedMonths === 11,
+  "a month, or a year charged as 11 months; no school term");
+check(isPeriod("month") && isPeriod("year") && !isPeriod("term") && !isPeriod(undefined), "a period is a month or a year");
 check(validSeats(5) === 5 && validSeats("30") === 30 && validSeats(4) === null && validSeats(MAX_SEATS + 1) === null && validSeats(5.5) === null && validSeats("x") === null,
   "seats: whole numbers from 5 to the most");
 check(validSeats(6, 8) === null && validSeats(8, 8) === 8, "never fewer seats than the team has members");
@@ -115,8 +115,10 @@ check(renewedUntil(NOW - 3 * DAY, NOW, 4) === addMonths(NOW, 4) && renewedUntil(
 console.log("What the /team page shows");
 check(TEAM_PRICES.seatPrice === DEFAULT_SEAT_PRICE && TEAM_PRICES.currency === DEFAULT_TEAM_CURRENCY && TEAM_PRICES.minSeats === MIN_SEATS && TEAM_PRICES.maxSeats === MAX_SEATS,
   "the prices shown before signing in are the server's");
-check(Object.keys(PERIOD_MONTHS).join() === Object.keys(PERIODS).join() && PERIOD_MONTHS.month.months === PERIODS.month.months && shownRenewalPrice(6, 500, "month") === renewalPrice(6, 500, "month"),
-  "and its monthly price is the server's");
+check(Object.keys(PERIOD_MONTHS).join() === Object.keys(PERIODS).join()
+  && Object.keys(PERIODS).every((k) => PERIOD_MONTHS[k].months === PERIODS[k].months && PERIOD_MONTHS[k].chargedMonths === PERIODS[k].chargedMonths)
+  && shownRenewalPrice(6, 500, "month") === renewalPrice(6, 500, "month") && shownRenewalPrice(6, 500, "year") === renewalPrice(6, 500, "year"),
+  "and its month and year prices are the server's");
 check(PRO_MONTHLY_PRICE.currency === "USD" && PRO_PRICE === `$${PRO_MONTHLY_PRICE.amount / 100}/month`, "PRO on your own: $7 a month, as the app lists it");
 const saved = teamSavings(5, 500, "USD", [null, PRO_MONTHLY_PRICE]);
 check(saved?.pro === 700 && saved.perSeat === 200 && saved.teamPays === 2500 && saved.onTheirOwn === 3500 && saved.saved === 1000,
@@ -220,9 +222,10 @@ check(await throwsWith(() => cancelInvite(db, "ada", "dee@school.ng"), /isn't in
 
 console.log("Paying online");
 check(await throwsWith(() => quoteFor(db, "ben", { action: "renew", period: "month" }, NOW), /Only the team's admins/), "only an admin pays");
-check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "term" }, NOW), /a month at a time/), "a school term can't be bought (a page from before still open)");
-check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "year" }, NOW), /a month at a time/), "nor a year");
-check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "week" }, NOW), /a month at a time/), "nor anything else");
+check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "term" }, NOW), /a month or a year/), "a school term can't be bought (a page from before still open)");
+check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "week" }, NOW), /a month or a year/), "nor anything else");
+const yearQuote = await quoteFor(db, "ada", { action: "renew", period: "year", seats: 6 }, NOW);
+check(yearQuote.amount === 33000 && yearQuote.months === 12 && yearQuote.paidUntilAfter === addMonths(NOW, 12), "a year for 6 seats: $330 (11 months), paid for 12 months");
 check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "month", seats: 2 }, NOW), /5 to 2000 seats/), "never fewer than 5 seats");
 check(await throwsWith(() => quoteFor(db, "ada", { action: "add_seats", extra: 2 }, NOW), /while the license is paid/), "seats are added to a paid license only");
 const quote = await quoteFor(db, "ada", { action: "renew", period: "month", seats: 6 }, NOW);

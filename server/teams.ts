@@ -496,7 +496,7 @@ export async function quoteFor(db: Db, adminUid: string, input: { action?: unkno
     const price = seatPriceOf(team);
     let quote: Omit<Quote, "id">;
     if (action === "renew") {
-      if (!isPeriod(input.period)) throw new TeamError("A license is paid a month at a time. Refresh the page, then try again.");
+      if (!isPeriod(input.period)) throw new TeamError("A license is paid for a month or a year. Refresh the page, then try again.");
       const period = input.period;
       const seats = seatsOrRefuse(input.seats ?? team.seats, team.memberCount);
       const months = PERIODS[period].months;
