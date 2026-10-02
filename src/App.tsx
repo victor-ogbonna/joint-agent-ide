@@ -33,6 +33,7 @@ const SchematicViewer = lazyPart(() => import("./components/SchematicViewer"));
 const Web3Panel = lazyPart(() => import("./components/Web3Panel"));
 const SerialPlotterChart = lazyPart(() => import("./components/SerialPlotterChart"));
 import TeamLicenseBanner from "./components/TeamLicenseBanner";
+import TeamCopyBanner, { type TeamCopyInfo } from "./components/TeamCopyBanner";
 import { readTeamStatus, stateLabel, type TeamStatusView } from "./lib/teams";
 import LibrariesModal from "./components/LibrariesModal";
 import OnboardingTour, { TourStep } from "./components/OnboardingTour";
@@ -3332,6 +3333,19 @@ export default function App() {
     if (isNarrowRef.current && mobilePaneRef.current === paneAtPick) slideToPane("agent");
   };
 
+  // The Team page's Edit opens the working copy here, /?open=<project id>:
+  // one of the person's own projects, opened as from Recents.
+  useEffect(() => {
+    if (!user) return;
+    const id = new URLSearchParams(window.location.search).get("open");
+    if (!id) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("open");
+    window.history.replaceState(null, "", url.toString());
+    if (/^[A-Za-z0-9]{1,64}$/.test(id)) void handleOpenRecent(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
+
   // Opening Workspace on a phone: the project in hand (orange in Recent) is
   // brought into view if it's below the fold. Only the sidebar's own list
   // scrolls; if Recent hasn't loaded yet, this waits until it has.
@@ -3393,6 +3407,57 @@ export default function App() {
     // still persists — asking a question and getting an answer is exactly the
     // history the user wants back, and without this it was never written.
   }, [code, description, components, connections, mcu, chatMessages, currentProjectId, user]);
+
+  // A working copy of a team project (server/teamProjects.ts): the banner
+  // saying so, and its Send. Asked of the server for each project opened,
+  // while the account is on a team.
+  const [teamCopy, setTeamCopy] = useState<{ projectId: string; info: TeamCopyInfo } | null>(null);
+  const [teamCopySending, setTeamCopySending] = useState(false);
+  const [teamCopyNote, setTeamCopyNote] = useState<{ ok: boolean; text: string } | null>(null);
+  useEffect(() => {
+    setTeamCopyNote(null);
+    if (!user || !currentProjectId || !teamStatus) { setTeamCopy(null); return; }
+    let live = true;
+    const projectId = currentProjectId;
+    (async () => {
+      try {
+        const res = await authedApiRequest(`/api/team/copy/${encodeURIComponent(projectId)}`);
+        const body = await res.json().catch(() => null);
+        if (live) setTeamCopy(res.ok && body?.copy ? { projectId, info: body.copy as TeamCopyInfo } : null);
+      } catch {
+        if (live) setTeamCopy(null);
+      }
+    })();
+    return () => { live = false; };
+  }, [user, currentProjectId, teamStatus?.id]);
+
+  /** Makes this working copy the team's copy: saved first, as autosave waits 1.5 s after the last change. */
+  const sendTeamCopy = async () => {
+    if (!user || !teamCopy || teamCopy.projectId !== currentProjectId || teamCopySending) return;
+    const { projectId, info } = teamCopy;
+    setTeamCopySending(true);
+    setTeamCopyNote(null);
+    try {
+      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+      await updateProject(user.uid, projectId, {
+        code, description, components, connections, mcu,
+        messages: trimMessagesForStorage(chatMessages as any),
+      });
+      setSaveStatus("saved");
+      const res = await authedApiRequest(`/api/team/projects/${encodeURIComponent(info.teamProjectId)}/send`, { method: "POST", body: {} });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setTeamCopy({ projectId, info: { ...info, editing: false, editingBy: null } });
+        setTeamCopyNote({ ok: true, text: "Sent. Your version is now the team's copy." });
+      } else {
+        setTeamCopyNote({ ok: false, text: body.error || "Your changes couldn't be sent. Try again." });
+      }
+    } catch {
+      setTeamCopyNote({ ok: false, text: "Your changes couldn't be sent. Check your connection, then try again." });
+    } finally {
+      setTeamCopySending(false);
+    }
+  };
 
   const handleSubscribe = async (period: BillingPeriod = "monthly") => {
     if (!user?.email) return;
@@ -3694,6 +3759,10 @@ export default function App() {
 
       {/* A team or school license in its grace days: when PRO ends. */}
       <TeamLicenseBanner team={teamStatus} />
+      {/* A working copy of a team project: whose it is, and Send. */}
+      {teamCopy && teamCopy.projectId === currentProjectId && (
+        <TeamCopyBanner info={teamCopy.info} sending={teamCopySending} note={teamCopyNote} onSend={() => void sendTeamCopy()} />
+      )}
 
       {/* Main Workspace Layout with Resizable Panels */}
       <main

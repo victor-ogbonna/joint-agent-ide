@@ -5,6 +5,7 @@ import { useAuth } from "./contexts/AuthContext";
 import GoogleSignInButton from "./components/GoogleSignInButton";
 import { formatMoney, formatDay, PRO_MONTHLY_PRICE } from "./lib/plans";
 import { loadPaystack } from "./lib/paystackScript";
+import { ConsentCard, MemberProjects, TeamProjectsCard } from "./components/TeamProjects";
 import { TEAM_PRICES, PERIOD_MONTHS, renewalPrice, addSeatsPrice, daysLeft, stateLabel, teamSavings, type TeamPeriod, type LicenseState, type TeamRole, type TeamKind } from "./lib/teams";
 
 /**
@@ -14,7 +15,7 @@ import { TEAM_PRICES, PERIOD_MONTHS, renewalPrice, addSeatsPrice, daysLeft, stat
  * in can start one, or join one by its code or an invitation to their address.
  */
 
-interface MemberRow { uid: string; email: string | null; emailVerified: boolean; role: TeamRole; joinedAt: number }
+interface MemberRow { uid: string; email: string | null; emailVerified: boolean; role: TeamRole; joinedAt: number; adminsCanView: boolean }
 interface PaymentRow { id: string; kind: "online" | "invoice"; action: "renew" | "add_seats"; period: TeamPeriod | null; months: number; seats: number; extra: number; amount: number; currency: string; paidAt: number; payerEmail: string | null; note: string | null }
 interface TeamView {
   id: string;
@@ -27,6 +28,8 @@ interface TeamView {
   seats: number;
   memberCount: number;
   admins: string[];
+  /** Whether the person lets the team's admins see their projects. */
+  adminsCanView: boolean;
   // An admin's view only.
   joinCode?: string;
   joinOpen?: boolean;
@@ -385,7 +388,7 @@ function MembersCard({ team, me, call, reload }: { team: TeamView; me: string; c
                 {m.uid === me && <span className="ml-1 text-[11px] text-[var(--text-subtle)]">(you)</span>}
                 {m.email && !m.emailVerified && <span className="ml-1 text-[11px] text-orange-400">(email not verified)</span>}
               </p>
-              <p className="text-[11px] text-[var(--text-subtle)]">{m.role === "admin" ? "Admin" : "Member"} · joined {formatDay(m.joinedAt)}</p>
+              <p className="text-[11px] text-[var(--text-subtle)]">{m.role === "admin" ? "Admin" : "Member"} · joined {formatDay(m.joinedAt)}{m.uid !== me && !m.adminsCanView ? " · projects private" : ""}</p>
             </div>
             {m.uid !== me && (
               <div className="flex flex-wrap gap-2">
@@ -400,6 +403,8 @@ function MembersCard({ team, me, call, reload }: { team: TeamView; me: string; c
                 </button>
               </div>
             )}
+            {/* Only those who chose to let admins see their projects. */}
+            {m.uid !== me && m.adminsCanView && <MemberProjects uid={m.uid} email={m.email} call={call} />}
           </li>
         ))}
       </ul>
@@ -681,9 +686,11 @@ export default function TeamPage() {
             ) : (
               <>
                 <Overview team={team} />
+                {team.role === "admin" && <PayCard team={team} call={call} reload={load} paymentsOn={data.payments} prices={data.prices} />}
+                <TeamProjectsCard teamName={team.name} call={call} />
+                <ConsentCard teamName={team.name} allowed={team.adminsCanView} call={call} reload={load} />
                 {team.role === "admin" && (
                   <>
-                    <PayCard team={team} call={call} reload={load} paymentsOn={data.payments} prices={data.prices} />
                     <JoinLinkCard team={team} call={call} reload={load} />
                     <InviteCard team={team} call={call} reload={load} />
                     <MembersCard team={team} me={user.uid} call={call} reload={load} />

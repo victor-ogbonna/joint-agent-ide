@@ -1,0 +1,217 @@
+/**
+ * Working together on a team, only by each person's choice
+ * (server/teamProjects.ts): sharing a project with the team, one person
+ * editing it at a time, sending changes back, secrets never in the team's
+ * copy, and admins seeing a member's projects only once the member allows it.
+ *
+ * Runs against an in-memory stand-in for Firestore with the calls the code
+ * uses (documents at any depth, merges, deletes, == queries, transactions).
+ */
+import { Timestamp } from "firebase-admin/firestore";
+import {
+  setAdminsCanView, projectsToShare, shareProject, listTeamProjects, viewTeamProject, editTeamProject,
+  sendTeamProject, stopEditingTeamProject, freeTeamProject, removeTeamProject, copyTeamProject, teamCopyOf,
+  memberProjects, memberProject, EDIT_HOLD_MS, MAX_TEAM_PROJECTS, TEAM_PROJECTS,
+} from "../server/teamProjects.ts";
+import { TeamError, teamPage } from "../server/teams.ts";
+
+let bad = 0;
+const check = (cond, label, extra = "") => {
+  if (!cond) bad++;
+  console.log(`  ${cond ? "ok  " : "FAIL"}  ${label}${extra ? "  " + extra : ""}`);
+};
+const throwsWith = async (fn, re) => {
+  try { await fn(); return false; } catch (e) { return e instanceof TeamError && re.test(e.message); }
+};
+
+// ---- An in-memory Firestore: documents at any depth ("users/u/projects/p") ----
+const split = (key) => { const at = key.lastIndexOf("/"); return [key.slice(0, at), key.slice(at + 1)]; };
+class Snap {
+  constructor(ref, data) { this.ref = ref; this.id = ref.id; this._d = data; this.exists = data !== undefined; }
+  data() { return this._d === undefined ? undefined : { ...this._d }; }
+  get(f) { return this._d?.[f]; }
+}
+class DocRef {
+  constructor(db, key) { this.db = db; this.key = key; this.id = split(key)[1]; }
+  _snap() { return new Snap(this, this.db.store.get(this.key)); }
+  _write(data, opts) {
+    const cur = this.db.store.get(this.key);
+    // A merge merges maps inside too, as Firestore does.
+    const deep = (a, b) => {
+      const out = { ...a };
+      for (const [k, v] of Object.entries(b)) out[k] = v && typeof v === "object" && !Array.isArray(v) && !(v instanceof Timestamp) && a?.[k] && typeof a[k] === "object" ? deep(a[k], v) : v;
+      return out;
+    };
+    this.db.store.set(this.key, opts?.merge && cur ? deep(cur, data) : { ...data });
+  }
+  _delete() { this.db.store.delete(this.key); }
+  async get() { return this._snap(); }
+  async set(data, opts) { this._write(data, opts); }
+  async delete() { this._delete(); }
+}
+class Query {
+  constructor(db, col, filters = []) { this.db = db; this.col = col; this.filters = filters; }
+  where(field, op, value) {
+    if (op !== "==") throw new Error("only == in the stand-in");
+    return new Query(this.db, this.col, [...this.filters, [field, value]]);
+  }
+  _snap() {
+    const docs = [];
+    for (const [key, d] of this.db.store) {
+      if (split(key)[0] !== this.col) continue;
+      if (this.filters.every(([f, v]) => d[f] === v)) docs.push(new Snap(new DocRef(this.db, key), d));
+    }
+    return { docs, empty: docs.length === 0, size: docs.length };
+  }
+  async get() { return this._snap(); }
+}
+class Col extends Query {
+  doc(id) { return new DocRef(this.db, `${this.col}/${id ?? `auto${++this.db.auto}`}`); }
+}
+class FakeDb {
+  constructor() { this.store = new Map(); this.auto = 0; }
+  collection(path) { return new Col(this, path); }
+  doc(path) { return new DocRef(this, path); }
+  async runTransaction(fn) {
+    const writes = [];
+    let wrote = false;
+    const tx = {
+      get: async (r) => { if (wrote) throw new Error("a read after a write in a transaction"); return r._snap(); },
+      set: (ref, data, opts) => { wrote = true; writes.push(() => ref._write(data, opts)); },
+      delete: (ref) => { wrote = true; writes.push(() => ref._delete()); },
+    };
+    const result = await fn(tx);
+    for (const w of writes) w();
+    return result;
+  }
+}
+
+const NOW = Date.UTC(2026, 9, 2, 12, 0, 0);
+const db = new FakeDb();
+const put = (path, data) => db.doc(path)._write(data);
+const read = (path) => db.store.get(path);
+const who = (uid) => ({ uid, email: `${uid}@school.ng`, emailVerified: true });
+const [ada, ben, chi, dee, eve] = ["ada", "ben", "chi", "dee", "eve"].map(who);
+
+// Lagos Robotics: Ada (admin), Ben, Chi. Another team: Dee (its admin). Eve: no team.
+put("teams/T1", { name: "Lagos Robotics", kind: "school", seats: 5, paidUntil: NOW + 30 * 86400000, joinCode: "ABCD2345", memberCount: 3, createdAt: NOW });
+put("teams/T2", { name: "Abuja Makers", kind: "team", seats: 5, paidUntil: null, joinCode: "WXYZ6789", memberCount: 1, createdAt: NOW });
+put("teamMembers/ada", { teamId: "T1", role: "admin", email: "ada@school.ng", emailVerified: true, joinedAt: NOW - 3 });
+put("teamMembers/ben", { teamId: "T1", role: "member", email: "ben@school.ng", emailVerified: true, joinedAt: NOW - 2 });
+put("teamMembers/chi", { teamId: "T1", role: "member", email: "chi@school.ng", emailVerified: true, joinedAt: NOW - 1 });
+put("teamMembers/dee", { teamId: "T2", role: "admin", email: "dee@school.ng", emailVerified: true, joinedAt: NOW });
+
+const stamp = (ms) => Timestamp.fromMillis(ms);
+const BEN_CODE = '#include <WiFi.h>\nconst char* ssid = "BenHome";\nconst char* password = "hunter2secret";\nvoid setup() { WiFi.begin(ssid, password); }\nvoid loop() {}\n';
+put("users/ben/projects/p1", {
+  name: "Weather station", code: BEN_CODE, description: "Reads the temperature", mcu: "esp32", boardId: "esp32dev",
+  components: [{ id: "dht", type: "dht22" }], connections: [{ from: "dht", to: "esp32" }],
+  messages: [{ id: "m1", role: "user", content: "my private question", timestamp: 1 }],
+  createdAt: stamp(NOW - 5000), updatedAt: stamp(NOW - 1000),
+});
+put("users/ben/projects/p2", { name: "Old one", code: "void setup(){}", mcu: "arduino", boardId: "uno", components: [], connections: [], deletedAt: stamp(NOW - 100), createdAt: stamp(NOW - 9000), updatedAt: stamp(NOW - 9000) });
+put("users/chi/projects/c1", { name: "Chi's blink", code: "void setup(){}", mcu: "arduino", boardId: "uno", components: [], connections: [], createdAt: stamp(NOW), updatedAt: stamp(NOW) });
+
+// The fields a project always has: the Firestore rules that check fields allow these.
+const PROJECT_FIELDS = ["name", "code", "description", "components", "connections", "mcu", "boardId", "messages", "createdAt", "updatedAt", "deletedAt"];
+
+console.log("Admins see a member's projects only when the member allows it");
+check(await throwsWith(() => memberProjects(db, ada, "ben"), /haven't chosen/), "before Ben chooses: Ada (admin) can't");
+check(await throwsWith(() => setAdminsCanView(db, ben, "yes"), /allow it or not/), "the choice is on or off");
+check(await throwsWith(() => setAdminsCanView(db, eve, true), /not on a team/), "someone on no team has nothing to allow");
+check(await setAdminsCanView(db, ben, true) === true && read("teamMembers/ben").adminsCanView === true && read("teamMembers/ben").teamId === "T1", "Ben allows it (his membership otherwise unchanged)");
+const list = await memberProjects(db, ada, "ben");
+check(list.length === 1 && list[0].id === "p1" && list[0].name === "Weather station", "Ada sees his projects (not the one in Trash)");
+const seen = await memberProject(db, ada, "ben", "p1");
+check(seen.code.includes("WiFi.begin") && !seen.code.includes("hunter2secret") && !("messages" in seen), "read-only: the code with the password hidden, never the conversation");
+check(await throwsWith(() => memberProject(db, ada, "ben", "p2"), /isn't there/), "not a project in Trash");
+check(await throwsWith(() => memberProjects(db, chi, "ben"), /Only the team's admins/), "Chi (not an admin) can't");
+check(await throwsWith(() => memberProjects(db, dee, "ben"), /isn't on your team/), "another team's admin can't");
+await setAdminsCanView(db, ben, false);
+check(await throwsWith(() => memberProject(db, ada, "ben", "p1"), /haven't chosen/), "Ben turns it off: Ada can't any more");
+const pageBen = await teamPage(db, ben, NOW);
+const pageAda = await teamPage(db, ada, NOW);
+check(pageBen.team?.adminsCanView === false && pageAda.team?.members.find((m) => m.uid === "ben")?.adminsCanView === false, "the /team page shows each person's choice (to them, and to admins)");
+
+console.log("Sharing a project with the team: the owner's choice, project by project");
+check((await projectsToShare(db, ben)).map((p) => `${p.id}:${p.shared}`).join() === "p1:false", "Ben's projects to share (not the one in Trash)");
+check(await throwsWith(() => shareProject(db, ben, "p2", NOW), /can't be found/), "not one in Trash");
+check(await throwsWith(() => shareProject(db, ben, "c1", NOW), /can't be found/), "not someone else's");
+check(await throwsWith(() => shareProject(db, eve, "x1", NOW), /not on a team/), "not without a team");
+check(await throwsWith(() => shareProject(db, ben, "../c1", NOW), /No such project/), "a bad project id is refused");
+const tp = await shareProject(db, ben, "p1", NOW);
+const copy0 = read(`${TEAM_PROJECTS}/${tp}`);
+check(copy0.teamId === "T1" && copy0.version === 1 && copy0.name === "Weather station" && copy0.code.includes("WiFi.begin") && !copy0.code.includes("hunter2secret") && !("messages" in copy0),
+  "the team gets its own copy: the password hidden, no conversation");
+check(read("users/ben/projects/p1").code === BEN_CODE, "Ben's own project is unchanged");
+check((await projectsToShare(db, ben))[0].shared === true, "and is marked shared");
+check(await throwsWith(() => shareProject(db, ben, "p1", NOW), /already/), "the same project isn't shared twice");
+
+console.log("Everyone on the team sees it; nobody else does");
+const rowChi = (await listTeamProjects(db, chi, NOW))[0];
+check(rowChi?.id === tp && rowChi.sharedBy === "ben@school.ng" && rowChi.editing === null && !rowChi.canRemove && !rowChi.canFree, "Chi sees it, free to edit; she can't remove it");
+const rowAda = (await listTeamProjects(db, ada, NOW))[0];
+check(rowAda.canRemove && !rowAda.canFree, "Ada (admin) can remove it");
+check((await listTeamProjects(db, dee, NOW)).length === 0 && await throwsWith(() => viewTeamProject(db, dee, tp), /no longer shared with your team/), "another team sees nothing of it");
+const view = await viewTeamProject(db, chi, tp);
+check(view.name === "Weather station" && !view.code.includes("hunter2secret") && view.components.length === 1, "Chi can look at it");
+
+console.log("One person edits at a time");
+const e1 = await editTeamProject(db, chi, tp, NOW);
+const chiCopy = read(`users/chi/projects/${e1.copyId}`);
+check(e1.fresh && chiCopy?.name === "Weather station (team)" && chiCopy.code === copy0.code && chiCopy.createdAt instanceof Timestamp,
+  "Chi presses Edit: a working copy among her own projects");
+check(Object.keys(chiCopy).every((k) => PROJECT_FIELDS.includes(k)), "with only the fields a project always has", Object.keys(chiCopy).join(","));
+const chiRow = (await listTeamProjects(db, chi, NOW))[0];
+const benRow = (await listTeamProjects(db, ben, NOW))[0];
+check(chiRow.editing?.you === true && chiRow.copyId === e1.copyId && benRow.editing?.by === "chi@school.ng" && benRow.editing.you === false && benRow.copyId === null,
+  "she's shown as editing it, to herself and to Ben");
+check(await throwsWith(() => editTeamProject(db, ben, tp, NOW + 1000), /chi@school.ng is editing it now/), "Ben can't edit it while she is");
+check(await throwsWith(() => sendTeamProject(db, ben, tp, NOW + 1000), /is editing it now/), "nor send changes");
+const info = await teamCopyOf(db, chi, e1.copyId, NOW);
+check(info?.teamProjectId === tp && info.teamName === "Lagos Robotics" && info.name === "Weather station" && info.editing === true, "the app knows her project is her working copy of it");
+check(await teamCopyOf(db, chi, "c1", NOW) === null, "and that her other projects aren't");
+
+console.log("Sending changes");
+db.doc(`users/chi/projects/${e1.copyId}`)._write({ code: 'const char* password = "chi-wifi-pass";\n// faster readings\n', updatedAt: stamp(NOW + 2000) }, { merge: true });
+const sent = await sendTeamProject(db, chi, tp, NOW + 3000);
+const copy1 = read(`${TEAM_PROJECTS}/${tp}`);
+check(sent.version === 2 && copy1.version === 2 && copy1.code.includes("faster readings") && !copy1.code.includes("chi-wifi-pass") && copy1.updatedBy.uid === "chi" && copy1.editor === null,
+  "Chi sends: her version is the team's (her password hidden), and it's free again");
+check(read(`users/chi/projects/${e1.copyId}`).code.includes("chi-wifi-pass"), "her own working copy keeps her password");
+check(await throwsWith(() => sendTeamProject(db, chi, tp, NOW + 4000), /aren't editing it now/), "sending again needs Edit first");
+const e2 = await editTeamProject(db, chi, tp, NOW + 5000);
+check(!e2.fresh && e2.copyId === e1.copyId && read(`users/chi/projects/${e1.copyId}`).code.includes("chi-wifi-pass"), "Edit again: her same working copy, untouched (nobody changed the team's since)");
+await stopEditingTeamProject(db, chi, tp);
+check(read(`${TEAM_PROJECTS}/${tp}`).editor === null && read(`${TEAM_PROJECTS}/${tp}`).version === 2, "Stop editing: free again, unchanged");
+
+console.log("Turns, and who can end them");
+const e3 = await editTeamProject(db, ben, tp, NOW + 6000);
+check(e3.fresh && e3.copyId !== "p1" && read(`users/ben/projects/${e3.copyId}`).name === "Weather station (team)", "Ben's turn: a working copy of his own (his original stays as it was)");
+const e4 = await editTeamProject(db, chi, tp, NOW + 6000 + EDIT_HOLD_MS + 1);
+check(!e4.fresh && e4.copyId === e1.copyId && read(`${TEAM_PROJECTS}/${tp}`).editor.uid === "chi", "a turn ends by itself after a day: Chi can take it then (her working copy again: Ben sent nothing)");
+check(await throwsWith(() => sendTeamProject(db, ben, tp, NOW + 6000 + EDIT_HOLD_MS + 2), /chi@school.ng is editing it now/), "and Ben's late send is refused, his work safe in his own projects");
+check(await throwsWith(() => freeTeamProject(db, ben, tp), /Only the team's admins/), "only an admin can end someone else's turn");
+await freeTeamProject(db, ada, tp);
+check(read(`${TEAM_PROJECTS}/${tp}`).editor === null, "Ada (admin) ends Chi's turn");
+await editTeamProject(db, chi, tp, NOW + 7000 + EDIT_HOLD_MS);
+db.store.delete("teamMembers/chi");
+check((await editTeamProject(db, ben, tp, NOW + 7001 + EDIT_HOLD_MS)).copyId.length > 0, "someone who left the team doesn't keep a turn");
+db.doc("teamMembers/chi")._write({ teamId: "T1", role: "member", email: "chi@school.ng", emailVerified: true, joinedAt: NOW });
+const benCopyId = read(`${TEAM_PROJECTS}/${tp}`).editor.copyId;
+db.doc(`users/ben/projects/${benCopyId}`)._write({ deletedAt: stamp(NOW) }, { merge: true });
+check(await throwsWith(() => sendTeamProject(db, ben, tp, NOW + 8000 + EDIT_HOLD_MS), /isn't in your projects any more/), "a working copy moved to Trash can't be sent");
+await stopEditingTeamProject(db, ben, tp);
+
+console.log("Copies, removing, and the limit");
+const mine = await copyTeamProject(db, chi, tp, NOW);
+check(read(`users/chi/projects/${mine}`).name === "Weather station (copy)" && await teamCopyOf(db, chi, mine, NOW) === null, "Copy to my projects: Chi's to keep, not linked to the team's");
+check(await throwsWith(() => removeTeamProject(db, chi, tp), /Only whoever shared it/), "Chi can't remove it");
+await removeTeamProject(db, ben, tp);
+check(read(`${TEAM_PROJECTS}/${tp}`) === undefined && read(`users/chi/projects/${e1.copyId}`) !== undefined, "Ben (who shared it) removes it; everyone's own copies stay theirs");
+check(await throwsWith(() => editTeamProject(db, chi, tp, NOW), /no longer shared/), "it can't be edited after that");
+for (let i = 0; i < MAX_TEAM_PROJECTS; i++) put(`${TEAM_PROJECTS}/fill${i}`, { teamId: "T1", name: `P${i}`, version: 1, sharedBy: { uid: "ada" }, updatedBy: { uid: "ada" } });
+check(await throwsWith(() => shareProject(db, ben, "p1", NOW), /the most it can have/), `at most ${MAX_TEAM_PROJECTS} shared projects a team`);
+
+console.log(bad ? `\n${bad} team project check(s) failed.` : "\nAll team project checks passed.");
+process.exit(bad ? 1 : 0);

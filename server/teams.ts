@@ -6,7 +6,10 @@
  *   teams/{id}                name, kind, seats, special seat price and
  *                             currency, paid until, join code, member count
  *   teamMembers/{uid}         one per account (an account is on one team at
- *                             most): its team, role, email, when it joined
+ *                             most): its team, role, email, when it joined,
+ *                             and whether the team's admins may see its
+ *                             projects (adminsCanView, the member's choice;
+ *                             server/teamProjects.ts)
  *   teamInvites/{id}:{email}  an address a team invited; taken up when that
  *                             person next opens the app, signed in with it
  *   teamQuotes/{id}           a price shown to a team's admin, which their
@@ -79,6 +82,8 @@ export interface MemberRecord {
   emailVerified: boolean;
   role: TeamRole;
   joinedAt: number;
+  /** The member lets the team's admins see their projects (off until they turn it on). */
+  adminsCanView: boolean;
 }
 
 /** The signed-in person acting. */
@@ -118,6 +123,7 @@ export function memberOf(uid: string, d: any): MemberRecord {
     emailVerified: d.emailVerified === true,
     role: d.role === "admin" ? "admin" : "member",
     joinedAt: num(d.joinedAt),
+    adminsCanView: d.adminsCanView === true,
   };
 }
 
@@ -671,6 +677,7 @@ export interface MemberRow {
   emailVerified: boolean;
   role: TeamRole;
   joinedAt: number;
+  adminsCanView: boolean;
 }
 
 export interface PaymentRow {
@@ -717,6 +724,8 @@ export interface TeamView {
   memberCount: number;
   /** Whom to ask: the admins' addresses. */
   admins: string[];
+  /** Whether the person lets the team's admins see their projects. */
+  adminsCanView: boolean;
 }
 
 /** And as its admins see it. */
@@ -731,7 +740,7 @@ export interface TeamAdminView extends TeamView {
 }
 
 /** Everything about one team, for its admins and the admin page. */
-export async function teamDetail(db: Db, rawTeamId: unknown, now: number): Promise<Omit<TeamAdminView, "role"> & { ownerEmail: string | null; createdAt: number; customSeatPrice: number | null }> {
+export async function teamDetail(db: Db, rawTeamId: unknown, now: number): Promise<Omit<TeamAdminView, "role" | "adminsCanView"> & { ownerEmail: string | null; createdAt: number; customSeatPrice: number | null }> {
   const teamId = cleanTeamId(rawTeamId);
   const [teamSnap, membersSnap, invitesSnap, paymentsSnap] = await Promise.all([
     teamRef(db, teamId).get(),
@@ -743,7 +752,7 @@ export async function teamDetail(db: Db, rawTeamId: unknown, now: number): Promi
   const team = teamOf(teamId, teamSnap.data());
   const members: MemberRow[] = membersSnap.docs
     .map((d: any) => memberOf(d.id, d.data()))
-    .map((m: MemberRecord) => ({ uid: m.uid, email: m.email, emailVerified: m.emailVerified, role: m.role, joinedAt: m.joinedAt }))
+    .map((m: MemberRecord) => ({ uid: m.uid, email: m.email, emailVerified: m.emailVerified, role: m.role, joinedAt: m.joinedAt, adminsCanView: m.adminsCanView }))
     .sort((a: MemberRow, b: MemberRow) => (a.role === b.role ? a.joinedAt - b.joinedAt : a.role === "admin" ? -1 : 1));
   const standing = licenseStanding(team.paidUntil, now);
   return {
@@ -793,10 +802,11 @@ export async function teamPage(db: Db, who: Who, now: number): Promise<{ team: T
   const view: TeamView = {
     id: detail.id, name: detail.name, kind: detail.kind, role: me.role, state: detail.state, paidUntil: detail.paidUntil,
     graceUntil: detail.graceUntil, seats: detail.seats, memberCount: detail.memberCount, admins: detail.admins,
+    adminsCanView: me.adminsCanView,
   };
   if (me.role !== "admin") return { team: view, invites, verified: who.emailVerified };
   const { ownerEmail: _o, createdAt: _c, customSeatPrice: _p, ...rest } = detail;
-  return { team: { ...rest, role: me.role }, invites, verified: who.emailVerified };
+  return { team: { ...rest, role: me.role, adminsCanView: me.adminsCanView }, invites, verified: who.emailVerified };
 }
 
 /** What the app's status shows about the person's team: enough for the grace banner. */
