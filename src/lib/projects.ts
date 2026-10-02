@@ -2,7 +2,7 @@ import {
   collection, doc, addDoc, getDoc, getDocs, updateDoc, deleteDoc, deleteField,
   query, orderBy, serverTimestamp, Timestamp
 } from "firebase/firestore";
-import { db } from "./firebase";
+import { db } from "./firestore";
 import { MCUType, SchematicComponent, SchematicConnection } from "../types";
 
 // Default board id per MCU family — matches server/boards.ts's DEFAULT_BOARD_ID,

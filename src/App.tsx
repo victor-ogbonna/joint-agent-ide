@@ -1,8 +1,7 @@
-import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, Suspense } from "react";
 import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass, Share2, Users} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip } from "recharts";
 import {
   MCUType,
   SchematicComponent,
@@ -14,10 +13,8 @@ import {
   BoardInfo
 } from "./types";
 import CodeEditor, { AskAiRequest } from "./components/CodeEditor";
-import SchematicViewer from "./components/SchematicViewer";
 import Terminal from "./components/Terminal";
 import AgentChat from "./components/AgentChat";
-import Web3Panel from "./components/Web3Panel";
 import ProjectsBrowser from "./components/ProjectsBrowser";
 import ShareDialog from "./components/ShareDialog";
 import NewProjectModal from "./components/NewProjectModal";
@@ -27,6 +24,14 @@ import GithubPanel from "./components/GithubPanel";
 import WebPreviewPanel from "./components/WebPreviewPanel";
 import PlansModal, { type FirstMonthOffer, type PlanPriceView, type BillingPeriod } from "./components/PlansModal";
 import { storedRef, clearStoredRef } from "./lib/referral";
+import { loadPaystack } from "./lib/paystackScript";
+import { lazyPart, PartLoading } from "./components/LazyPart";
+
+// Downloaded when they first show rather than with the app (LazyPart.tsx):
+// together they were over half of the app's download.
+const SchematicViewer = lazyPart(() => import("./components/SchematicViewer"));
+const Web3Panel = lazyPart(() => import("./components/Web3Panel"));
+const SerialPlotterChart = lazyPart(() => import("./components/SerialPlotterChart"));
 import TeamLicenseBanner from "./components/TeamLicenseBanner";
 import { readTeamStatus, stateLabel, type TeamStatusView } from "./lib/teams";
 import LibrariesModal from "./components/LibrariesModal";
@@ -1013,11 +1018,12 @@ export default function App() {
   /** The discounted first month: a one-off Paystack payment, checked by the server. */
   const handleSubscribeOffer = async () => {
     if (!user?.email || !offer) return;
-    if (!window.PaystackPop) {
-      logToTerminal("[BILLING] Payments aren't configured yet. Check back soon.", "error");
+    setIsSubscribing(true);
+    if (!(await loadPaystack()) || !window.PaystackPop) {
+      logToTerminal("[BILLING] The payment window couldn't load. Check your connection, then try again.", "error");
+      setIsSubscribing(false);
       return;
     }
-    setIsSubscribing(true);
     try {
       window.PaystackPop.setup({
         key: offer.publicKey,
@@ -3394,8 +3400,13 @@ export default function App() {
     try {
       const cfgRes = await fetch("/api/paystack/public-config");
       const cfg = await cfgRes.json();
-      if (!cfg.configured || !window.PaystackPop) {
+      if (!cfg.configured) {
         logToTerminal("[BILLING] Payments aren't configured yet. Check back soon.", "error");
+        setIsSubscribing(false);
+        return;
+      }
+      if (!(await loadPaystack()) || !window.PaystackPop) {
+        logToTerminal("[BILLING] The payment window couldn't load. Check your connection, then try again.", "error");
         setIsSubscribing(false);
         return;
       }
@@ -4058,17 +4069,19 @@ export default function App() {
                       />
                     </div>
                     <div className={`absolute inset-0 ${activeTab === "schematic" ? "z-10" : "z-0 opacity-0 pointer-events-none"}`}>
-                      <SchematicViewer
-                        mcu={mcu}
-                        components={components}
-                        connections={connections}
-                        isSimulationActive={isSimulationActive}
-                        isCompiling={isCompiling}
-                        isFlashing={isFlashing}
-                        appMode={appMode}
-                        setComponents={setComponents}
-                        setConnections={setConnections}
-                      />
+                      <Suspense fallback={<PartLoading label="Loading the circuit…" />}>
+                        <SchematicViewer
+                          mcu={mcu}
+                          components={components}
+                          connections={connections}
+                          isSimulationActive={isSimulationActive}
+                          isCompiling={isCompiling}
+                          isFlashing={isFlashing}
+                          appMode={appMode}
+                          setComponents={setComponents}
+                          setConnections={setConnections}
+                        />
+                      </Suspense>
                     </div>
                   </div>
                 </div>
@@ -4190,18 +4203,9 @@ export default function App() {
                                 No numeric serial data found. Try printing numbers.
                               </div>
                             ) : (
-                              <ResponsiveContainer width="100%" height="100%">
-                                <LineChart data={plotterData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border-light)" vertical={false} />
-                                  <XAxis dataKey="index" tick={{ fontSize: 10, fill: 'var(--text-muted)' }} stroke="var(--border-main)" />
-                                  <YAxis tick={{ fontSize: 10, fill: 'var(--text-muted)' }} stroke="var(--border-main)" />
-                                  <Tooltip
-                                    contentStyle={{ backgroundColor: 'var(--bg-panel)', border: '1px solid var(--border-main)', borderRadius: '4px', fontSize: '12px', color: 'var(--text-main)' }}
-                                    itemStyle={{ color: '#a855f7' }}
-                                  />
-                                  <Line type="monotone" dataKey="value" stroke="#a855f7" strokeWidth={2} dot={false} isAnimationActive={false} />
-                                </LineChart>
-                              </ResponsiveContainer>
+                              <Suspense fallback={<PartLoading label="Loading the plotter…" />}>
+                                <SerialPlotterChart data={plotterData} />
+                              </Suspense>
                             )}
                           </div>
                         </div>
@@ -4504,7 +4508,9 @@ export default function App() {
               </button>
             </div>
             <div className="flex-1 overflow-y-auto">
-              <Web3Panel walletState={walletState} setWalletState={setWalletState} />
+              <Suspense fallback={<PartLoading />}>
+                <Web3Panel walletState={walletState} setWalletState={setWalletState} />
+              </Suspense>
             </div>
           </div>
         </div>

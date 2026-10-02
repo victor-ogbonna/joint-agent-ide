@@ -4,7 +4,6 @@ import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Sq
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
 import { ChatMessage, MCUType, SchematicComponent, SchematicConnection } from "../types";
 import { callAiEndpoint, QuotaBlockedInfo } from "../lib/aiClient";
 
@@ -294,6 +293,24 @@ function PlanQuestionItem({
 }
 
 
+// KaTeX, which draws maths ($...$, $$...$$), is a large download; it loads
+// the first time a message has a "$" in it, instead of with the app. Until
+// then the maths shows as typed.
+type RehypePlugin = typeof import("rehype-katex").default;
+let rehypeKatexLoaded: RehypePlugin | null = null;
+let rehypeKatexLoading: Promise<RehypePlugin | null> | null = null;
+function loadRehypeKatex(): Promise<RehypePlugin | null> {
+  if (!rehypeKatexLoading) {
+    rehypeKatexLoading = import("rehype-katex")
+      .then((m) => (rehypeKatexLoaded = m.default))
+      .catch(() => {
+        rehypeKatexLoading = null;
+        return null;
+      });
+  }
+  return rehypeKatexLoading;
+}
+
 // Memoised so a streaming reply does not re-parse every OTHER message.
 // The list previously re-rendered in full on every token — with ReactMarkdown +
 // KaTeX on each message that is thousands of markdown parses for one reply,
@@ -307,10 +324,18 @@ const MessageMarkdown = React.memo(function MessageMarkdown({
   pendingAnswers: Record<string, string>;
   onSaveAnswer: (question: string, answer: string) => void;
 }) {
+  const hasMaths = content.includes("$");
+  const [rehypeKatex, setRehypeKatex] = useState<{ plugin: RehypePlugin | null }>({ plugin: rehypeKatexLoaded });
+  useEffect(() => {
+    if (!hasMaths || rehypeKatex.plugin) return;
+    let live = true;
+    void loadRehypeKatex().then((plugin) => { if (live && plugin) setRehypeKatex({ plugin }); });
+    return () => { live = false; };
+  }, [hasMaths, rehypeKatex.plugin]);
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm, remarkMath]}
-      rehypePlugins={[rehypeKatex]}
+      rehypePlugins={rehypeKatex.plugin ? [rehypeKatex.plugin] : []}
       components={{
         li({ node, children, ...props }: any) {
           const extractText = (nodes: any): string => {

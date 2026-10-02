@@ -1,6 +1,5 @@
 import { initializeApp } from "firebase/app";
 import { getAuth, GoogleAuthProvider } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
 
 // ---------------------------------------------------------------------------
 // NOTE ON THE REBRAND: the identifiers below still name the original Firebase
@@ -64,5 +63,6 @@ const firebaseConfig = {
 
 export const firebaseApp = initializeApp(firebaseConfig);
 export const auth = getAuth(firebaseApp);
-export const db = getFirestore(firebaseApp);
+// The project database (Firestore) is set up in ./firestore, so its large
+// download comes with the app rather than with sign-in.
 export const googleProvider = new GoogleAuthProvider();

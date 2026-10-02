@@ -4,6 +4,7 @@ import { useDocumentScroll } from "./useDocumentScroll";
 import { useAuth } from "./contexts/AuthContext";
 import GoogleSignInButton from "./components/GoogleSignInButton";
 import { formatMoney, formatDay, PRO_MONTHLY_PRICE } from "./lib/plans";
+import { loadPaystack } from "./lib/paystackScript";
 import { TEAM_PRICES, renewalPrice, addSeatsPrice, daysLeft, stateLabel, teamSavings, type TeamPeriod, type LicenseState, type TeamRole, type TeamKind } from "./lib/teams";
 
 /**
@@ -164,8 +165,8 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
       setPaying(null);
       return;
     }
-    if (!window.PaystackPop) {
-      setError("The payment window couldn't load. Refresh the page and try again.");
+    if (!(await loadPaystack()) || !window.PaystackPop) {
+      setError("The payment window couldn't load. Check your connection, then try again.");
       setPaying(null);
       return;
     }
