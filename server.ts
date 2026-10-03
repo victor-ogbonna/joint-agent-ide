@@ -33,9 +33,10 @@ import { registerGithubRoutes } from './server/github';
 import { registerFirebaseAuthProxy } from './server/firebaseAuthProxy';
 import { detectLibDeps, isSafeLibDep } from './server/libraryDeps';
 import { addAppHelper } from './server/appSupport';
+import { PHONE_APP_RULE, WIFI_SETUP_RULE, boardRules } from './server/agentRules';
 import { hideSecrets, HIDDEN } from './server/hideSecrets';
 import { registerLibraryRoutes, prepareLibraries, mergeLibDeps, missingLibraryHint, libraryNoteFor, NO_LIBRARIES } from './server/libraries';
-import { loadBoardCatalog, getBoardCatalog, getBoardById, boardFamily, resolveBoard, describeBoardForPrompt, BoardInfo } from './server/boards';
+import { loadBoardCatalog, getBoardCatalog, getBoardById, boardFamily, resolveBoard, describeBoardForPrompt, BoardInfo, BoardFamily } from './server/boards';
 import { streamChat, completeChat, isDeepSeekConfigured, DEEPSEEK_MODEL, ChatMessage, ToolSpec, modelFor, AiTimeoutError, AiServiceError } from './server/deepseek';
 import { CONTEXT_BUDGET_TOKENS, ConversationMessage, planCompaction, SUMMARY_INSTRUCTION, transcriptOf, KEEP_RECENT_MESSAGES, attachedImages } from './server/context';
 
@@ -530,15 +531,10 @@ function recentSerialLines(raw: unknown): string {
   return text;
 }
 
-/**
- * A sketch made a phone app with "Build App (PWA)" (src/lib/buildApp.ts)
- * has three things the agent must carry over whenever it rewrites the code.
- */
-const PHONE_APP_RULE = `PHONE APP: a sketch that includes <JointAgentApp.h> or <JointAgentAppAsync.h> was made a phone app with the "Build App (PWA)" button. Whenever you rewrite such a sketch, keep that #include, the JointAgentApp::serve(...) line in setup() and the tags between the two "Joint-Agent app" HTML comments in the page (and any <head> around them) exactly as they are. Never add them to a sketch yourself: when someone asks for a phone app, tell them to use "Build App (PWA)" under Web Preview in the sidebar.`;
-
 // The agent's system instruction for one board: `mcuDescription` is that
-// board's real specs, and mcuPowerPin is derived from its family.
-function buildChatSystemInstruction(mcuDescription: string, mcuPowerPin: string, chatMode: string): string {
+// board's real specs, and mcuPowerPin and the board rules (server/agentRules.ts)
+// are derived from its family.
+function buildChatSystemInstruction(mcuDescription: string, mcuPowerPin: string, chatMode: string, family: BoardFamily): string {
   let systemInstruction = `You are Joint-Agent, an expert embedded systems AI agent and circuit designer.
 You help users write code, debug hardware issues, design circuit schematics, manage their cloud IDE, and execute terminal commands.
 Microcontroller Reference: ${mcuDescription}
@@ -577,7 +573,7 @@ CRITICAL: The code is compiled as a plain C++ file (src/main.cpp), not an Arduin
 
 WIRING, WHEREVER YOU STATE IT (the project's description, or a chat reply): always a bullet list, one connection per line ("- MCU pin D4 -> resistor pin1", "- Resistor pin2 -> LED anode"), never a paragraph. It is read while someone's hands are on the actual wires; a sentence they have to re-read to find "D4" buried in it is the wrong shape for that.
 
-${PHONE_APP_RULE}
+${boardRules(family)}
 
 CODE QUALITY (the code IS the deliverable — the chat reply is not):
 - Comment the code properly, every time. Explain WHY a line exists, not what it literally does, and name each pin's role where it is configured. Beginners read this code to learn; uncommented code fails them.
@@ -723,7 +719,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     // rather than a separate field, and it sits at the front of every request
     // unchanged — which is exactly the prefix DeepSeek caches automatically,
     // so the Gemini explicit-cache machinery has no equivalent to port.
-    const systemText = buildChatSystemInstruction(mcuDescription, mcuPowerPin, chatMode);
+    const systemText = buildChatSystemInstruction(mcuDescription, mcuPowerPin, chatMode, family);
     // Free replies are capped shorter; the model is the same.
     const model = modelFor(free);
     // Keeps the browser's idea of the plan current: it gates auto-debug.
@@ -1008,7 +1004,7 @@ app.post("/api/ai/generate", requireAuthAndQuota, async (req, res) => {
     return res.status(400).json({ error: "Pick a board first." });
   }
 
-  const { description: mcuDescription } = describeBoardForPrompt(boardId, mcu);
+  const { description: mcuDescription, family } = describeBoardForPrompt(boardId, mcu);
 
   const systemPrompt = `You are an expert embedded systems AI agent and circuit designer.
 Generate microcontroller code (C++) and a full schematic diagram for a: ${mcu.toUpperCase()}.
@@ -1017,7 +1013,7 @@ Microcontroller Pinout Reference: ${mcuDescription}
 CRITICAL: The code is compiled as a plain C++ file (src/main.cpp), not an Arduino IDE sketch, so you MUST ensure that every generated C++ code includes '#include <Arduino.h>' at the very top so that the code can be properly compiled and flashed.
 
 WIRING, WHEREVER YOU STATE IT (the description, or a chat reply): always a bullet list, one connection per line ("- MCU pin D4 -> resistor pin1", "- Resistor pin2 -> LED anode"), never a paragraph.
-
+${family === "esp32" ? `\n${WIFI_SETUP_RULE}\n` : ""}
 CODE QUALITY (the code IS the deliverable — the chat reply is not):
 - Comment the code properly, every time. Explain WHY a line exists, not what it literally does, and name each pin's role where it is configured. Beginners read this code to learn; uncommented code fails them.
 - If the user named a specific technique, API or style — millis() rather than delay(), interrupts rather than polling, a particular library — use EXACTLY that. Do not substitute something you consider better. If you think their choice is wrong, implement what they asked and note why you would differ in one short line.

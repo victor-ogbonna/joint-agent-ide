@@ -299,7 +299,7 @@ function BoardDone({ removed, onUndo, onClose }: { removed: boolean; onUndo: () 
       {!removed && (
         <ol className="text-xs text-[var(--text-muted)] leading-relaxed list-decimal pl-5 space-y-1.5">
           <li>Compile and flash the board.</li>
-          <li>Connect the phone to the board&rsquo;s Wi-Fi (or the same Wi-Fi as the board) and open the board&rsquo;s page in the browser.</li>
+          <li>Connect the phone to the board&rsquo;s Wi-Fi (or the same Wi-Fi as the board) and open the board&rsquo;s page in Safari or Chrome. If a sign-in window pops up when the phone joins, close it and choose to stay connected (on iPhone, &ldquo;Use without internet&rdquo;): the home-screen option is only in the browser.</li>
           <li>
             Add it to the home screen:
             <ul className="list-disc pl-4 mt-1 space-y-0.5">
