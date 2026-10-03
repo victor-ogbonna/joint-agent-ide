@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, Suspense } from "react";
-import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass, Share2, Users, Smartphone} from "lucide-react";
+import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass, Share2, Users, Smartphone, CircuitBoard} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import {
@@ -27,6 +27,7 @@ import PlansModal, { type FirstMonthOffer, type PlanPriceView, type BillingPerio
 import { storedRef, clearStoredRef } from "./lib/referral";
 import { loadPaystack } from "./lib/paystackScript";
 import { lazyPart, PartLoading } from "./components/LazyPart";
+import SimulatorComingSoon from "./components/SimulatorComingSoon";
 
 // Their own downloads rather than part of the app's (LazyPart.tsx): together
 // they were over half of it, and the app opens without waiting for them.
@@ -303,7 +304,7 @@ const INITIAL_COMPONENTS: SchematicComponent[] = [];
 const INITIAL_CONNECTIONS: SchematicConnection[] = [];
 
 type AppMode = "agentic" | "manual";
-type EditorTab = "code" | "schematic";
+type EditorTab = "code" | "schematic" | "simulator";
 
 type AppTheme = "light" | "dark";
 
@@ -412,6 +413,10 @@ export default function App() {
   const [appMode, setAppMode] = useState<AppMode>("agentic");
   const [theme, setTheme] = useState<AppTheme>("dark");
   const [activeTab, setActiveTab] = useState<EditorTab>("code");
+  // The Circuit Simulator tab is Manual-Mode's: back to the code in Agent-Mode.
+  useEffect(() => {
+    if (appMode !== "manual" && activeTab === "simulator") setActiveTab("code");
+  }, [appMode, activeTab]);
   // The agent pane doesn't exist in manual mode — without this, switching
   // modes while it's selected would leave every pane hidden (blank screen).
   const mobilePane: MobilePane =
@@ -4248,8 +4253,8 @@ export default function App() {
               <Panel defaultSize={isTerminalOpen || isSerialMonitorOpen || isSerialPlotterOpen ? (isNarrow && compactDock ? "78%" : 70) : 100} minSize={1}>
                 {/* Editor Area */}
                 <div className="w-full h-full flex flex-col min-h-0 bg-[var(--bg-root)]">
-                  {/* Tabs */}
-                  <div className="flex bg-[var(--bg-panel)] border-b border-[var(--border-main)]">
+                  {/* Tabs (a narrow phone scrolls them sideways; 1px below keeps the active tab's underline) */}
+                  <div className="flex bg-[var(--bg-panel)] border-b border-[var(--border-main)] max-sm:overflow-x-auto max-sm:overflow-y-hidden max-sm:pb-px [scrollbar-width:none]">
                     <button
                       onClick={() => setActiveTab("code")}
                       className={`relative px-4 py-2 text-[11px] font-medium flex items-center gap-2 transition-all ${activeTab === "code"
@@ -4270,6 +4275,19 @@ export default function App() {
                       <Layers size={13} className={activeTab === "schematic" ? "text-[var(--accent-secondary)]" : ""} />
                       <span className="font-mono">schematic.view</span>
                     </button>
+                    {appMode === "manual" && (
+                      <button
+                        onClick={() => setActiveTab("simulator")}
+                        className={`relative shrink-0 whitespace-nowrap px-4 py-2 text-[11px] font-medium flex items-center gap-2 transition-all ${activeTab === "simulator"
+                            ? "text-[var(--text-main)] tab-active"
+                            : "text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]"
+                          }`}
+                      >
+                        <CircuitBoard size={13} className={activeTab === "simulator" ? "text-[var(--accent-primary)]" : ""} />
+                        <span className="font-mono">circuit.sim</span>
+                        <span className="rounded-full bg-[var(--accent-primary-soft)] px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide text-[var(--accent-primary)]">Soon</span>
+                      </button>
+                    )}
                   </div>
 
                   {/* Tab Content */}
@@ -4307,6 +4325,11 @@ export default function App() {
                         />
                       </Suspense>
                     </div>
+                    {appMode === "manual" && activeTab === "simulator" && (
+                      <div className="absolute inset-0 z-10">
+                        <SimulatorComingSoon />
+                      </div>
+                    )}
                   </div>
                 </div>
               </Panel>

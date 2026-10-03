@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useDocumentScroll } from "./useDocumentScroll";
-import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw, UserPlus, Trash2, MessageSquarePlus, Mail, MailX, Paperclip, LayoutDashboard, Activity, Server, Settings, BadgePercent, School } from "lucide-react";
+import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw, UserPlus, Trash2, MessageSquarePlus, Mail, MailX, Paperclip, LayoutDashboard, Activity, Server, Settings, BadgePercent, School, CircuitBoard } from "lucide-react";
 import OverviewTab from "./admin/OverviewTab";
 import UsersTab from "./admin/UsersTab";
 import TrafficTab from "./admin/TrafficTab";
@@ -9,6 +9,7 @@ import ServerTab from "./admin/ServerTab";
 import CreatorsTab from "./admin/CreatorsTab";
 import TeamsTab from "./admin/TeamsTab";
 import PaystackSettings from "./admin/PaystackSettings";
+import SimulatorTab from "./admin/SimulatorTab";
 
 const TOKEN_KEY = "jointagent_admin_token";
 const TAB_KEY = "jointagent_admin_tab";
@@ -21,6 +22,7 @@ const TABS = [
   { id: "creators", label: "Creators", Icon: BadgePercent },
   { id: "teams", label: "Teams", Icon: School },
   { id: "server", label: "Server", Icon: Server },
+  { id: "simulator", label: "Simulator", Icon: CircuitBoard },
   { id: "settings", label: "Settings", Icon: Settings },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
@@ -374,7 +376,13 @@ export default function AdminPage() {
         </div>
       </nav>
 
-      {tab !== "settings" && (
+      {tab === "simulator" && (
+        <main id="admin-panel" role="tabpanel" aria-labelledby="admin-tab-simulator" className="px-2 pt-2 pb-2 sm:px-3">
+          <SimulatorTab post={adminPost} />
+        </main>
+      )}
+
+      {tab !== "settings" && tab !== "simulator" && (
         <main id="admin-panel" role="tabpanel" aria-labelledby={`admin-tab-${tab}`} className="viz-root max-w-6xl mx-auto px-4 pt-5 pb-16 sm:px-6">
           {tab === "overview" && <OverviewTab get={adminGet} />}
           {tab === "users" && <UsersTab get={adminGet} />}
