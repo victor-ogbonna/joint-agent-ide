@@ -32,6 +32,7 @@ const BOARD_TYPES: Record<string, BoardId> = {
   "wokwi-arduino-uno": "uno",
   "wokwi-arduino-nano": "nano",
   "wokwi-arduino-mega": "mega",
+  "wokwi-esp32-devkit-v1": "esp32",
 };
 
 /** The board in a diagram: its part and which board it is. */

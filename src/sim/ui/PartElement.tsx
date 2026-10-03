@@ -53,7 +53,12 @@ export default function PartElement({ part, live, selected, onGeometry, onElemen
   useLayoutEffect(() => {
     const known = !!customElements.get(part.type);
     const el = (known ? document.createElement(part.type) : unsupported(part.type)) as any;
-    el.style.display = "block";
+    // A flex box is exactly the size of its drawing, with the drawing at its
+    // corner. As a block (or inline), a drawing shorter than a line of text,
+    // a resistor, sat on the text baseline, below the pins it reports, so its
+    // wires stopped short of its leads; and every part got a strip of empty
+    // space under it, which moved the middle it turns about.
+    el.style.display = "flex";
     applyAttrs(el, part.attrs ?? {});
     host.current!.appendChild(el);
     elRef.current = el;

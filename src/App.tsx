@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, Suspense } from "react";
-import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass, Share2, Users, Smartphone, CircuitBoard} from "lucide-react";
+import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass, Share2, Users, Smartphone} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import {
@@ -27,13 +27,14 @@ import PlansModal, { type FirstMonthOffer, type PlanPriceView, type BillingPerio
 import { storedRef, clearStoredRef } from "./lib/referral";
 import { loadPaystack } from "./lib/paystackScript";
 import { lazyPart, PartLoading } from "./components/LazyPart";
-import SimulatorComingSoon from "./components/SimulatorComingSoon";
 
 // Their own downloads rather than part of the app's (LazyPart.tsx): together
 // they were over half of it, and the app opens without waiting for them.
 // The circuit drawing sits under the other tabs, so it downloads as soon as
 // the app is up; the plotter's chart and the Web3 panel when they first show.
 const SchematicViewer = lazyPart(() => import("./components/SchematicViewer"));
+// The circuit and its simulator, for accounts with circuits (server/circuits.ts).
+const CircuitView = lazyPart(() => import("./components/CircuitView"));
 const Web3Panel = lazyPart(() => import("./components/Web3Panel"));
 const SerialPlotterChart = lazyPart(() => import("./components/SerialPlotterChart"));
 import TeamLicenseBanner from "./components/TeamLicenseBanner";
@@ -41,6 +42,9 @@ import TeamCopyBanner, { type TeamCopyInfo } from "./components/TeamCopyBanner";
 import { readTeamStatus, readInvitation, stateLabel, type TeamStatusView, type TeamInvitationView } from "./lib/teams";
 import TeamInviteBanner from "./components/TeamInviteBanner";
 import LibrariesModal from "./components/LibrariesModal";
+import SettingsModal from "./components/SettingsModal";
+import { parseDiagram, type Diagram } from "./sim/diagram";
+import type { SimBuild } from "./components/CircuitView";
 import OnboardingTour, { TourStep } from "./components/OnboardingTour";
 import { installKind, installApp, isInstalledFullscreenApp, onInstallAvailabilityChange } from "./lib/installApp";
 import { WINDOW_HOURS, FREE_WINDOW_TOKENS, PRO_WINDOW_TOKENS, FREE_PROJECT_LIMIT, formatWait, formatWhen, formatDay, percentUsed } from "./lib/plans";
@@ -304,7 +308,7 @@ const INITIAL_COMPONENTS: SchematicComponent[] = [];
 const INITIAL_CONNECTIONS: SchematicConnection[] = [];
 
 type AppMode = "agentic" | "manual";
-type EditorTab = "code" | "schematic" | "simulator";
+type EditorTab = "code" | "schematic";
 
 type AppTheme = "light" | "dark";
 
@@ -413,10 +417,6 @@ export default function App() {
   const [appMode, setAppMode] = useState<AppMode>("agentic");
   const [theme, setTheme] = useState<AppTheme>("dark");
   const [activeTab, setActiveTab] = useState<EditorTab>("code");
-  // The Circuit Simulator tab is Manual-Mode's: back to the code in Agent-Mode.
-  useEffect(() => {
-    if (appMode !== "manual" && activeTab === "simulator") setActiveTab("code");
-  }, [appMode, activeTab]);
   // The agent pane doesn't exist in manual mode — without this, switching
   // modes while it's selected would leave every pane hidden (blank screen).
   const mobilePane: MobilePane =
@@ -735,7 +735,11 @@ export default function App() {
   };
 
   const [mcu, setMcu] = useState<MCUType>("esp32");
+  const mcuRef = useRef(mcu);
+  mcuRef.current = mcu;
   const [boardId, setBoardId] = useState<string>("esp32dev");
+  const boardIdRef = useRef(boardId);
+  boardIdRef.current = boardId;
   const [chatMode, setChatMode] = useState<"plan" | "implement">("plan"); // internal representation, hidden from user
   const [detectedBoard, setDetectedBoard] = useState<string | null>(null);
   useEffect(() => {
@@ -865,6 +869,38 @@ export default function App() {
   const [isDebugging, setIsDebugging] = useState(false);
   const [isSimulationActive, setIsSimulationActive] = useState(false);
   const [retrievedFirmware, setRetrievedFirmware] = useState<Uint8Array | null>(null);
+
+  // Circuits (server/circuits.ts): whether they're open to this account, and
+  // its own switch for the agent building them. Without them schematic.view
+  // says "Coming soon" and the agent works as it always has.
+  const [circuitAccess, setCircuitAccess] = useState(false);
+  const circuitAccessRef = useRef(false);
+  circuitAccessRef.current = circuitAccess;
+  const [buildCircuit, setBuildCircuit] = useState(true);
+  const buildCircuitRef = useRef(true);
+  buildCircuitRef.current = buildCircuit;
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  // The open project's circuit; null while it has none (its old schematic,
+  // if any, is shown converted until the circuit is first changed).
+  const [circuit, setCircuit] = useState<Diagram | null>(null);
+  const circuitRef = useRef<Diagram | null>(null);
+  circuitRef.current = circuit;
+  /** Changed here since it was loaded: to be saved. */
+  const circuitDirtyRef = useRef(false);
+  /** The project the circuit on screen belongs to. */
+  const circuitProjectRef = useRef<string | null>(null);
+  /** A project being made from the work on screen keeps this circuit. */
+  const carryCircuitRef = useRef<Diagram | null>(null);
+  const pendingCircuitSaveRef = useRef<{ projectId: string; timer: ReturnType<typeof setTimeout>; text: string } | null>(null);
+  /** Bumped to press Play from the agent's reply. */
+  const [simPlayRequest, setSimPlayRequest] = useState(0);
+  const [simState, setSimState] = useState<"stopped" | "compiling" | "running" | "paused">("stopped");
+  const simApiRef = useRef<{ send: (text: string) => void; stop: () => void } | null>(null);
+  const [simSerialInput, setSimSerialInput] = useState("");
+  // Each board's chip and clock, from the catalog, for which boards the simulator runs.
+  const [boardChips, setBoardChips] = useState<Map<string, { mcu: string; fcpu: number }>>(new Map());
 
   // Terminal & Chats
   const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
@@ -2900,6 +2936,11 @@ export default function App() {
         // Replies that didn't come through aren't part of the conversation.
         {
           messages: newMessages.filter((m) => !m.compacted && !m.failed), mcu, boardId, chatMode: effectiveMode, currentCode: codeRef.current,
+          // With circuits, and the switch on: the agent builds the circuit
+          // too (only honoured server-side for an account with circuits).
+          buildCircuit: circuitAccessRef.current && buildCircuitRef.current,
+          // The circuit as it is, so a change keeps what's already wired.
+          ...(circuitAccessRef.current && buildCircuitRef.current && circuitRef.current ? { currentCircuit: circuitRef.current } : {}),
           // What the serial monitor has shown so far, for the agent's "read
           // the serial monitor" tool — rides along on every turn (it's
           // small, and empty when nothing is connected), but is only ever
@@ -3085,13 +3126,19 @@ export default function App() {
     description?: string;
     components?: SchematicComponent[];
     connections?: SchematicConnection[];
+    /** The agent's circuit, for an account with circuits (server/circuits.ts). */
+    circuit?: unknown;
   }) => {
     if (update.code) setCode(update.code);
     if (update.description) setDescription(update.description);
-    if (update.components) {
-      setComponents(augmentComponents(update.components as SchematicComponent[]));
+    if (update.circuit && circuitAccessRef.current) {
+      void applyAgentCircuit(update.circuit);
+    } else {
+      if (update.components) {
+        setComponents(augmentComponents(update.components as SchematicComponent[]));
+      }
+      if (update.connections) setConnections(update.connections);
     }
-    if (update.connections) setConnections(update.connections);
 
     logToTerminal("[AI AGENT] Workspace Blueprints and Source Code Updated.", "success");
   };
@@ -3170,6 +3217,7 @@ export default function App() {
         }
       }
       skipNextAutosaveRef.current = true;
+      if (keepWork && circuitAccessRef.current && circuitRef.current) carryCircuitRef.current = circuitRef.current;
       setCurrentProjectId(newId);
       setCurrentProjectName(name);
       setMcu(board.family);
@@ -3328,8 +3376,13 @@ export default function App() {
       .then((d) => {
         if (cancelled) return;
         const m = new Map<string, string>();
-        for (const b of d.boards || []) m.set(b.id, b.name);
+        const chips = new Map<string, { mcu: string; fcpu: number }>();
+        for (const b of d.boards || []) {
+          m.set(b.id, b.name);
+          chips.set(b.id, { mcu: String(b.mcu || ""), fcpu: Number(b.fcpu) || 0 });
+        }
         setBoardNames(m);
+        setBoardChips(chips);
       })
       .catch(() => { /* labels degrade to the chip family, which is still useful */ });
     return () => { cancelled = true; };
@@ -3543,6 +3596,203 @@ export default function App() {
     // still persists — asking a question and getting an answer is exactly the
     // history the user wants back, and without this it was never written.
   }, [code, description, components, connections, mcu, chatMessages, currentProjectId, user]);
+
+  // ---- Circuits (server/circuits.ts) ----
+
+  // Whether circuits are open to this account, and its switch for the agent
+  // building them: asked once a sign-in is known.
+  useEffect(() => {
+    if (!user) { setCircuitAccess(false); setBuildCircuit(true); return; }
+    let live = true;
+    (async () => {
+      try {
+        const res = await authedApiRequest("/api/settings");
+        const body = await res.json().catch(() => null);
+        if (!live || !res.ok || !body) return;
+        setCircuitAccess(body.circuitAccess === true);
+        setBuildCircuit(body.buildCircuit !== false);
+      } catch { /* circuits stay closed until the next load */ }
+    })();
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.uid]);
+
+  const saveBuildCircuit = async (on: boolean) => {
+    const before = buildCircuit;
+    setBuildCircuit(on);
+    setSettingsSaving(true);
+    setSettingsError(null);
+    try {
+      const res = await authedApiRequest("/api/settings", { method: "PUT", body: { buildCircuit: on } });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || "The setting wasn't saved.");
+      setBuildCircuit(body.buildCircuit !== false);
+    } catch (err: any) {
+      setBuildCircuit(before);
+      setSettingsError(`${err?.message || "The setting wasn't saved."} Try again.`);
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
+  /** Saves a project's circuit now. */
+  const putCircuit = async (projectId: string, text: string) => {
+    try {
+      const res = await authedApiRequest(`/api/circuits/${encodeURIComponent(projectId)}`, { method: "PUT", body: { circuit: text } });
+      if (res.ok) {
+        if (circuitProjectRef.current === projectId && circuitRef.current && JSON.stringify(circuitRef.current) === text) circuitDirtyRef.current = false;
+        return;
+      }
+      const body = await res.json().catch(() => ({}));
+      logToTerminal(`[CIRCUIT] The circuit wasn't saved: ${body.error || res.statusText}. It saves with your next change.`, "error");
+    } catch (err: any) {
+      logToTerminal(`[CIRCUIT] The circuit wasn't saved: ${err?.message || "no connection"}. It saves with your next change.`, "error");
+    }
+  };
+
+  // Each project's circuit when it opens; nothing from the last one.
+  useEffect(() => {
+    simApiRef.current?.stop();
+    const projectId = currentProjectId;
+    circuitProjectRef.current = projectId;
+    const carried = carryCircuitRef.current;
+    carryCircuitRef.current = null;
+    if (carried && projectId) {
+      // A new project made from the work on screen: its circuit goes with it.
+      setCircuit(carried);
+      circuitDirtyRef.current = true;
+      return;
+    }
+    setCircuit(null);
+    circuitDirtyRef.current = false;
+    if (!user || !projectId || !circuitAccess) return;
+    let live = true;
+    (async () => {
+      try {
+        const res = await authedApiRequest(`/api/circuits/${encodeURIComponent(projectId)}`);
+        const body = await res.json().catch(() => null);
+        // Changed meanwhile, or another project open: what's on screen stays.
+        if (!live || circuitProjectRef.current !== projectId || circuitDirtyRef.current) return;
+        if (res.ok && typeof body?.circuit === "string") {
+          try { setCircuit(parseDiagram(body.circuit)); } catch { /* unreadable: the old schematic shows instead */ }
+        }
+      } catch { /* offline: the old schematic shows, and a change saves the circuit */ }
+    })();
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.uid, currentProjectId, circuitAccess]);
+
+  // Saved 1.5 s after it stops changing. A save waiting for one project
+  // when another opens is sent at once, not dropped.
+  useEffect(() => {
+    if (!user || !currentProjectId || !circuit || !circuitDirtyRef.current || !circuitAccess) return;
+    const projectId = currentProjectId;
+    const text = JSON.stringify(circuit);
+    const pending = pendingCircuitSaveRef.current;
+    if (pending) {
+      clearTimeout(pending.timer);
+      if (pending.projectId !== projectId) void putCircuit(pending.projectId, pending.text);
+    }
+    const timer = setTimeout(() => {
+      if (pendingCircuitSaveRef.current?.timer === timer) pendingCircuitSaveRef.current = null;
+      void putCircuit(projectId, text);
+    }, 1500);
+    pendingCircuitSaveRef.current = { projectId, timer, text };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [circuit, currentProjectId, user?.uid, circuitAccess]);
+
+  /** A change of the circuit, made in schematic.view or built by the agent. */
+  const handleCircuitChange = (next: Diagram, legacy: { components: unknown[]; connections: unknown[] }) => {
+    circuitDirtyRef.current = true;
+    setCircuit(next);
+    // The parts and wiring list, as the share page and team views show it.
+    setComponents(legacy.components as SchematicComponent[]);
+    setConnections(legacy.connections as SchematicConnection[]);
+  };
+
+  /** The circuit the agent built, onto the project (Agent-Mode applies it with the code). */
+  const applyAgentCircuit = async (raw: unknown) => {
+    const projectId = currentProjectIdRef.current;
+    try {
+      const m = await import("./sim/project");
+      if (currentProjectIdRef.current !== projectId) return;
+      const chip = boardChips.get(boardIdRef.current);
+      const board = m.simBoardFor(boardIdRef.current, chip?.mcu, chip?.fcpu) ?? (mcuRef.current === "esp32" ? "esp32" : "uno");
+      const { diagram, skipped } = m.agentCircuitToDiagram(raw, board);
+      handleCircuitChange(diagram, m.diagramToLegacy(diagram));
+      const parts = diagram.parts.length - 1;
+      logToTerminal(`[AI AGENT] Circuit built: ${parts} part${parts === 1 ? "" : "s"}, ${diagram.connections.length} wire${diagram.connections.length === 1 ? "" : "s"}. Open schematic.view and press Simulate to run it.`, "success");
+      if (skipped.length) logToTerminal(`[AI AGENT] Left out of the circuit (not something the simulator has): ${skipped.slice(0, 8).join("; ")}${skipped.length > 8 ? "…" : ""}`, "warning");
+    } catch (err: any) {
+      logToTerminal(`[AI AGENT] The circuit couldn't be built: ${err?.message || err}`, "error");
+    }
+  };
+
+  /** Builds main.cpp for the simulator, as Compile does (same build, same limits). */
+  const buildForSimulation = async (): Promise<SimBuild> => {
+    const r = await handleCompile();
+    if (r.success && r.data && typeof r.data.binary === "string") return { ok: true, data: r.data };
+    if (r.limited) return { ok: false, message: "No compiles left for now on the Free plan, so it can't be built to simulate." };
+    if (r.busy) return { ok: false, message: "The build server is busy. Press Simulate again in a moment." };
+    return { ok: false, message: "main.cpp didn't build, so there's nothing to run. The terminal shows why." };
+  };
+
+  // What the simulated program prints, as lines in the Serial Monitor (as a
+  // board's would be), opening it on the first output of a run.
+  const simSerialBufRef = useRef("");
+  const simSerialTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const simSerialShownRef = useRef(false);
+  const emitSimLine = (line: string) => {
+    const clean = line.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "").replace(/\r$/, "");
+    logToTerminal(clean, "serial");
+    if (!simSerialShownRef.current) {
+      simSerialShownRef.current = true;
+      setIsSerialMonitorOpen(true);
+    }
+  };
+  const handleSimSerial = (text: string) => {
+    simSerialBufRef.current += text;
+    let at: number;
+    while ((at = simSerialBufRef.current.indexOf("\n")) >= 0) {
+      emitSimLine(simSerialBufRef.current.slice(0, at));
+      simSerialBufRef.current = simSerialBufRef.current.slice(at + 1);
+    }
+    // A line that never ends (a progress dot, a prompt) still shows after a pause.
+    if (simSerialTimerRef.current) clearTimeout(simSerialTimerRef.current);
+    if (simSerialBufRef.current) {
+      simSerialTimerRef.current = setTimeout(() => {
+        const rest = simSerialBufRef.current;
+        simSerialBufRef.current = "";
+        if (rest) emitSimLine(rest);
+      }, 300);
+    }
+  };
+  const handleSimSerialRef = useRef(handleSimSerial);
+  handleSimSerialRef.current = handleSimSerial;
+  const simHooks = useMemo(() => ({
+    onSerial: (text: string) => handleSimSerialRef.current(text),
+    onState: (state: "stopped" | "compiling" | "running" | "paused") => {
+      setSimState(state);
+      if (state === "compiling") {
+        simSerialBufRef.current = "";
+        simSerialShownRef.current = false;
+      }
+    },
+  }), []);
+  /** Simulate on an agent's reply: schematic.view, and Play. */
+  const handleSimulateCircuit = () => {
+    setActiveTab("schematic");
+    if (isNarrowRef.current) slideToPane("editor");
+    setSimPlayRequest((n) => n + 1);
+  };
+  const onSimSession = useMemo(() => (api: { send: (text: string) => void; stop: () => void }) => { simApiRef.current = api; }, []);
+  const sendSimSerial = () => {
+    const text = simSerialInput;
+    if (!text || !simApiRef.current) return;
+    simApiRef.current.send(`${text}\n`);
+    logToTerminal(`> ${text}`, "serial");
+    setSimSerialInput("");
+  };
 
   // A working copy of a team project (server/teamProjects.ts): the banner
   // saying so, and its Send. Asked of the server for each project opened,
@@ -4214,6 +4464,7 @@ export default function App() {
                         mcu={mcu}
                         onApplyUpdate={handleApplyProjectUpdate}
                         onOpenCode={handleOpenCode}
+                        onSimulate={circuitAccess ? handleSimulateCircuit : undefined}
                         chatMode={planModeAvailable ? chatMode : "implement"}
                         setChatMode={setChatMode}
                         planModeAvailable={planModeAvailable}
@@ -4253,8 +4504,8 @@ export default function App() {
               <Panel defaultSize={isTerminalOpen || isSerialMonitorOpen || isSerialPlotterOpen ? (isNarrow && compactDock ? "78%" : 70) : 100} minSize={1}>
                 {/* Editor Area */}
                 <div className="w-full h-full flex flex-col min-h-0 bg-[var(--bg-root)]">
-                  {/* Tabs (a narrow phone scrolls them sideways; 1px below keeps the active tab's underline) */}
-                  <div className="flex bg-[var(--bg-panel)] border-b border-[var(--border-main)] max-sm:overflow-x-auto max-sm:overflow-y-hidden max-sm:pb-px [scrollbar-width:none]">
+                  {/* Tabs */}
+                  <div className="flex bg-[var(--bg-panel)] border-b border-[var(--border-main)]">
                     <button
                       onClick={() => setActiveTab("code")}
                       className={`relative px-4 py-2 text-[11px] font-medium flex items-center gap-2 transition-all ${activeTab === "code"
@@ -4275,19 +4526,6 @@ export default function App() {
                       <Layers size={13} className={activeTab === "schematic" ? "text-[var(--accent-secondary)]" : ""} />
                       <span className="font-mono">schematic.view</span>
                     </button>
-                    {appMode === "manual" && (
-                      <button
-                        onClick={() => setActiveTab("simulator")}
-                        className={`relative shrink-0 whitespace-nowrap px-4 py-2 text-[11px] font-medium flex items-center gap-2 transition-all ${activeTab === "simulator"
-                            ? "text-[var(--text-main)] tab-active"
-                            : "text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)]"
-                          }`}
-                      >
-                        <CircuitBoard size={13} className={activeTab === "simulator" ? "text-[var(--accent-primary)]" : ""} />
-                        <span className="font-mono">circuit.sim</span>
-                        <span className="rounded-full bg-[var(--accent-primary-soft)] px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide text-[var(--accent-primary)]">Soon</span>
-                      </button>
-                    )}
                   </div>
 
                   {/* Tab Content */}
@@ -4312,24 +4550,40 @@ export default function App() {
                     </div>
                     <div className={`absolute inset-0 ${activeTab === "schematic" ? "z-10" : "z-0 opacity-0 pointer-events-none"}`}>
                       <Suspense fallback={<PartLoading label="Loading the circuit…" />}>
-                        <SchematicViewer
-                          mcu={mcu}
-                          components={components}
-                          connections={connections}
-                          isSimulationActive={isSimulationActive}
-                          isCompiling={isCompiling}
-                          isFlashing={isFlashing}
-                          appMode={appMode}
-                          setComponents={setComponents}
-                          setConnections={setConnections}
-                        />
+                        {circuitAccess ? (
+                          <CircuitView
+                            circuit={circuit}
+                            components={components}
+                            connections={connections}
+                            boardId={boardId}
+                            chip={boardChips.get(boardId)?.mcu ?? null}
+                            fcpu={boardChips.get(boardId)?.fcpu ?? null}
+                            boardName={boardNames.get(boardId) || mcu.toUpperCase()}
+                            mcu={mcu}
+                            code={code}
+                            build={buildForSimulation}
+                            onChange={handleCircuitChange}
+                            onSession={onSimSession}
+                            hooks={simHooks}
+                            authToken={async () => (user ? await user.getIdToken() : null)}
+                            playRequest={simPlayRequest}
+                            projectName={currentProjectName || undefined}
+                          />
+                        ) : (
+                          <SchematicViewer
+                            mcu={mcu}
+                            components={components}
+                            connections={connections}
+                            isSimulationActive={isSimulationActive}
+                            isCompiling={isCompiling}
+                            isFlashing={isFlashing}
+                            appMode={appMode}
+                            setComponents={setComponents}
+                            setConnections={setConnections}
+                          />
+                        )}
                       </Suspense>
                     </div>
-                    {appMode === "manual" && activeTab === "simulator" && (
-                      <div className="absolute inset-0 z-10">
-                        <SimulatorComingSoon />
-                      </div>
-                    )}
                   </div>
                 </div>
               </Panel>
@@ -4428,6 +4682,29 @@ export default function App() {
                               </div>
                             )}
                           </div>
+                          {/* Typing to the simulated program, while it runs (schematic.view's Simulate). */}
+                          {(simState === "running" || simState === "paused") && (
+                            <form
+                              onSubmit={(e) => { e.preventDefault(); sendSimSerial(); }}
+                              className="shrink-0 flex items-center gap-1.5 border-t border-[var(--border-main)] bg-[var(--bg-panel)] px-2 py-1.5"
+                            >
+                              <input
+                                value={simSerialInput}
+                                onChange={(e) => setSimSerialInput(e.target.value)}
+                                disabled={simState !== "running"}
+                                placeholder={simState === "running" ? "Send to the simulated board (Enter)" : "Paused: resume the simulation to send"}
+                                aria-label="Send text to the simulated board"
+                                className="min-w-0 flex-1 rounded-md border border-[var(--border-main)] bg-[var(--bg-surface)] px-2 py-1 font-mono text-[11px] text-[var(--text-main)] placeholder-[var(--text-muted)] outline-none focus:border-[var(--accent-primary)] disabled:opacity-60"
+                              />
+                              <button
+                                type="submit"
+                                disabled={simState !== "running" || !simSerialInput}
+                                className="shrink-0 rounded-md bg-[var(--accent-primary)] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:opacity-90 disabled:opacity-50"
+                              >
+                                Send
+                              </button>
+                            </form>
+                          )}
                         </div>
                       )}
 
@@ -4642,6 +4919,15 @@ export default function App() {
                 Install app
               </button>
             )}
+            {user && (
+              <button
+                onClick={() => { setIsMenuOpen(false); setSettingsError(null); setSettingsOpen(true); }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition rounded-md mx-1"
+              >
+                <Settings size={14} className="text-[var(--text-muted)]" />
+                Settings
+              </button>
+            )}
             <button
               onClick={() => { setIsMenuOpen(false); setShowWelcome(false); setTourOpen(true); }}
               className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition rounded-md mx-1"
@@ -4682,6 +4968,17 @@ export default function App() {
       )}
 
       {isLibrariesOpen && <LibrariesModal onClose={() => setIsLibrariesOpen(false)} />}
+
+      {settingsOpen && (
+        <SettingsModal
+          circuitAccess={circuitAccess}
+          buildCircuit={buildCircuit}
+          saving={settingsSaving}
+          error={settingsError}
+          onBuildCircuit={(on) => void saveBuildCircuit(on)}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
 
       {showIOSInstallHelp && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-black/70 backdrop-blur-sm" onClick={() => setShowIOSInstallHelp(false)}>

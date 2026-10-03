@@ -88,5 +88,10 @@ export interface ChatMessage {
     description?: string;
     components?: SchematicComponent[];
     connections?: SchematicConnection[];
+    /** The circuit the agent built (accounts with circuits): parts by kind, and pin-to-pin wires. */
+    circuit?: {
+      parts?: { id?: string; type?: string; settings?: Record<string, unknown> }[];
+      connections?: { from?: string; to?: string }[];
+    };
   };
 }

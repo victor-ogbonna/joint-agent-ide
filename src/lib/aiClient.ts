@@ -64,7 +64,7 @@ async function authedFetch(path: string, body: any, signal?: AbortSignal, forceR
 // routes don't touch the Gemini token cap at all. A dropped connection is
 // retried, and a slow answer the server kept alive is unwrapped
 // (src/lib/resilientFetch.ts).
-export async function authedApiRequest(path: string, opts?: { method?: "GET" | "POST"; body?: any; signal?: AbortSignal }): Promise<Response> {
+export async function authedApiRequest(path: string, opts?: { method?: "GET" | "POST" | "PUT" | "DELETE"; body?: any; signal?: AbortSignal }): Promise<Response> {
   const method = opts?.method || (opts?.body !== undefined ? "POST" : "GET");
   const doFetch = async (forceRefresh = false) => {
     const user = auth.currentUser;

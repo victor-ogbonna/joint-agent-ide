@@ -203,6 +203,7 @@ export class Simulation {
   constructor(diagram: Diagram, hex: string, options: SimulationOptions) {
     const found = boardOf(diagram);
     if (!found) throw new Error("Add an Arduino board to the circuit first.");
+    if (found.board.chip === "esp32") throw new Error("An ESP32 runs on the simulation server, not in the page.");
     this.diagram = diagram;
     this.board = found.board;
     this.boardPart = found.part;

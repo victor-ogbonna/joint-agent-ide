@@ -3,6 +3,7 @@ import {
   query, orderBy, serverTimestamp, Timestamp
 } from "firebase/firestore";
 import { db } from "./firestore";
+import { authedApiRequest } from "./aiClient";
 import { MCUType, SchematicComponent, SchematicConnection } from "../types";
 
 // Default board id per MCU family — matches server/boards.ts's DEFAULT_BOARD_ID,
@@ -154,9 +155,21 @@ export async function renameProject(uid: string, projectId: string, name: string
   await updateDoc(projectDoc(uid, projectId), { name: name.trim() || "Untitled Project", updatedAt: serverTimestamp() });
 }
 
+/**
+ * A project's circuit, which the server keeps beside it (server/circuits.ts),
+ * goes when the project goes for good. Best effort: one left behind is never
+ * shown, as no project opens it.
+ */
+async function deleteCircuitOf(projectId: string): Promise<void> {
+  try {
+    await authedApiRequest(`/api/circuits/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+  } catch { /* left behind, unseen */ }
+}
+
 /** Deletes a project for good. The app moves projects to Trash first. */
 export async function deleteProject(uid: string, projectId: string): Promise<void> {
   await deleteDoc(projectDoc(uid, projectId));
+  void deleteCircuitOf(projectId);
 }
 
 /** Moves a project to Trash, where it stays TRASH_DAYS days. */
@@ -176,7 +189,10 @@ export async function restoreProject(uid: string, projectId: string): Promise<vo
  */
 export async function purgeExpiredTrash(uid: string, now = Date.now(), trashed?: ProjectSummary[]): Promise<number> {
   const expired = (trashed ?? (await listAll(uid))).filter((p) => p.deletedAt && trashExpiresAt(p.deletedAt) <= now);
-  for (const p of expired) await deleteDoc(projectDoc(uid, p.id));
+  for (const p of expired) {
+    await deleteDoc(projectDoc(uid, p.id));
+    void deleteCircuitOf(p.id);
+  }
   return expired.length;
 }
 

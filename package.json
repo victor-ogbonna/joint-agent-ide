@@ -11,7 +11,7 @@
     "lint": "tsc --noEmit",
     "test:flash": "node test/avrFlash.sim.mjs",
     "test:webusb": "node test/webusb.sim.mjs",
-    "test": "npm run test:flash && npm run test:webusb && npm run test:esp32 && npm run test:serial && npm run test:pump && npm run test:scrub && npm run test:commands && npm run test:monitor && npm run test:markup && npm run test:context && npm run test:tiers && npm run test:baud && npm run test:detect && npm run test:libraries && npm run test:builduser && npm run test:billing && npm run test:buildqueue && npm run test:adminmetrics && npm run test:buildcache && npm run test:asyncerrors && npm run test:buildrun && npm run test:bodylimits && npm run test:hidesecrets && npm run test:share && npm run test:sitefiles && npm run test:adminconfig && npm run test:referrals && npm run test:teams && npm run test:teamprojects && npm run test:connection && npm run test:aifailures && npm run test:emailverify && npm run test:legacycss && npm run test:webpreview && npm run test:buildapp && npm run test:agentrules && npm run test:simulator && npm run test:simcompile",
+    "test": "npm run test:flash && npm run test:webusb && npm run test:esp32 && npm run test:serial && npm run test:pump && npm run test:scrub && npm run test:commands && npm run test:monitor && npm run test:markup && npm run test:context && npm run test:tiers && npm run test:baud && npm run test:detect && npm run test:libraries && npm run test:builduser && npm run test:billing && npm run test:buildqueue && npm run test:adminmetrics && npm run test:buildcache && npm run test:asyncerrors && npm run test:buildrun && npm run test:bodylimits && npm run test:hidesecrets && npm run test:share && npm run test:sitefiles && npm run test:adminconfig && npm run test:referrals && npm run test:teams && npm run test:teamprojects && npm run test:connection && npm run test:aifailures && npm run test:emailverify && npm run test:legacycss && npm run test:webpreview && npm run test:buildapp && npm run test:agentrules && npm run test:simulator && npm run test:circuits",
     "test:esp32": "node test/esp32.sim.mjs",
     "test:pump": "node test/pump.sim.mjs",
     "test:serial": "node test/serialLines.sim.mjs",
@@ -46,8 +46,8 @@
     "test:webpreview": "tsx test/webPreview.mjs",
     "test:buildapp": "tsx test/buildApp.mjs",
     "test:agentrules": "tsx test/agentRules.mjs",
-    "test:simulator": "tsx test/simulator.mjs",
-    "test:simcompile": "tsx test/simCompile.mjs"
+    "test:circuits": "tsx test/circuits.mjs",
+    "test:simulator": "tsx test/simulator.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

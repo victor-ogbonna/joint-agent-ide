@@ -10,7 +10,7 @@ import fs from "fs";
 import { Simulation } from "../src/sim/circuit.ts";
 import { PART_MODELS, parseOhms } from "../src/sim/parts.ts";
 import { parseDiagram, boardOf } from "../src/sim/diagram.ts";
-import { wirePoints, routeFrom } from "../src/sim/wires.ts";
+import { wirePoints, routeFrom, bridgedPath } from "../src/sim/wires.ts";
 import { boardPin, BOARDS } from "../src/sim/boards.ts";
 
 let bad = 0;
@@ -87,6 +87,14 @@ console.log("Wires");
   check(JSON.stringify(wirePoints(a, b, ["h-5", "*", "v20"])) === JSON.stringify([a, { x: -5, y: 0 }, { x: -5, y: 10 }, { x: 50, y: 10 }, b]), "after *: the last moves into the second pin");
   check(JSON.stringify(wirePoints(a, { x: 0, y: 40 }, ["v10", "v10"])) === JSON.stringify([a, { x: 0, y: 40 }]), "straight runs merge into one segment");
   check(routeFrom(a, [{ x: 10, y: 0 }, { x: 10, y: 25.04 }]).join() === "h10,v25", "bends drawn by hand become Wokwi route moves");
+  const across = [{ x: 0, y: 50 }, { x: 100, y: 50 }];
+  const upright = [{ x: 40, y: 0 }, { x: 40, y: 100 }];
+  check(bridgedPath(across, [upright]) === "M0 50 L36 50 A4 4 0 0 1 44 50 L100 50", "a horizontal run hops over a wire it crosses, with a semicircle", bridgedPath(across, [upright]));
+  check(bridgedPath([...across].reverse(), [upright]) === "M100 50 L44 50 A4 4 0 0 0 36 50 L0 50", "going the other way, the bridge still rises");
+  check(bridgedPath(upright, [across]) === "M40 0 L40 100", "the crossed (vertical) wire stays straight: one bridge per crossing");
+  check(bridgedPath(across, [[{ x: 40, y: 50 }, { x: 40, y: 100 }]]) === "M0 50 L100 50", "a wire that ends on it is a joint, not a crossing");
+  check(bridgedPath(across, [[{ x: 2, y: 0 }, { x: 2, y: 100 }]]) === "M0 50 L100 50", "no bridge too close to a pin");
+  check((bridgedPath(across, [upright, [{ x: 70, y: 0 }, { x: 70, y: 100 }]]).match(/A4/g) || []).length === 2, "two crossings, two bridges");
 }
 
 console.log("Resistor values");

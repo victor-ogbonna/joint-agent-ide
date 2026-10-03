@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useDocumentScroll } from "./useDocumentScroll";
-import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw, UserPlus, Trash2, MessageSquarePlus, Mail, MailX, Paperclip, LayoutDashboard, Activity, Server, Settings, BadgePercent, School, CircuitBoard } from "lucide-react";
+import { Shield, Lock, LogOut, Eye, EyeOff, Check, AlertCircle, Loader2, CreditCard, Users, Copy, RefreshCw, UserPlus, Trash2, MessageSquarePlus, Mail, MailX, Paperclip, LayoutDashboard, Activity, Server, Settings, BadgePercent, School, Sun, Moon } from "lucide-react";
 import OverviewTab from "./admin/OverviewTab";
 import UsersTab from "./admin/UsersTab";
 import TrafficTab from "./admin/TrafficTab";
@@ -9,10 +9,38 @@ import ServerTab from "./admin/ServerTab";
 import CreatorsTab from "./admin/CreatorsTab";
 import TeamsTab from "./admin/TeamsTab";
 import PaystackSettings from "./admin/PaystackSettings";
-import SimulatorTab from "./admin/SimulatorTab";
+import CircuitAccess from "./admin/CircuitAccess";
 
 const TOKEN_KEY = "jointagent_admin_token";
 const TAB_KEY = "jointagent_admin_tab";
+const THEME_KEY = "jointagent_admin_theme";
+
+type AdminTheme = "light" | "dark";
+
+/** The theme picked on this device last time; dark until one is picked. */
+function savedTheme(): AdminTheme {
+  try {
+    return localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark";
+  } catch {
+    return "dark";
+  }
+}
+
+/** Light or dark, from the sign-in card and the header alike. */
+function ThemeSwitch({ theme, onChange }: { theme: AdminTheme; onChange: (t: AdminTheme) => void }) {
+  const next = theme === "light" ? "dark" : "light";
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(next)}
+      className="flex items-center justify-center rounded-md p-1.5 text-[var(--text-muted)] transition hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]"
+      title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+      aria-label={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+    >
+      {theme === "light" ? <Moon size={14} /> : <Sun size={14} />}
+    </button>
+  );
+}
 
 const TABS = [
   { id: "overview", label: "Overview", Icon: LayoutDashboard },
@@ -22,7 +50,6 @@ const TABS = [
   { id: "creators", label: "Creators", Icon: BadgePercent },
   { id: "teams", label: "Teams", Icon: School },
   { id: "server", label: "Server", Icon: Server },
-  { id: "simulator", label: "Simulator", Icon: CircuitBoard },
   { id: "settings", label: "Settings", Icon: Settings },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
@@ -42,6 +69,11 @@ export default function AdminPage() {
   const [loginError, setLoginError] = useState<string | null>(null);
   const [loggingIn, setLoggingIn] = useState(false);
   const [tab, setTab] = useState<TabId>(savedTab);
+  const [theme, setTheme] = useState<AdminTheme>(savedTheme);
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    try { localStorage.setItem(THEME_KEY, theme); } catch { /* this visit only */ }
+  }, [theme]);
   const chooseTab = (id: TabId) => {
     setTab(id);
     try { sessionStorage.setItem(TAB_KEY, id); } catch { /* remembered for this visit only */ }
@@ -295,7 +327,8 @@ export default function AdminPage() {
 
   if (!token) {
     return (
-      <div className="h-screen w-screen flex items-center justify-center bg-[var(--bg-root)] text-[var(--text-main)] p-4">
+      <div className="admin-root relative h-screen w-screen flex items-center justify-center bg-[var(--bg-root)] text-[var(--text-main)] p-4">
+        <div className="absolute right-3 top-3"><ThemeSwitch theme={theme} onChange={setTheme} /></div>
         <form
           onSubmit={handleLogin}
           className="w-full max-w-sm bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl shadow-2xl p-6 space-y-4"
@@ -340,7 +373,7 @@ export default function AdminPage() {
   }
 
   return (
-    <div className="min-h-screen w-full bg-[var(--bg-root)] text-[var(--text-main)]">
+    <div className="admin-root min-h-screen w-full bg-[var(--bg-root)] text-[var(--text-main)]">
       <header className="h-12 border-b border-[var(--border-main)] px-4 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-lg flex items-center justify-center text-white shadow-md" style={{ background: "var(--gradient-hero)" }}>
@@ -348,12 +381,15 @@ export default function AdminPage() {
           </div>
           <h1 className="font-display font-bold text-sm">Admin</h1>
         </div>
-        <button
-          onClick={handleLogout}
-          className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] hover:text-[var(--text-main)] transition px-2 py-1 rounded-md hover:bg-[var(--bg-hover)]"
-        >
-          <LogOut size={13} /> Sign Out
-        </button>
+        <div className="flex items-center gap-1">
+          <ThemeSwitch theme={theme} onChange={setTheme} />
+          <button
+            onClick={handleLogout}
+            className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] hover:text-[var(--text-main)] transition px-2 py-1 rounded-md hover:bg-[var(--bg-hover)]"
+          >
+            <LogOut size={13} /> Sign Out
+          </button>
+        </div>
       </header>
 
       <nav className="sticky top-0 z-20 border-b border-[var(--border-main)] bg-[var(--bg-root)]" aria-label="Admin sections">
@@ -376,13 +412,7 @@ export default function AdminPage() {
         </div>
       </nav>
 
-      {tab === "simulator" && (
-        <main id="admin-panel" role="tabpanel" aria-labelledby="admin-tab-simulator" className="px-2 pt-2 pb-2 sm:px-3">
-          <SimulatorTab post={adminPost} />
-        </main>
-      )}
-
-      {tab !== "settings" && tab !== "simulator" && (
+      {tab !== "settings" && (
         <main id="admin-panel" role="tabpanel" aria-labelledby={`admin-tab-${tab}`} className="viz-root max-w-6xl mx-auto px-4 pt-5 pb-16 sm:px-6">
           {tab === "overview" && <OverviewTab get={adminGet} />}
           {tab === "users" && <UsersTab get={adminGet} />}
@@ -516,6 +546,8 @@ export default function AdminPage() {
             Granted accounts must sign in with Google — an unverified email address never matches a grant.
           </p>
         </div>
+
+        <CircuitAccess get={adminGet} post={adminPost} />
 
         <PaystackSettings get={adminGet} post={adminPost} />
 

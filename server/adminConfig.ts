@@ -35,6 +35,8 @@ export interface AdminConfig {
   paystackPlanCode?: string;
   /** The yearly PRO plan (Paystack, interval "annually"). Optional. */
   paystackYearlyPlanCode?: string;
+  /** May build circuits with the agent and simulate them, besides the owner (server/access.ts). */
+  circuitAccessEmails?: string[];
 }
 
 // Which real Render environment variable each admin-config field should be
@@ -49,6 +51,7 @@ const RENDER_ENV_VAR_NAMES: Record<keyof AdminConfig, string> = {
   paystackPublicKey: "PAYSTACK_PUBLIC_KEY",
   paystackPlanCode: "PAYSTACK_PLAN_CODE",
   paystackYearlyPlanCode: "PAYSTACK_YEARLY_PLAN_CODE",
+  circuitAccessEmails: "CIRCUIT_ACCESS_EMAILS",
 };
 
 export function loadAdminConfig(): AdminConfig {

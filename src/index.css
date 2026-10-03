@@ -879,6 +879,20 @@ pre[class*="language-"] {
   /* Text that flags a problem, readable on the panels of each theme. */
   --viz-alert-text: #f87171;
 }
+/* The admin page in light mode. Its status words (red, orange, green and
+   blue at the 400 and 500 steps) are made for dark panels and fall under
+   3:1 on white; here they are the same hues, dark enough for 4.5:1. */
+:root[data-theme="light"] .admin-root {
+  --color-red-400: #c42b2b;
+  --color-orange-400: #b45309;
+  --color-green-400: #15803d;
+  --color-green-500: #15803d;
+  --color-blue-400: #1d4ed8;
+}
+/* Words in orange and amber 500 (a tier badge, a notice): their colour only,
+   since the same orange 500 also lightens a button on hover. */
+:root[data-theme="light"] .admin-root .text-orange-500 { color: #c2410c; }
+:root[data-theme="light"] .admin-root .text-amber-500 { color: #b45309; }
 :root[data-theme="light"] .viz-root {
   --viz-alert-text: #c42b2b;
   --viz-series-1: #2a78d6;

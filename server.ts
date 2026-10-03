@@ -13,16 +13,17 @@ import crypto from 'crypto';
 import { loadAdminConfig, saveAdminConfig } from './server/adminConfig';
 import { readAccessLists, sanitiseEmailList } from './server/access';
 import { requireAuthAndQuota, requireFirebaseAuth, hasValidSignIn, incrementTokenUsage, getOrCreateUserDoc, consumeCompile, refundCompile, CompileReceipt, tierOf, allowanceFor, compileAllowance, formatWait, subscriptionStanding, FREE_WINDOW_COMPILES, FREE_DAILY_COMPILES } from './server/quota';
-import { accessLevelFor } from './server/access';
+import { accessLevelFor, hasCircuitAccess } from './server/access';
 import { voiceNoteTooLong, MAX_VOICE_NOTE_SECONDS } from './server/voiceNote';
 import { registerPaystackRoutes, paystackSecretKey, paystackPublicKey } from './server/paystack';
 import { registerAdminStatsRoutes } from './server/adminStats';
-import { registerSimRoutes } from './server/simCompile';
 import { useBuildCache, readyBuildCache, startBuildCachePruning, damagedCacheFailure, reportDamagedCache, retireDamagedCache } from './server/buildCache';
 import { catchAsyncErrors, jsonErrorHandler } from './server/asyncErrors';
 import { runBuild, COMPILE_TIMEOUT_MS, fileSystemInclude } from './server/buildRun';
 import { readJsonBodies } from './server/bodyLimits';
 import { registerShareRoutes } from './server/share';
+import { registerCircuitRoutes } from './server/circuits';
+import { circuitModeFor, circuitBoardFor, circuitInstruction, CODE_ONLY_INSTRUCTION, currentCircuitNote, projectToolFor } from './server/agentCircuit';
 import { adminDb, isFirebaseAdminConfigured } from './server/firebaseAdmin';
 import { registerWaitlistRoutes } from './server/waitlist';
 import { registerFeedbackRoutes } from './server/feedback';
@@ -415,6 +416,8 @@ registerGithubRoutes(app, requireFirebaseAuth);
 registerLibraryRoutes(app, requireFirebaseAuth);
 // Read-only links to a project's code and circuit, secrets hidden.
 registerShareRoutes(app, requireFirebaseAuth);
+// Who may build and simulate circuits, each person's switch for it, and each project's circuit.
+registerCircuitRoutes(app, requireAdmin);
 // The admin dashboard: users, activity, payments and server health.
 registerAdminStatsRoutes(app, requireAdmin, {
   isolation: () => buildIsolation(),
@@ -426,8 +429,6 @@ registerAdminStatsRoutes(app, requireAdmin, {
     feedbackEmail: !!(process.env.RESEND_API_KEY && process.env.FEEDBACK_TO_EMAIL),
   }),
 });
-// The circuit simulator's compiles (admin only for now): Uno, Nano and Mega.
-registerSimRoutes(app, requireAdmin, path.join(process.cwd(), ".platformio"));
 
 // Lets the frontend check where a signed-in user stands in their 5-hour
 // allowance — used both to seed the UI on load and by a paused user's
@@ -537,7 +538,7 @@ function recentSerialLines(raw: unknown): string {
 // The agent's system instruction for one board: `mcuDescription` is that
 // board's real specs, and mcuPowerPin and the board rules (server/agentRules.ts)
 // are derived from its family.
-function buildChatSystemInstruction(mcuDescription: string, mcuPowerPin: string, chatMode: string, family: BoardFamily): string {
+function buildChatSystemInstruction(mcuDescription: string, mcuPowerPin: string, chatMode: string, family: BoardFamily, circuitSection: string | null = null): string {
   let systemInstruction = `You are Joint-Agent, an expert embedded systems AI agent and circuit designer.
 You help users write code, debug hardware issues, design circuit schematics, manage their cloud IDE, and execute terminal commands.
 Microcontroller Reference: ${mcuDescription}
@@ -545,9 +546,9 @@ Microcontroller Reference: ${mcuDescription}
 STRICT COMMENT ADHERENCE (highest priority — read this first): Any instruction, correction, or preference the user states in the conversation is authoritative and MUST be followed exactly, with no exceptions, substitutions, or "improvements" of your own. This applies to every user message, and especially to messages formatted as \`Regarding: "<question>" -> <answer>\`, which are the user's direct answer to a specific clarifying question you asked — treat that answer as a hard requirement for the rest of the conversation, not a suggestion. If a later instruction conflicts with an earlier one, the most recent explicit instruction wins. Never silently ignore, water down, generalize, or reinterpret what the user typed — if something is ambiguous, ask, don't guess.`;
 
   if (chatMode !== "plan") {
-    systemInstruction += `
-
-Supported Components for circuit schematic generation (component type -> exact pin names). Do NOT invent component types outside this list:
+    // Accounts with circuits get the circuit rules (server/agentCircuit.ts)
+    // in place of the old schematic's; everyone else's agent is unchanged.
+    const componentsSection = circuitSection ?? `Supported Components for circuit schematic generation (component type -> exact pin names). Do NOT invent component types outside this list:
 - 'led': ['anode', 'cathode']
 - 'resistor': ['pin1', 'pin2']
 - 'dht11': ['VCC', 'DATA', 'GND']
@@ -570,7 +571,10 @@ Schematic wiring rules (CRITICAL for a correct, renderable circuit):
 4. Every VCC/power pin on a component must be wired to 'mcu' pin '${mcuPowerPin}' (use 'VIN'/'5V' instead for higher-current loads like motors/relays if more appropriate).
 5. Keep circuits electrically sound and logical, e.g. place resistors in series with LEDs ('mcu' pin -> resistor pin1, resistor pin2 -> LED anode, LED cathode -> 'mcu' GND).
 6. Use sensible wire colors: red/orange (#EF4444 / #F59E0B) for power, black (#000000) for GND, blue (#3B82F6) or another distinct color per signal line.
-7. Give every component a unique, descriptive 'id' (e.g. 'led1', 'resistor1', 'dht1') and a friendly 'label'.
+7. Give every component a unique, descriptive 'id' (e.g. 'led1', 'resistor1', 'dht1') and a friendly 'label'.`;
+    systemInstruction += `
+
+${componentsSection}
 
 CRITICAL: The code is compiled as a plain C++ file (src/main.cpp), not an Arduino IDE sketch, so you MUST ensure that every generated C++ code includes '#include <Arduino.h>' at the very top so that the code can be properly compiled and flashed.
 
@@ -700,6 +704,14 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
   }
 
   const { description: mcuDescription, powerPin: mcuPowerPin, specs, family } = describeBoardForPrompt(boardId, mcu);
+  // Circuits (server/agentCircuit.ts): an account with them gets the circuit
+  // built with the code, unless it turned that off; everyone else, as before.
+  const circuitMode = circuitModeFor(hasCircuitAccess(req.email ?? null, req.emailVerified === true), req.body?.buildCircuit);
+  const boardInfo = getBoardById(typeof boardId === "string" ? boardId : null);
+  const circuitBoard = circuitBoardFor(String(boardId || ""), boardInfo?.mcu, boardInfo?.fcpu, family);
+  const circuitSection = circuitMode === "circuit" ? circuitInstruction(circuitBoard) : circuitMode === "code" ? CODE_ONLY_INSTRUCTION : null;
+  const implementTools = DEEPSEEK_IMPLEMENT_TOOLS.map((t) => (t.function.name === "generate_project" ? projectToolFor(circuitMode, t) : t));
+  const circuitNote = circuitMode === "circuit" ? currentCircuitNote(req.body?.currentCircuit) : "";
 
   try {
     // The whole conversation goes to the model, against a token budget the
@@ -722,7 +734,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     // rather than a separate field, and it sits at the front of every request
     // unchanged — which is exactly the prefix DeepSeek caches automatically,
     // so the Gemini explicit-cache machinery has no equivalent to port.
-    const systemText = buildChatSystemInstruction(mcuDescription, mcuPowerPin, chatMode, family);
+    const systemText = buildChatSystemInstruction(mcuDescription, mcuPowerPin, chatMode, family, circuitSection);
     // Free replies are capped shorter; the model is the same.
     const model = modelFor(free);
     // Keeps the browser's idea of the plan current: it gates auto-debug.
@@ -748,7 +760,7 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
       : "";
     // Libraries: the rule for ones that aren't well known, and the user's own.
     const libraryNote = libraryNoteFor(req.uid);
-    const plan = planCompaction(systemText + codeNote + libraryNote, conversation);
+    const plan = planCompaction(systemText + codeNote + circuitNote + libraryNote, conversation);
     if (plan.compact) {
       send({ type: "tool_progress", text: "Conversation is nearly full — summarizing the earlier part…" });
       try {
@@ -792,11 +804,12 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     // Just before the newest message: everything ahead of it stays a stable
     // prefix, which DeepSeek caches and bills at a fraction of the price.
     if (codeNote) dsMessages.splice(dsMessages.length - 1, 0, { role: "system", content: codeNote });
+    if (circuitNote) dsMessages.splice(dsMessages.length - 1, 0, { role: "system", content: circuitNote });
     dsMessages.splice(dsMessages.length - 1, 0, { role: "system", content: libraryNote });
 
     const runChat = (msgs: ChatMessage[]) => streamChat(
       msgs,
-      chatMode === "plan" ? undefined : DEEPSEEK_IMPLEMENT_TOOLS,
+      chatMode === "plan" ? undefined : implementTools,
       {
         onText: (text) => {
           writtenChars += text.length;

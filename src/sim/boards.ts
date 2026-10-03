@@ -3,11 +3,11 @@
  * Arduino pin is which bit of which port (from each board's own
  * pins_arduino.h), plus how the board drawing names its pins.
  */
-export type BoardId = "uno" | "nano" | "mega";
+export type BoardId = "uno" | "nano" | "mega" | "esp32";
 
 /** Whether `key` is an object's own entry (a diagram's text is never "__proto__" or "constructor" of a lookup table). */
 export const own = (obj: object, key: string): boolean => Object.prototype.hasOwnProperty.call(obj, key);
-export type Chip = "atmega328p" | "atmega2560";
+export type Chip = "atmega328p" | "atmega2560" | "esp32";
 
 export interface PinBit {
   /** Port letter, "B" for PORTB. */
@@ -73,7 +73,21 @@ export const BOARDS: Record<BoardId, BoardDef> = {
     id: "mega", name: "Arduino Mega", chip: "atmega2560", element: "wokwi-arduino-mega", buildBoard: "megaatmega2560",
     flashBytes: 256 * 1024, dataBytes: 0x2200, digital: MEGA_DIGITAL, ...analogNames(16, 54), sda: "20", scl: "21",
   },
+  // GPIO 0-39 (the "port" is only a label: the chip runs on the simulation
+  // server, which reads its pins by GPIO number). Its analog inputs are GPIOs
+  // too, so they are digital pins here, read as analog by the server.
+  esp32: {
+    id: "esp32", name: "ESP32 DevKit", chip: "esp32", element: "wokwi-esp32-devkit-v1", buildBoard: "esp32dev",
+    flashBytes: 4 * 1024 * 1024, dataBytes: 0, digital: Array.from({ length: 40 }, (_, gpio) => P("GPIO", gpio)),
+    analog: {}, analogDigital: {}, sda: "21", scl: "22",
+  },
 };
+
+/** The ESP32 DevKit's pins named for what they do rather than their GPIO. */
+const ESP32_NAMED_PINS: Record<string, number> = { TX0: 1, RX0: 3, TX2: 17, RX2: 16, VP: 36, VN: 39 };
+
+/** Whether a board's chip is an ESP32 (simulated on the server, not in the page). */
+export const isEsp32Board = (board: BoardDef) => board.chip === "esp32";
 
 /** What a board pin is, by the name its drawing gives it. */
 export type BoardPin =
@@ -91,6 +105,17 @@ export type BoardPin =
 export function boardPin(board: BoardDef, rawName: string): BoardPin {
   const name = rawName.replace(/\.\d+$/, "");
   if (name === "GND") return { kind: "ground" };
+  if (board.chip === "esp32") {
+    if (name === "VIN") return { kind: "power", volts: 5 };
+    if (name === "3V3") return { kind: "power", volts: 3.3 };
+    if (own(ESP32_NAMED_PINS, name)) return { kind: "digital", pin: ESP32_NAMED_PINS[name] };
+    // EN is the chip's reset: no GPIO.
+    if (/^D\d+$/.test(name)) {
+      const pin = Number(name.slice(1));
+      return pin < board.digital.length ? { kind: "digital", pin } : { kind: "none" };
+    }
+    return { kind: "none" };
+  }
   if (name === "5V" || name === "IOREF" || name === "VIN") return { kind: "power", volts: 5 };
   if (name === "3.3V" || name === "3V3") return { kind: "power", volts: 3.3 };
   if (name === "SDA" && board.id === "mega") return { kind: "digital", pin: 20 };

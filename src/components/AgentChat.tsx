@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { motion } from "motion/react";
-import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Square, Code, X, Clock, RotateCcw, Loader2, ListChecks } from "lucide-react";
+import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Square, Code, X, Clock, RotateCcw, Loader2, ListChecks, Play, CircuitBoard } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -60,6 +60,8 @@ interface AgentChatProps {
   onUpgrade?: () => void;
   /** Try again on a reply that didn't come through: sends its message once more. */
   onRetryFailed?: (messageId: string) => void;
+  /** Run the circuit a reply built, in schematic.view (accounts with circuits). */
+  onSimulate?: () => void;
 }
 
 /**
@@ -394,7 +396,8 @@ export default function AgentChat({
   planModeAvailable = true,
   pause,
   onUpgrade,
-  onRetryFailed
+  onRetryFailed,
+  onSimulate
 }: AgentChatProps) {
   const [input, setInput] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -906,7 +909,28 @@ export default function AgentChat({
                              </div>
                           )}
 
-                          <div className="flex items-center justify-end border-t border-[var(--border-main)] pt-2 mt-1">
+                          {msg.suggestedProjectUpdate.circuit && Array.isArray(msg.suggestedProjectUpdate.circuit.parts) && msg.suggestedProjectUpdate.circuit.parts.length > 0 && (
+                             <div>
+                               <span className="flex items-center gap-1 text-[10px] text-[var(--text-muted)] font-semibold"><CircuitBoard size={11} /> Circuit built ({msg.suggestedProjectUpdate.circuit.parts.length} part{msg.suggestedProjectUpdate.circuit.parts.length === 1 ? "" : "s"}, {Array.isArray(msg.suggestedProjectUpdate.circuit.connections) ? msg.suggestedProjectUpdate.circuit.connections.length : 0} wires):</span>
+                               <div className="flex flex-wrap gap-1 mt-1">
+                                 {msg.suggestedProjectUpdate.circuit.parts.slice(0, 24).map((c, i) => (
+                                    <span key={`${String(c?.id ?? i)}-${i}`} className="text-[9px] bg-[var(--bg-surface)] px-1.5 py-0.5 rounded border border-[var(--border-main)] font-mono">{String(c?.id ?? "?")} · {String(c?.type ?? "?")}</span>
+                                 ))}
+                               </div>
+                             </div>
+                          )}
+
+                          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--border-main)] pt-2 mt-1">
+                            {onSimulate && msg.suggestedProjectUpdate.circuit && Array.isArray(msg.suggestedProjectUpdate.circuit.parts) && msg.suggestedProjectUpdate.circuit.parts.length > 0 && (
+                              <button
+                                onClick={onSimulate}
+                                className="px-3 py-1.5 text-white rounded text-xs font-semibold transition flex items-center gap-1.5 hover:opacity-90"
+                                style={{ background: "var(--gradient-accent)" }}
+                                title="Open schematic.view and run this circuit"
+                              >
+                                <Play size={13} /> Simulate
+                              </button>
+                            )}
                             {msg.suggestedProjectUpdate.code && (
                               <button
                                 onClick={() => onOpenCode

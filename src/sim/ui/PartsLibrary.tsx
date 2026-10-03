@@ -11,7 +11,7 @@ function Preview({ spec }: { spec: PartSpec }) {
   const box = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const el = document.createElement(spec.type) as any;
-    el.style.display = "block";
+    el.style.display = "flex";
     applyAttrs(el, spec.attrs ?? {});
     const holder = box.current!;
     const inner = document.createElement("div");

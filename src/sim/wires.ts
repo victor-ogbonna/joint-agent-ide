@@ -80,3 +80,51 @@ export function routeFrom(a: Point, bends: Point[]): string[] {
 export function pathOf(points: Point[]): string {
   return points.map((pt, i) => `${i ? "L" : "M"}${r1(pt.x)} ${r1(pt.y)}`).join(" ");
 }
+
+/** Where a horizontal run from `a` to `b` (same y) crosses another wire's vertical run, strictly between ends. */
+function crossings(a: Point, b: Point, others: Point[][], keepClear: number): number[] {
+  const y = a.y;
+  const lo = Math.min(a.x, b.x) + keepClear;
+  const hi = Math.max(a.x, b.x) - keepClear;
+  const xs: number[] = [];
+  for (const other of others) {
+    for (let i = 1; i < other.length; i++) {
+      const p = other[i - 1];
+      const q = other[i];
+      if (Math.abs(p.x - q.x) > 0.01) continue; // only vertical runs
+      const top = Math.min(p.y, q.y);
+      const bottom = Math.max(p.y, q.y);
+      // Strictly inside the vertical run: a wire ending on this one is a joint, not a crossing.
+      if (y <= top + 0.5 || y >= bottom - 0.5) continue;
+      if (p.x > lo && p.x < hi) xs.push(p.x);
+    }
+  }
+  return xs;
+}
+
+/**
+ * An SVG path through the points that hops over other wires: where one of
+ * its horizontal runs crosses another wire's vertical run, it bridges it
+ * with a small semicircle, so crossing wires never look joined.
+ */
+export function bridgedPath(points: Point[], others: Point[][], r = 4): string {
+  if (points.length < 2) return pathOf(points);
+  let d = `M${r1(points[0].x)} ${r1(points[0].y)}`;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    if (Math.abs(a.y - b.y) < 0.01 && Math.abs(a.x - b.x) > 2 * r + 2) {
+      const dir = b.x > a.x ? 1 : -1;
+      const xs = crossings(a, b, others, r + 1).sort((p, q) => (p - q) * dir);
+      let last = -Infinity;
+      for (const x of xs) {
+        // Two crossings too close together share one bridge.
+        if (Math.abs(x - last) < 2 * r + 1) continue;
+        last = x;
+        d += ` L${r1(x - dir * r)} ${r1(a.y)} A${r} ${r} 0 0 ${dir > 0 ? 1 : 0} ${r1(x + dir * r)} ${r1(a.y)}`;
+      }
+    }
+    d += ` L${r1(b.x)} ${r1(b.y)}`;
+  }
+  return d;
+}

@@ -480,7 +480,12 @@ class Servo extends PartModel {
 
 // ---- Sensors ----
 
-/** DHT22: answers the program's start signal with 40 bits: humidity, temperature, checksum. */
+/**
+ * DHT22 (or, with attrs.sensor "dht11", a DHT11 on the same drawing):
+ * answers the program's start signal with 40 bits: humidity, temperature,
+ * checksum. A DHT22 sends tenths in 16 bits each; a DHT11 sends whole
+ * humidity, and whole temperature then its tenth.
+ */
 class Dht22 extends PartModel {
   static pins = ["SDA"];
   state = { temperature: num(this.api.attrs.temperature, 24), humidity: num(this.api.attrs.humidity, 40) };
@@ -501,9 +506,15 @@ class Dht22 extends PartModel {
   }
   private answer() {
     const { temperature, humidity } = this.state;
-    const h = Math.round(clamp(humidity, 0, 100) * 10);
-    const t = Math.round(Math.abs(clamp(temperature, -40, 80)) * 10) | (temperature < 0 ? 0x8000 : 0);
-    const bytes = [h >> 8, h & 0xff, t >> 8, t & 0xff];
+    let bytes: number[];
+    if (this.api.attrs.sensor === "dht11") {
+      const tenths = Math.round(clamp(temperature, 0, 50) * 10);
+      bytes = [Math.round(clamp(humidity, 0, 100)), 0, Math.floor(tenths / 10), tenths % 10];
+    } else {
+      const h = Math.round(clamp(humidity, 0, 100) * 10);
+      const t = Math.round(Math.abs(clamp(temperature, -40, 80)) * 10) | (temperature < 0 ? 0x8000 : 0);
+      bytes = [h >> 8, h & 0xff, t >> 8, t & 0xff];
+    }
     bytes.push(bytes.reduce((a, b) => a + b, 0) & 0xff);
     // [level, microseconds]: the response, then each bit as 50 µs low and 26 or 70 µs high.
     const steps: [number, number][] = [[1, 30], [0, 80], [1, 80]];

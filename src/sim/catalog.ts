@@ -121,6 +121,7 @@ export const BOARD_PARTS = [
   { id: "uno", type: "wokwi-arduino-uno", name: "Arduino Uno" },
   { id: "nano", type: "wokwi-arduino-nano", name: "Arduino Nano" },
   { id: "mega", type: "wokwi-arduino-mega", name: "Arduino Mega 2560" },
+  { id: "esp32", type: "wokwi-esp32-devkit-v1", name: "ESP32 DevKit" },
 ] as const;
 
 /** Wire colours, as Wokwi names them. */

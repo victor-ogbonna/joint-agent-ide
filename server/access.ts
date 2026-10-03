@@ -42,6 +42,24 @@ export function accessLevelFor(email: string | null | undefined, emailVerified: 
   return "none";
 }
 
+/**
+ * May build circuits with the agent and simulate them: the owner, and the
+ * verified addresses the admin page grants it to. Everyone else sees the
+ * circuit view as "Coming soon", and the agent works for them as before.
+ */
+export function hasCircuitAccess(email: string | null | undefined, emailVerified: boolean): boolean {
+  if (!emailVerified) return false;
+  const e = norm(email);
+  if (!e) return false;
+  if (OWNER_EMAILS.includes(e)) return true;
+  return list(loadAdminConfig().circuitAccessEmails).includes(e);
+}
+
+/** The addresses granted circuits on the admin page (the owner always has them). */
+export function readCircuitAccessList(): { circuitAccessEmails: string[]; ownerEmails: string[] } {
+  return { circuitAccessEmails: list(loadAdminConfig().circuitAccessEmails), ownerEmails: [...OWNER_EMAILS] };
+}
+
 /** May use the product even while the launch lock is on. */
 export function bypassesLaunchLock(level: AccessLevel): boolean {
   return level !== "none";
