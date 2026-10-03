@@ -1119,7 +1119,7 @@ app.post("/api/ai/app-page", requireAuthAndQuota, async (req, res) => {
   const description = typeof body.description === "string" ? body.description.slice(0, 4000).trim() : "";
   const name = typeof body.name === "string" ? body.name.replace(/[\u0000-\u001f]/g, " ").slice(0, 30).trim() : "";
   const themeColor = typeof body.themeColor === "string" && /^#[0-9a-fA-F]{6}$/.test(body.themeColor) ? body.themeColor : "#0b0d12";
-  const kind = body.kind === "bluetooth" ? "bluetooth" : body.kind === "internet" ? "internet" : null;
+  const kind = body.kind === "bluetooth" || body.kind === "classic" || body.kind === "internet" ? body.kind : null;
   if (!code) return res.status(400).json({ error: "There's no code in this project yet." });
   if (!name) return res.status(400).json({ error: "Give the app a name." });
   if (!kind) return res.status(400).json({ error: "This project doesn't use Bluetooth or the internet." });
@@ -1127,9 +1127,16 @@ app.post("/api/ai/app-page", requireAuthAndQuota, async (req, res) => {
     return res.status(503).json({ error: "The AI service isn't set up on this server.", code: "AI_UNAVAILABLE" });
   }
 
-  const how = kind === "bluetooth"
+  const how = kind === "classic"
+    ? `HOW THE APP REACHES THE BOARD: Classic Bluetooth serial (an HC-05/HC-06 module, or the ESP32's BluetoothSerial), with the Web Serial API.
+- The board must already be paired in the phone's or computer's Bluetooth settings: say so on the connect screen (a PIN, if asked, is usually 1234 or 0000).
+- Connect only from a button the person taps: const port = await navigator.serial.requestPort({ allowedBluetoothServiceClassIds: ["00001101-0000-1000-8000-00805f9b34fb"], filters: [{ bluetoothServiceClassId: "00001101-0000-1000-8000-00805f9b34fb" }] }); then await port.open({ baudRate }) with the baud rate the sketch uses for the Bluetooth link (9600 if it isn't clear).
+- Read with port.readable.getReader() and a TextDecoder, split into lines; write with a TextEncoder through port.writable.getWriter(), in exactly the format the sketch reads (the same characters and line endings). Release the reader and writer and close the port on disconnect.
+- If navigator.serial is missing, show plainly: "This browser can't use Bluetooth serial. Open the app in Chrome on Android, or in Chrome or Edge on a computer. iPhone and iPad can't connect to this kind of Bluetooth."
+- Show the connection state, and a Reconnect button after a disconnect.`
+    : kind === "bluetooth"
     ? `HOW THE APP REACHES THE BOARD: Bluetooth Low Energy, with the Web Bluetooth API.
-- Use exactly the service and characteristic UUIDs in the sketch, in lower case. Ask for the device with navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE_UUID] }] }) (add the sketch's device name as a namePrefix filter too when it sets one), only from a button the person taps.
+- Use exactly the service and characteristic UUIDs in the sketch, in lower case (for an HM-10-style module on a serial port: service 0000ffe0-0000-1000-8000-00805f9b34fb, characteristic 0000ffe1-0000-1000-8000-00805f9b34fb, which carries the serial text both ways). Ask for the device with navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE_UUID] }] }) (add the sketch's device name as a namePrefix filter too when it sets one), only from a button the person taps.
 - Read values the board sends (with notifications when the characteristic offers NOTIFY), and write what the board expects, in the format the sketch parses.
 - If navigator.bluetooth is missing, show plainly: "This browser can't use Bluetooth. Open the app in Chrome on Android, Windows, Mac or a Chromebook. iPhone and iPad browsers can't use Bluetooth."
 - Show the connection state, and a Reconnect button after a disconnect.`

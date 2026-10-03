@@ -4,7 +4,7 @@ import {
   AppSettings, APP_NAME_MAX, APP_SHORT_NAME_MAX, applyApp, appliedSettings, cleanAppName, filterNameInput,
   inspectProject, isHexColor, removeApp, shortNameFrom,
 } from "../lib/buildApp";
-import { appPackageFiles, appSlug, fetchPng, prepareAppPage, zip } from "../lib/appPackage";
+import { appPackageFiles, appSlug, fetchPng, PackageKind, prepareAppPage, zip } from "../lib/appPackage";
 import { callAiEndpoint, QuotaBlockedInfo } from "../lib/aiClient";
 import { formatWhen } from "../lib/plans";
 
@@ -20,23 +20,39 @@ interface BuildAppModalProps {
   onQuotaBlocked: (info: QuotaBlockedInfo) => void;
 }
 
-type Delivery = "board" | "package";
+/** The board serves the app, or an app package reaches it another way. */
+type Delivery = "board" | PackageKind;
+
+const DELIVERY_LABELS: Record<Delivery, [string, typeof Wifi]> = {
+  board: ["From the board", Wifi],
+  bluetooth: ["Bluetooth LE app", Bluetooth],
+  classic: ["Bluetooth app", Bluetooth],
+  internet: ["Internet app", Globe],
+};
 
 const COLOURS = ["#0b0d12", "#f97316", "#2563eb", "#16a34a", "#7c3aed", "#dc2626"];
 
 /**
  * "Build App (PWA)": makes a project a phone app with the Joint-Agent icon.
  * A board that serves its own page gets the app's name and icon added to
- * the sketch (src/lib/buildApp.ts); a Bluetooth or internet-connected one
- * gets an app package to put on any https site (src/lib/appPackage.ts).
+ * the sketch (src/lib/buildApp.ts); a Bluetooth (Low Energy or Classic) or
+ * internet-connected one gets an app package to put on any https site
+ * (src/lib/appPackage.ts).
  */
 export default function BuildAppModal({ onClose, code, onCodeChange, projectName, description, signedIn, onQuotaBlocked }: BuildAppModalProps) {
   const project = useMemo(() => inspectProject(code), [code]);
   // What the sketch was last made an app with, read once when the window opens.
   const [previous] = useState(() => appliedSettings(code));
-  const packageKind: "bluetooth" | "internet" | null = project.ble ? "bluetooth" : project.cloud || project.cellular ? "internet" : null;
   const canBoard = project.board !== null;
-  const [delivery, setDelivery] = useState<Delivery>(canBoard ? "board" : "package");
+  // Every way phones can get this project's app, the board's own first.
+  const deliveries: Delivery[] = [
+    ...(canBoard ? ["board" as const] : []),
+    ...(project.ble ? ["bluetooth" as const] : []),
+    ...(project.classicBluetooth ? ["classic" as const] : []),
+    ...(project.cloud || project.cellular ? ["internet" as const] : []),
+  ];
+  const [delivery, setDelivery] = useState<Delivery>(deliveries[0] ?? "board");
+  const packageKind: PackageKind | null = delivery !== "board" && deliveries.includes(delivery) ? delivery : null;
 
   const startName = previous?.name || cleanAppName(projectName) || "My App";
   const [name, setName] = useState(startName);
@@ -48,7 +64,7 @@ export default function BuildAppModal({ onClose, code, onCodeChange, projectName
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [boardDone, setBoardDone] = useState<{ before: string; removed: boolean } | null>(null);
-  const [pkg, setPkg] = useState<{ zip: Uint8Array; fileName: string; page: string; notes: string } | null>(null);
+  const [pkg, setPkg] = useState<{ zip: Uint8Array; fileName: string; page: string; notes: string; kind: PackageKind } | null>(null);
   const abort = useRef<AbortController | null>(null);
   useEffect(() => () => abort.current?.abort(), []);
 
@@ -112,7 +128,7 @@ export default function BuildAppModal({ onClose, code, onCodeChange, projectName
       });
       const bytes = zip(files);
       const fileName = `${appSlug(s.name)}.zip`;
-      setPkg({ zip: bytes, fileName, page: prepareAppPage(result.data.html, s), notes: result.data.notes || "" });
+      setPkg({ zip: bytes, fileName, page: prepareAppPage(result.data.html, s), notes: result.data.notes || "", kind: packageKind });
       download(bytes, fileName);
     } catch (err: any) {
       if (err?.name === "AbortError" || controller.signal.aborted) return;
@@ -123,20 +139,18 @@ export default function BuildAppModal({ onClose, code, onCodeChange, projectName
   };
 
   // What the project can become, said plainly when it's nothing yet.
-  const nothing = !canBoard && !packageKind;
+  const nothing = deliveries.length === 0;
   const why = project.boardProblem
-    ?? (project.classicBluetooth
-      ? "This project uses Classic Bluetooth (BluetoothSerial), which phone browsers can't connect to. Ask the agent to switch it to Bluetooth Low Energy (BLE), then build the app."
-      : project.wifi
-        ? "This project joins Wi-Fi but doesn't serve a web page or use an internet service yet. Ask the agent to add a web page to control it, then build the app."
-        : "Apps are for projects a phone can talk to: a web page on Wi-Fi, Bluetooth Low Energy, or an internet service (also over a SIM card). Ask the agent to add one, then build the app.");
+    ?? (project.wifi
+      ? "This project joins Wi-Fi but doesn't serve a web page or use an internet service yet. Ask the agent to add a web page to control it, then build the app."
+      : "Apps are for projects a phone can talk to: a web page on Wi-Fi, Bluetooth (the ESP32's own, or a module like the HC-05 or HM-10), or an internet service (also over a SIM card). Ask the agent to add one, then build the app.");
 
   const field = "w-full bg-[var(--bg-root)] border border-[var(--border-main)] rounded-lg px-3 py-2 text-sm text-[var(--text-main)] focus:outline-none focus:border-[var(--accent-primary)]";
   const label = "block text-[11px] font-semibold text-[var(--text-muted)] mb-1";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" role="dialog" aria-modal="true" aria-labelledby="build-app-title">
-      <div data-build-app={nothing ? "none" : delivery} className="w-full max-w-lg bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl shadow-2xl overflow-hidden max-h-[92vh] flex flex-col">
+      <div data-build-app={nothing ? "none" : delivery === "board" ? "board" : "package"} data-build-app-kind={packageKind ?? undefined} className="w-full max-w-lg bg-[var(--bg-panel)] border border-[var(--border-main)] rounded-xl shadow-2xl overflow-hidden max-h-[92vh] flex flex-col">
         <div className="flex items-center justify-between px-5 py-3 border-b border-[var(--border-main)] shrink-0 gap-2">
           <h2 id="build-app-title" className="font-display font-bold text-sm flex items-center gap-2 text-[var(--text-main)] min-w-0">
             <Smartphone size={15} className="text-[var(--accent-secondary)] shrink-0" />
@@ -151,7 +165,7 @@ export default function BuildAppModal({ onClose, code, onCodeChange, projectName
           {boardDone ? (
             <BoardDone removed={boardDone.removed} onUndo={() => { onCodeChange(boardDone.before); setBoardDone(null); }} onClose={close} />
           ) : pkg ? (
-            <PackageDone pkg={pkg} kind={packageKind!} onDownload={() => download(pkg.zip, pkg.fileName)} onClose={close} />
+            <PackageDone pkg={pkg} kind={pkg.kind} onDownload={() => download(pkg.zip, pkg.fileName)} onClose={close} />
           ) : nothing ? (
             <div data-build-app-why className="text-xs text-[var(--text-muted)] leading-relaxed border border-dashed border-[var(--border-main)] rounded-lg px-4 py-5">
               <p className="text-[var(--text-main)] font-medium mb-1">This project can't be an app yet.</p>
@@ -210,11 +224,11 @@ export default function BuildAppModal({ onClose, code, onCodeChange, projectName
                 </div>
               </div>
 
-              {canBoard && packageKind && (
+              {deliveries.length > 1 && (
                 <div>
                   <span className={label}>How phones get it</span>
                   <div className="grid grid-cols-2 gap-2">
-                    {([["board", "From the board", Wifi], ["package", packageKind === "bluetooth" ? "Bluetooth app" : "Internet app", packageKind === "bluetooth" ? Bluetooth : Globe]] as const).map(([id, title, Icon]) => (
+                    {deliveries.map((id) => [id, ...DELIVERY_LABELS[id]] as const).map(([id, title, Icon]) => (
                       <button key={id} type="button" onClick={() => setDelivery(id)} aria-pressed={delivery === id}
                         className={`text-left px-3 py-2 rounded-lg border transition flex items-center gap-2 ${delivery === id ? "border-[var(--accent-primary)] bg-[var(--accent-primary-soft)]" : "border-[var(--border-main)] hover:bg-[var(--bg-hover)]"}`}>
                         <Icon size={13} className="shrink-0 text-[var(--accent-secondary)]" />
@@ -225,7 +239,7 @@ export default function BuildAppModal({ onClose, code, onCodeChange, projectName
                 </div>
               )}
 
-              <DeliveryNote delivery={delivery} packageKind={packageKind} />
+              <DeliveryNote delivery={delivery} />
               {!canBoard && project.boardProblem && (
                 <p className="text-[11px] text-[var(--text-muted)] leading-relaxed">The board&rsquo;s own page can&rsquo;t be made an app: {project.boardProblem}</p>
               )}
@@ -253,7 +267,7 @@ export default function BuildAppModal({ onClose, code, onCodeChange, projectName
                   </button>
                 )}
               </div>
-              {delivery === "package" && !signedIn && <p className="text-[11px] text-[var(--text-muted)]">Sign in to build the app package.</p>}
+              {packageKind && !signedIn && <p className="text-[11px] text-[var(--text-muted)]">Sign in to build the app package.</p>}
             </>
           )}
         </div>
@@ -262,12 +276,14 @@ export default function BuildAppModal({ onClose, code, onCodeChange, projectName
   );
 }
 
-function DeliveryNote({ delivery, packageKind }: { delivery: Delivery; packageKind: "bluetooth" | "internet" | null }) {
+function DeliveryNote({ delivery }: { delivery: Delivery }) {
   const text = delivery === "board"
     ? <>Adds the app&rsquo;s name and icon to your sketch: one <code>#include</code>, one line in <code>setup()</code> and a few tags in the page. After you flash it, open the board&rsquo;s page on the phone and add it to the home screen. On iPhone it opens full screen like an app; on Android and computers it&rsquo;s a home-screen icon that opens in the browser, because a board&rsquo;s address can&rsquo;t be secure (https).</>
-    : packageKind === "bluetooth"
-      ? <>The agent writes the app&rsquo;s page for this project, using your AI allowance, and you download it as a .zip to put on any free https site. It talks to the board over Bluetooth in Chrome and Edge on Android, Windows, Mac and Chromebooks. iPhone and iPad browsers can&rsquo;t use Bluetooth.</>
-      : <>The agent writes the app&rsquo;s page for this project, using your AI allowance, and you download it as a .zip to put on any free https site. It installs on Android, iPhone and computers, and talks to the same internet service as your board. No password or key from your sketch is put in it.</>;
+    : delivery === "bluetooth"
+      ? <>The agent writes the app&rsquo;s page for this project, using your AI allowance, and you download it as a .zip to put on any free https site. It talks to the board over Bluetooth Low Energy in Chrome on Android, and in Chrome or Edge on Windows, Mac and Chromebooks. iPhone and iPad browsers can&rsquo;t use Bluetooth.</>
+      : delivery === "classic"
+        ? <>The agent writes the app&rsquo;s page for this project, using your AI allowance, and you download it as a .zip to put on any free https site. It talks to the board over Classic Bluetooth in Chrome on Android, and in Chrome or Edge on computers, once the board is paired in the Bluetooth settings. iPhone and iPad can&rsquo;t connect to Classic Bluetooth.</>
+        : <>The agent writes the app&rsquo;s page for this project, using your AI allowance, and you download it as a .zip to put on any free https site. It installs on Android, iPhone and computers, and talks to the same internet service as your board. No password or key from your sketch is put in it.</>;
   return (
     <p data-build-app-note className="text-[11px] text-[var(--text-muted)] leading-relaxed flex items-start gap-1.5">
       <Info size={12} className="mt-0.5 shrink-0" />
@@ -304,7 +320,7 @@ function BoardDone({ removed, onUndo, onClose }: { removed: boolean; onUndo: () 
   );
 }
 
-function PackageDone({ pkg, kind, onDownload, onClose }: { pkg: { fileName: string; page: string; notes: string }; kind: "bluetooth" | "internet"; onDownload: () => void; onClose: () => void }) {
+function PackageDone({ pkg, kind, onDownload, onClose }: { pkg: { fileName: string; page: string; notes: string }; kind: PackageKind; onDownload: () => void; onClose: () => void }) {
   return (
     <div data-build-app-done="package" className="space-y-3">
       <p className="text-sm font-semibold flex items-center gap-2"><Check size={15} className="text-green-400" /> Your app is ready: {pkg.fileName}</p>
@@ -321,7 +337,8 @@ function PackageDone({ pkg, kind, onDownload, onClose }: { pkg: { fileName: stri
       <ol className="text-xs text-[var(--text-muted)] leading-relaxed list-decimal pl-5 space-y-1.5">
         <li>Unzip it. Put the folder online for free: drag it onto <span className="font-mono">app.netlify.com/drop</span>, or upload its files to a GitHub repository with Pages turned on.</li>
         <li>Open the https link on the phone or computer, then install it: Android (Chrome) menu, Install app; iPhone (Safari) Share, Add to Home Screen; computer, the install icon in the address bar.</li>
-        {kind === "bluetooth" && <li>Bluetooth works in Chrome and Edge on Android, Windows, Mac and Chromebooks, not in iPhone or iPad browsers.</li>}
+        {kind === "bluetooth" && <li>Bluetooth works in Chrome on Android, and in Chrome or Edge on Windows, Mac and Chromebooks, not in iPhone or iPad browsers.</li>}
+        {kind === "classic" && <li>Pair the board in the phone&rsquo;s or computer&rsquo;s Bluetooth settings first (a PIN, if asked, is usually 1234 or 0000), then tap Connect in the app. It works in Chrome on Android, and in Chrome or Edge on computers, not on iPhone or iPad.</li>}
       </ol>
       <p className="text-[11px] text-[var(--text-subtle)]">The same steps are in README.txt inside the .zip.</p>
       <div className="flex gap-2 pt-1">

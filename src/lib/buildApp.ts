@@ -159,9 +159,12 @@ export interface AppProject {
   boardProblem: string | null;
   /** The sketch holds a web page. */
   hasPage: boolean;
-  /** Bluetooth Low Energy, which a browser can talk to (not on iPhone). */
+  /** Bluetooth Low Energy (the ESP32's own, or an HM-10-style module), which
+   *  Chrome talks to with Web Bluetooth: not on iPhone. */
   ble: boolean;
-  /** Classic Bluetooth (BluetoothSerial), which no browser can talk to. */
+  /** Classic Bluetooth serial (the ESP32's BluetoothSerial, or an HC-05/HC-06
+   *  module), which Chrome on Android and computers talks to with Web Serial
+   *  once the board is paired: not on iPhone. */
   classicBluetooth: boolean;
   /** Joins Wi-Fi. */
   wifi: boolean;
@@ -174,6 +177,14 @@ export interface AppProject {
 }
 
 const BLE_HEADERS = ["BLEDevice", "BLEServer", "BLEUtils", "NimBLEDevice", "ArduinoBLE"];
+/**
+ * A Bluetooth module on a serial port says nothing in the code itself, so it
+ * is known by its name (in a comment or anywhere) or by a serial port named
+ * for it: "SoftwareSerial BTSerial(10, 11);" then "BTSerial.begin(9600);".
+ */
+const CLASSIC_MODULE = /\b(?:HC-?0?[56]|JDY-?3[013])\b/i;
+const BLE_MODULE = /\b(?:HM-?1[09]|AT-?09|JDY-?(?:08|10|23))\b/i;
+const BT_SERIAL_PORT = /\b(?:bt|bt_?serial|bt_?module|bluetooth\w*|hc_?0?[56]\w*)\s*\.\s*(?:begin|read|readString|readStringUntil|write|print|println|available)\s*\(/i;
 const CELLULAR = /^(TinyGsm\w*|TinyGSM\w*|SIM\d{3,4}\w*|Sim\d{3,4}\w*|Adafruit_FONA|MKRGSM|GSM)$/;
 const CLOUD_HEADERS = [
   "HTTPClient", "PubSubClient", "WiFiClientSecure", "ArduinoMqttClient", "MQTT", "AsyncMqttClient",
@@ -189,8 +200,10 @@ export function inspectProject(code: string): AppProject {
   const has = (names: string[]) => names.some((n) => headers.includes(n));
   const html = extractHtml(code);
   const hasPage = html !== null;
-  const ble = has(BLE_HEADERS);
-  const classicBluetooth = headers.includes("BluetoothSerial");
+  const bleModule = BLE_MODULE.test(code);
+  const ble = has(BLE_HEADERS) || bleModule;
+  const classicBluetooth = headers.includes("BluetoothSerial") || CLASSIC_MODULE.test(code) ||
+    (!bleModule && !has(BLE_HEADERS) && BT_SERIAL_PORT.test(s.codeOnly));
   const cellular = headers.some((h) => CELLULAR.test(h));
   const cloud = has(CLOUD_HEADERS);
   const wifi = headers.includes("WiFi") || has(["WebServer", "ESPAsyncWebServer", "WiFiManager"]);

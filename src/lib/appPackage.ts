@@ -11,6 +11,12 @@
  */
 import type { AppSettings } from "./buildApp";
 
+/**
+ * How the app reaches the board: Bluetooth Low Energy (Web Bluetooth),
+ * Classic Bluetooth serial (Web Serial, to a paired board) or the internet.
+ */
+export type PackageKind = "bluetooth" | "classic" | "internet";
+
 export interface PackageFile {
   name: string;
   data: Uint8Array;
@@ -131,7 +137,7 @@ self.addEventListener("fetch", (event) => {
 `;
 }
 
-export function appReadme(settings: AppSettings, kind: "bluetooth" | "internet", notes: string): string {
+export function appReadme(settings: AppSettings, kind: PackageKind, notes: string): string {
   const lines = [
     `${settings.name}`,
     `${"=".repeat(Array.from(settings.name).length)}`,
@@ -156,9 +162,22 @@ export function appReadme(settings: AppSettings, kind: "bluetooth" | "internet",
     lines.push(
       `Bluetooth`,
       `   The app talks to your board over Bluetooth Low Energy. This works in`,
-      `   Chrome and Edge on Android, Windows, Mac, Linux and Chromebooks.`,
-      `   iPhone and iPad browsers can't use Bluetooth, so the app can't`,
-      `   reach the board from them.`,
+      `   Chrome on Android, and in Chrome or Edge on Windows, Mac, Linux and`,
+      `   Chromebooks. iPhone and iPad browsers can't use Bluetooth, so the app`,
+      `   can't reach the board from them.`,
+      ``,
+    );
+  } else if (kind === "classic") {
+    lines.push(
+      `Bluetooth`,
+      `   The app talks to your board over Classic Bluetooth (like an HC-05 or`,
+      `   HC-06 module, or an ESP32's Bluetooth serial).`,
+      `   - First pair the board in the phone's or computer's Bluetooth`,
+      `     settings. If it asks for a PIN, it is usually 1234 or 0000.`,
+      `   - Then tap Connect in the app and pick the board from the list.`,
+      `   This works in Chrome on Android, and in Chrome or Edge on Windows,`,
+      `   Mac, Linux and Chromebooks. iPhone and iPad can't connect to Classic`,
+      `   Bluetooth at all, so the app can't reach the board from them.`,
       ``,
     );
   } else {
@@ -257,7 +276,7 @@ export function appPackageFiles(opts: {
   html: string;
   notes: string;
   settings: AppSettings;
-  kind: "bluetooth" | "internet";
+  kind: PackageKind;
   icon192: Uint8Array;
   icon512: Uint8Array;
   version: string;

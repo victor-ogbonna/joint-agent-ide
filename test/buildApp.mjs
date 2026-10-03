@@ -244,7 +244,20 @@ console.log("Bluetooth, mobile data and cloud projects");
   const nimble = inspectProject(`#include <NimBLEDevice.h>\nvoid setup(){}\nvoid loop(){}`);
   check(nimble.ble, "NimBLE");
   const classic = inspectProject(`#include "BluetoothSerial.h"\nBluetoothSerial SerialBT;\nvoid setup(){}\nvoid loop(){}`);
-  check(classic.classicBluetooth && !classic.ble, "Classic Bluetooth");
+  check(classic.classicBluetooth && !classic.ble, "Classic Bluetooth (ESP32 BluetoothSerial)");
+  const hc05 = inspectProject(`#include <SoftwareSerial.h>
+SoftwareSerial BTSerial(10, 11); // RX | TX
+void setup() { BTSerial.begin(9600); pinMode(13, OUTPUT); }
+void loop() { if (BTSerial.available()) { char c = BTSerial.read(); digitalWrite(13, c == '1'); } }`);
+  check(hc05.classicBluetooth && !hc05.ble && !hc05.wifi, "an HC-05 on an Uno, known by its serial port's name");
+  const named = inspectProject(`// Bluetooth lamp with an HC-06 on Serial1 (Mega)\nvoid setup() { Serial1.begin(9600); }\nvoid loop() {}`);
+  check(named.classicBluetooth, "an HC-06 known by name in a comment");
+  const hm10 = inspectProject(`#include <SoftwareSerial.h>\n// HM-10 BLE module\nSoftwareSerial bt(2, 3);\nvoid setup() { bt.begin(9600); }\nvoid loop() {}`);
+  check(hm10.ble && !hm10.classicBluetooth, "an HM-10 is Bluetooth Low Energy, not Classic");
+  const button = inspectProject(`#include <Bounce2.h>\nBounce btn;\nvoid setup() { btn.attach(2); }\nvoid loop() { btn.update(); if (btn.read()) {} }`);
+  check(!button.classicBluetooth && !button.ble, "a button called btn isn't Bluetooth");
+  const sr04 = inspectProject(`// HC-SR04 distance sensor\nvoid setup() { Serial.begin(9600); }\nvoid loop() {}`);
+  check(!sr04.classicBluetooth, "an HC-SR04 sensor isn't an HC-05");
   const gsm = inspectProject(`#define TINY_GSM_MODEM_SIM800\n#include <TinyGsmClient.h>\n#include <PubSubClient.h>\nvoid setup(){}\nvoid loop(){}`);
   check(gsm.cellular && gsm.cloud, "SIM module with MQTT");
   const cloud = inspectProject(`#include <WiFi.h>\n#include <HTTPClient.h>\nvoid setup(){}\nvoid loop(){}`);
@@ -321,6 +334,12 @@ console.log("The app package");
   check(same && at === cdAt, "zip: every file stored whole, with its CRC");
   const readme = new TextDecoder().decode(files[5].data);
   check(/Netlify Drop/.test(readme) && /iPhone/.test(readme) && /typed into the app's settings/.test(readme), "README: how to put it online and install it");
+  const { appReadme } = await import("../src/lib/appPackage.ts");
+  const classicReadme = appReadme(settings, "classic", "");
+  check(/pair the board/i.test(classicReadme) && /1234 or 0000/.test(classicReadme) && /iPhone and iPad can't connect to Classic/.test(classicReadme) && /Chrome on Android/.test(classicReadme),
+    "README for Classic Bluetooth: pair first, where it works, not iPhone");
+  const bleReadme = appReadme(settings, "bluetooth", "");
+  check(/Bluetooth Low Energy/.test(bleReadme) && !/Edge on Android/.test(bleReadme), "README for BLE: Chrome on Android (not Edge)");
 }
 
 if (bad) {
