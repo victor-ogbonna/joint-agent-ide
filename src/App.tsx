@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, Suspense } from "react";
-import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass, Share2, Users} from "lucide-react";
+import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass, Share2, Users, Smartphone} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import {
@@ -22,6 +22,7 @@ import WelcomeModal from "./components/WelcomeModal";
 import FeedbackWidget from "./components/FeedbackWidget";
 import GithubPanel from "./components/GithubPanel";
 import WebPreviewPanel from "./components/WebPreviewPanel";
+import BuildAppModal from "./components/BuildAppModal";
 import PlansModal, { type FirstMonthOffer, type PlanPriceView, type BillingPeriod } from "./components/PlansModal";
 import { storedRef, clearStoredRef } from "./lib/referral";
 import { loadPaystack } from "./lib/paystackScript";
@@ -820,6 +821,7 @@ export default function App() {
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [githubOpen, setGithubOpen] = useState(false);
   const [webPreviewOpen, setWebPreviewOpen] = useState(false);
+  const [buildAppOpen, setBuildAppOpen] = useState(false);
   /** The monitor was running when the board went away, so bring it back when
    *  the board returns. Unplugging previously ended the session silently and
    *  left no way to resume short of reloading. */
@@ -4058,6 +4060,9 @@ export default function App() {
                 <button onClick={() => setWebPreviewOpen(true)} className="w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]">
                   <Globe size={13} /> Web Preview
                 </button>
+                <button onClick={() => setBuildAppOpen(true)} className="w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]">
+                  <Smartphone size={13} /> Build App (PWA)
+                </button>
                 <button onClick={() => { setCompactDock(false); setIsSerialMonitorOpen(!isSerialMonitorOpen); if (isNarrow) { setMobilePane("editor"); if (!isSerialMonitorOpen) setMobileDockTab("serial"); } }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isSerialMonitorOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
                   <Monitor size={13} /> Serial Monitor
                 </button>
@@ -4911,6 +4916,18 @@ export default function App() {
           onClose={() => setWebPreviewOpen(false)}
           code={code}
           lines={terminalLines.map((l) => l.text)}
+        />
+      )}
+
+      {buildAppOpen && (
+        <BuildAppModal
+          onClose={() => setBuildAppOpen(false)}
+          code={code}
+          onCodeChange={setCode}
+          projectName={currentProjectName}
+          description={description}
+          signedIn={!!user}
+          onQuotaBlocked={setQuotaBlockInfo}
         />
       )}
 

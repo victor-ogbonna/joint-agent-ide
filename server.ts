@@ -32,6 +32,8 @@ import { canUseCode, firstMonthOfferUntil, firstMonthOfferOpensAt } from './serv
 import { registerGithubRoutes } from './server/github';
 import { registerFirebaseAuthProxy } from './server/firebaseAuthProxy';
 import { detectLibDeps, isSafeLibDep } from './server/libraryDeps';
+import { addAppHelper } from './server/appSupport';
+import { hideSecrets, HIDDEN } from './server/hideSecrets';
 import { registerLibraryRoutes, prepareLibraries, mergeLibDeps, missingLibraryHint, libraryNoteFor, NO_LIBRARIES } from './server/libraries';
 import { loadBoardCatalog, getBoardCatalog, getBoardById, boardFamily, resolveBoard, describeBoardForPrompt, BoardInfo } from './server/boards';
 import { streamChat, completeChat, isDeepSeekConfigured, DEEPSEEK_MODEL, ChatMessage, ToolSpec, modelFor, AiTimeoutError, AiServiceError } from './server/deepseek';
@@ -528,6 +530,12 @@ function recentSerialLines(raw: unknown): string {
   return text;
 }
 
+/**
+ * A sketch made a phone app with "Build App (PWA)" (src/lib/buildApp.ts)
+ * has three things the agent must carry over whenever it rewrites the code.
+ */
+const PHONE_APP_RULE = `PHONE APP: a sketch that includes <JointAgentApp.h> or <JointAgentAppAsync.h> was made a phone app with the "Build App (PWA)" button. Whenever you rewrite such a sketch, keep that #include, the JointAgentApp::serve(...) line in setup() and the tags between the two "Joint-Agent app" HTML comments in the page (and any <head> around them) exactly as they are. Never add them to a sketch yourself: when someone asks for a phone app, tell them to use "Build App (PWA)" under Web Preview in the sidebar.`;
+
 // The agent's system instruction for one board: `mcuDescription` is that
 // board's real specs, and mcuPowerPin is derived from its family.
 function buildChatSystemInstruction(mcuDescription: string, mcuPowerPin: string, chatMode: string): string {
@@ -568,6 +576,8 @@ Schematic wiring rules (CRITICAL for a correct, renderable circuit):
 CRITICAL: The code is compiled as a plain C++ file (src/main.cpp), not an Arduino IDE sketch, so you MUST ensure that every generated C++ code includes '#include <Arduino.h>' at the very top so that the code can be properly compiled and flashed.
 
 WIRING, WHEREVER YOU STATE IT (the project's description, or a chat reply): always a bullet list, one connection per line ("- MCU pin D4 -> resistor pin1", "- Resistor pin2 -> LED anode"), never a paragraph. It is read while someone's hands are on the actual wires; a sentence they have to re-read to find "D4" buried in it is the wrong shape for that.
+
+${PHONE_APP_RULE}
 
 CODE QUALITY (the code IS the deliverable — the chat reply is not):
 - Comment the code properly, every time. Explain WHY a line exists, not what it literally does, and name each pin's role where it is configured. Beginners read this code to learn; uncommented code fails them.
@@ -1097,6 +1107,91 @@ All four top-level keys are required. Do not wrap the JSON in markdown fences.`,
   }
 });
 
+// "Build App (PWA)" for a Bluetooth or internet-connected project: the
+// agent writes the app's page; the app makes it installable and packs it
+// (src/lib/appPackage.ts). Counted against the AI allowance like a reply.
+app.post("/api/ai/app-page", requireAuthAndQuota, async (req, res) => {
+  holdOpen(res);
+  const clientGone = new AbortController();
+  res.on("close", () => { if (!res.writableEnded) clientGone.abort(); });
+  const body = req.body || {};
+  const code = typeof body.code === "string" ? body.code.slice(0, 60000).trim() : "";
+  const description = typeof body.description === "string" ? body.description.slice(0, 4000).trim() : "";
+  const name = typeof body.name === "string" ? body.name.replace(/[\u0000-\u001f]/g, " ").slice(0, 30).trim() : "";
+  const themeColor = typeof body.themeColor === "string" && /^#[0-9a-fA-F]{6}$/.test(body.themeColor) ? body.themeColor : "#0b0d12";
+  const kind = body.kind === "bluetooth" ? "bluetooth" : body.kind === "internet" ? "internet" : null;
+  if (!code) return res.status(400).json({ error: "There's no code in this project yet." });
+  if (!name) return res.status(400).json({ error: "Give the app a name." });
+  if (!kind) return res.status(400).json({ error: "This project doesn't use Bluetooth or the internet." });
+  if (!isDeepSeekConfigured()) {
+    return res.status(503).json({ error: "The AI service isn't set up on this server.", code: "AI_UNAVAILABLE" });
+  }
+
+  const how = kind === "bluetooth"
+    ? `HOW THE APP REACHES THE BOARD: Bluetooth Low Energy, with the Web Bluetooth API.
+- Use exactly the service and characteristic UUIDs in the sketch, in lower case. Ask for the device with navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE_UUID] }] }) (add the sketch's device name as a namePrefix filter too when it sets one), only from a button the person taps.
+- Read values the board sends (with notifications when the characteristic offers NOTIFY), and write what the board expects, in the format the sketch parses.
+- If navigator.bluetooth is missing, show plainly: "This browser can't use Bluetooth. Open the app in Chrome on Android, Windows, Mac or a Chromebook. iPhone and iPad browsers can't use Bluetooth."
+- Show the connection state, and a Reconnect button after a disconnect.`
+    : `HOW THE APP REACHES THE BOARD: through the same internet service the sketch uses (the same URLs, MQTT topics, database paths, channel IDs or bot), never the board's local address.
+- A browser can only use HTTPS requests (fetch) and secure WebSockets (wss://). For MQTT, connect to the broker's secure WebSocket address with mqtt.js, loaded with <script src="https://unpkg.com/mqtt@5/dist/mqtt.min.js"></script>, the only external file allowed.
+- If the service as the sketch uses it can't be reached from a browser (plain MQTT on port 1883, a server on the local network, a phone number for SMS), build what can work and say exactly what must change in "notes".`;
+
+  const system = `You write the phone app for a microcontroller project: ONE complete, self-contained HTML page.
+It will be put on an https website and installed on phones and computers as an app. The app's manifest, icon, offline support and install tags are added for you afterwards: don't add any.
+
+${how}
+
+SECRETS: values shown as ${HIDDEN} in the sketch are passwords, keys and tokens, hidden on purpose. Never put any secret in the page: it is public. If the app needs one, give it a Settings panel where the person types it once, kept in localStorage on that device, and say so in the page.
+
+THE PAGE:
+- Its <title> is exactly the app name.
+- Made for a phone first, fine on a computer: large tap targets, readable text, light and dark (prefers-color-scheme), the app colour for accents.
+- All CSS and JavaScript inline. No other external files, fonts, images or frameworks.
+- Plain, friendly words for people who aren't engineers. Show clearly when something fails and what to do.
+- Controls and readings that match what this project actually does.
+
+Never name the underlying build system or toolchain. Reply with one JSON object and nothing else:
+{"html": "<!DOCTYPE html>... the whole page ...", "notes": "one or two short sentences the person needs to know (what to set up first, what can't work and why), or an empty string"}`;
+
+  const user = `App name: ${name}
+App colour: ${themeColor}
+${description ? `\nWhat the project does:\n${description}\n` : ""}
+The sketch (main.cpp):
+\`\`\`cpp
+${hideSecrets(code)}
+\`\`\``;
+
+  try {
+    const response = await completeChat(
+      [{ role: "system", content: system }, { role: "user", content: user }],
+      { jsonMode: true, signal: clientGone.signal },
+      modelFor(req.quota!.tier === "free"),
+    );
+    await incrementTokenUsage(req.uid!, req.quota, response.outputTokens);
+    countStat("ai_generate");
+    countStat(req.quota?.tier === "free" ? "ai_free" : "ai_pro");
+    countStat("ai_tokens", response.outputTokens);
+    countForUser(req.uid, "aiMessagesTotal");
+
+    let data: any = null;
+    try { data = JSON.parse(String(response.text || "").trim()); } catch { /* checked below */ }
+    const html = typeof data?.html === "string" ? data.html : "";
+    if (!/<html[\s>]/i.test(html) || !/<\/html>/i.test(html) || html.length > 400_000) {
+      return res.status(502).json({ error: "The agent's app page didn't come through complete. Try again.", code: "AI_BAD_PAGE" });
+    }
+    const notes = typeof data?.notes === "string" ? data.notes.slice(0, 800).trim() : "";
+    return res.json({ html, notes });
+  } catch (error: any) {
+    if (clientGone.signal.aborted) return;
+    if (error instanceof AiTimeoutError) {
+      return res.status(503).json({ error: "The AI service is very busy right now. Try again in a minute.", code: "AI_BUSY" });
+    }
+    console.error("App page error:", error?.message || error);
+    return res.status(502).json({ error: "The app page couldn't be written right now. Try again in a minute.", code: "AI_FAILED" });
+  }
+});
+
 // Debug code
 app.post("/api/ai/debug", requireAuthAndQuota, async (req, res) => {
   // Kept alive while the AI writes the fix (server/holdOpen.ts); stopped if the person leaves.
@@ -1119,6 +1214,8 @@ Never name the underlying build system, its config files or its directories, in 
 Return your response as a JSON object containing:
 - "code": The corrected C++ code.
 - "explanation": Short, scannable bullet points explaining the bug, why it occurred, and how it was resolved.
+
+${PHONE_APP_RULE}
 
 ${libraryNoteFor(req.uid)}
 If the error is a missing header ("No such file or directory") for a library that isn't well known, fix the include only if it is misspelled. Otherwise keep the #include and the code that uses it, return the code unchanged, and say in the explanation that the library needs adding under Libraries.`;
@@ -1556,6 +1653,9 @@ app.post("/api/compile", requireFirebaseAuth, async (req, res) => {
     finalCode = "#include <Arduino.h>\n" + finalCode;
   }
   fs.writeFileSync(correctSketchPath, finalCode);
+  // A sketch made into a phone app ("Build App (PWA)") gets its helper's
+  // headers beside it (server/appSupport.ts); any other sketch, nothing.
+  addAppHelper(finalCode, tempDir);
 
   let platformioIni = `
 [env:${board.id}]
