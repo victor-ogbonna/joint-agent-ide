@@ -2,14 +2,14 @@
 // server/deepseek.ts for display only: the server enforces every limit, and
 // test/tiers.mjs fails if the two ever disagree.
 export const WINDOW_HOURS = 5;
-export const FREE_WINDOW_TOKENS = 5000;
-export const FREE_DAILY_TOKENS = 10000;
-export const PRO_WINDOW_TOKENS = 50000;
-export const PAID_TOKEN_CAP = 600000;
-export const FREE_MAX_REPLY_TOKENS = 5000;
+export const FREE_WINDOW_TOKENS = 10000;
+export const FREE_DAILY_TOKENS = 20000;
+export const PRO_WINDOW_TOKENS = 250000;
+export const PAID_TOKEN_CAP = 3000000;
+export const FREE_MAX_REPLY_TOKENS = 10000;
 export const PRO_MAX_REPLY_TOKENS = 40000;
-export const FREE_WINDOW_COMPILES = 8;
-export const FREE_DAILY_COMPILES = 25;
+export const FREE_WINDOW_COMPILES = 10;
+export const FREE_DAILY_COMPILES = 30;
 export const PRO_PRICE = "$7/month";
 /**
  * PRO a month in cents and in kobo: the $7 of PRO_PRICE, which Paystack

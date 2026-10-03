@@ -1,5 +1,7 @@
 /**
- * Installing Joint-Agent as an app (Chrome's "Install app").
+ * Installing Joint-Agent as an app (Chrome's "Install app"), and, on an
+ * iPhone or iPad — which has no install prompt at all, by Apple's choice —
+ * the Safari steps that do the same thing.
  *
  * Opened from its home-screen icon, the app runs fullscreen by itself
  * (display "fullscreen" in public/manifest.webmanifest). Chrome shows no "To
@@ -11,8 +13,10 @@
  *
  * Chrome announces that the site can be installed with beforeinstallprompt,
  * often before the workspace has mounted (on the home page, or during the
- * launch screen). So the event is caught here at startup and kept until the
- * profile menu's "Install app" uses it.
+ * launch screen). Caught here at startup and kept until the profile menu's
+ * "Install app" uses it — and left to Chrome as well, so its own install
+ * affordance (the omnibox icon on desktop; Android's own banner, when
+ * Chrome judges the moment right) shows too. Either route ends the same way.
  */
 
 interface BeforeInstallPromptEvent extends Event {
@@ -26,9 +30,10 @@ const notify = () => listeners.forEach((fn) => fn());
 
 export function startInstallSupport() {
   window.addEventListener("beforeinstallprompt", (e) => {
-    // Keeps Chrome's own install bar from sliding up over the workspace; the
-    // profile menu offers the same install instead.
-    e.preventDefault();
+    // Not prevented: Chrome's own install affordance shows as well as the
+    // profile menu's. (Chromium shows at most a small, dismissible one —
+    // never a full-screen takeover — so there's nothing to protect the
+    // workspace from here.)
     deferredPrompt = e as BeforeInstallPromptEvent;
     notify();
   });
@@ -48,8 +53,45 @@ export function startInstallSupport() {
   }
 }
 
+/**
+ * iPhone or iPad: Safari (and every other iOS browser, which must use
+ * Safari's engine) never fires beforeinstallprompt — Apple's own choice, not
+ * a bug here — so the only way to install is Share, then "Add to Home
+ * Screen", which the profile menu walks the person through instead.
+ *
+ * iPadOS reports itself as a Mac, so the touch-point check is what tells an
+ * iPad apart from a MacBook running Safari (which has no install step at
+ * all: Safari on macOS does not support installing web apps either).
+ */
+function isIOSDevice(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent;
+  return /iPad|iPhone|iPod/.test(ua)
+    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+/** Already running from the home screen: nothing to offer. */
+function isStandalone(): boolean {
+  if (typeof window === "undefined") return false;
+  return Boolean((navigator as any).standalone) || window.matchMedia?.("(display-mode: standalone)").matches
+    || window.matchMedia?.("(display-mode: fullscreen)").matches;
+}
+
+/** Chrome's own install prompt is ready to use. */
 export function canInstallApp() {
   return deferredPrompt !== null;
+}
+
+/**
+ * Whether the profile menu's "Install app" has anything to offer: Chrome's
+ * prompt, or — on an iPhone or iPad not already installed — the Safari
+ * steps. Null everywhere else (a desktop browser without the Chrome prompt,
+ * or an app already installed).
+ */
+export function installKind(): "prompt" | "ios" | null {
+  if (canInstallApp()) return "prompt";
+  if (isIOSDevice() && !isStandalone()) return "ios";
+  return null;
 }
 
 export function onInstallAvailabilityChange(fn: () => void) {
@@ -78,7 +120,7 @@ export async function installApp() {
 export function isInstalledFullscreenApp() {
   const doc: any = document;
   return Boolean(
-    window.matchMedia?.("(display-mode: fullscreen)").matches &&
-      !(doc.fullscreenElement || doc.webkitFullscreenElement),
+    window.matchMedia?.("(display-mode: fullscreen)").matches
+      && !(doc.fullscreenElement || doc.webkitFullscreenElement),
   );
 }

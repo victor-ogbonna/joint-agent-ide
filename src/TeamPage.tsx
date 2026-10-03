@@ -246,7 +246,7 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
     <section className={`${card} scroll-mt-4`} id="pay">
       <h2 className={heading}><CreditCard size={16} aria-hidden="true" /> {team.state === "unpaid" ? "Pay for the license" : "Renew"}</h2>
       <p className={`mt-1 ${small}`}>
-        {money.show(seatPrice)} a seat a month, paid ahead for a month, or for a year at 12 months for the price of 11. Nothing renews by itself: you renew here when it's due.
+        {money.show(seatPrice)} a seat a month, paid ahead for a month, or for a year at 20% off. Nothing renews by itself: you renew here when it's due.
         {team.state === "active" ? " Renewing now adds the time after the current end." : " It runs from the day you pay."}
         {" "}If it isn't renewed, everyone keeps PRO for 2 more days after a month, or 30 more days after a year.
       </p>
@@ -257,7 +257,7 @@ function PayCard({ team, call, reload, paymentsOn, prices }: { team: TeamView; c
           {(Object.keys(PERIOD_MONTHS) as TeamPeriod[]).map((p) => (
             <label key={p} className={`flex min-h-[44px] cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-[13px] ${period === p ? "border-[var(--accent-primary)] bg-[var(--accent-primary-soft)]" : "border-[var(--border-main)]"}`}>
               <input type="radio" name="period" value={p} checked={period === p} onChange={() => setPeriod(p)} className="accent-[var(--accent-primary)]" />
-              <span>{p === "year" ? <>1 year <span className="text-[var(--text-muted)]">(12 months for the price of 11)</span></> : "1 month"}</span>
+              <span>{p === "year" ? <>1 year <span className="text-[var(--text-muted)]">(20% off)</span></> : "1 month"}</span>
             </label>
           ))}
         </div>
@@ -325,7 +325,7 @@ function SavingsCard({ seats, seatPrice, currency, proMonthly }: { seats: number
       </p>
       <p className={`mt-1 ${small}`}>
         {seats} seats: {money(s.teamPays)} a month instead of {money(s.onTheirOwn)}. That's {money(s.saved)} saved every month.
-        {" "}Paying for a year at once is 12 months for the price of 11: one more month, {money(s.teamPays)}, saved.
+        {" "}Paying for a year at once is 20% off that: {money(Math.round((PERIOD_MONTHS.year.months - PERIOD_MONTHS.year.chargedMonths) * s.teamPays))} saved on top, every year.
       </p>
     </section>
   );
@@ -687,7 +687,7 @@ function NoTeam({ data, call, reload, joinFromLink, proMonthly, onJoined }: { da
         <h2 className={heading}><Users size={16} aria-hidden="true" /> Start a school or team license</h2>
         <p className={`mt-1 ${small}`}>
           PRO for everyone on it: {money.show(data.prices.seatPrice)} a seat a month, at least {data.prices.minSeats} seats.
-          Pay for a month, or for a year at 12 months for the price of 11. When a license ends, everyone keeps PRO for 2 more days after a month, or 30 more days after a year.
+          Pay for a month, or for a year at 20% off. When a license ends, everyone keeps PRO for 2 more days after a month, or 30 more days after a year.
         </p>
         <form
           className="mt-4 space-y-3"

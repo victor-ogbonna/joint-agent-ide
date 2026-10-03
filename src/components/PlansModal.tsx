@@ -132,7 +132,7 @@ export default function PlansModal({ onClose, onUpgrade, upgrading, prices = nul
                 </p>
               )}
               <p className="text-xs text-[var(--text-muted)] mt-1">
-                10× more AI every {WINDOW_HOURS} hours, full-size replies, auto-debug, Plan Mode, and unlimited compiles and projects.
+                {PRO_WINDOW_TOKENS / FREE_WINDOW_TOKENS}× more AI every {WINDOW_HOURS} hours, full-size replies, auto-debug, Plan Mode, and unlimited compiles and projects.
               </p>
             </div>
             <button

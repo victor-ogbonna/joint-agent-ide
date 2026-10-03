@@ -10,7 +10,7 @@ const DAY = 24 * 60 * 60 * 1000;
 export type LicenseState = "unpaid" | "active" | "grace" | "ended";
 export type TeamRole = "admin" | "member";
 export type TeamKind = "school" | "team";
-/** A month, or a year (12 months for the price of 11). */
+/** A month, or a year (20% off a month's rate, paid 12 months at once). */
 export type TeamPeriod = "month" | "year";
 
 /** What /api/quota/status says about the account's team. */
@@ -74,7 +74,8 @@ export function daysLeft(at: number, now = Date.now()): number {
 
 export const PERIOD_MONTHS: Record<TeamPeriod, { months: number; chargedMonths: number; label: string; short: string }> = {
   month: { months: 1, chargedMonths: 1, label: "1 month", short: "a month" },
-  year: { months: 12, chargedMonths: 11, label: "1 year", short: "a year" },
+  // 20% off the 12-month rate: 12 * 0.8 = 9.6 months charged.
+  year: { months: 12, chargedMonths: 9.6, label: "1 year", short: "a year" },
 };
 
 /**
@@ -85,7 +86,7 @@ export const PERIOD_MONTHS: Record<TeamPeriod, { months: number; chargedMonths: 
 export const TEAM_PRICES = { seatPrice: 664_300, currency: "NGN", minSeats: 5, maxSeats: 2000 };
 
 export function renewalPrice(seats: number, seatPrice: number, period: TeamPeriod): number {
-  return seats * seatPrice * PERIOD_MONTHS[period].chargedMonths;
+  return Math.round(seats * seatPrice * PERIOD_MONTHS[period].chargedMonths);
 }
 
 /** Extra seats for the days left of the paid period, as the server prices them. */

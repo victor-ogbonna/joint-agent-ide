@@ -5,8 +5,8 @@
  *   - A team pays per seat: SEAT_PRICES in its currency a member a month
  *     (new teams pay in naira) unless the admin page sets a special price
  *     for it, at least MIN_SEATS seats.
- *   - It pays ahead for a month, or a year (12 months for the price of
- *     11). No card is charged by itself: the team's admin renews by paying
+ *   - It pays ahead for a month, or a year (20% off a month's rate, paid
+ *     12 months at once). No card is charged by itself: the team's admin renews by paying
  *     again, or we record an invoice that was paid.
  *   - Every member has PRO while the license is paid, and for its grace
  *     days after it ends (GRACE_DAYS: 2 after a month, 30 after a year,
@@ -44,7 +44,8 @@ export type TeamPeriod = "month" | "year";
 
 export const PERIODS: Record<TeamPeriod, { months: number; chargedMonths: number; label: string }> = {
   month: { months: 1, chargedMonths: 1, label: "1 month" },
-  year: { months: 12, chargedMonths: 11, label: "1 year (12 months for the price of 11)" },
+  // 20% off the 12-month rate: 12 * 0.8 = 9.6 months charged.
+  year: { months: 12, chargedMonths: 9.6, label: "1 year (20% off)" },
 };
 
 export function isPeriod(v: unknown): v is TeamPeriod {
@@ -78,9 +79,12 @@ export function validSeats(raw: unknown, atLeast = MIN_SEATS): number | null {
   return n;
 }
 
-/** What paying ahead costs: seats × price × the months charged. */
+/**
+ * What paying ahead costs: seats × price × the months charged, to the
+ * smallest unit of the currency (a year's 9.6 months is not always exact).
+ */
 export function renewalPrice(seats: number, seatPrice: number, period: TeamPeriod): number {
-  return seats * seatPrice * PERIODS[period].chargedMonths;
+  return Math.round(seats * seatPrice * PERIODS[period].chargedMonths);
 }
 
 /**

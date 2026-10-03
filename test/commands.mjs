@@ -6,7 +6,7 @@
  * in their chat. The first-word-only check passed them because they begin
  * with "pwd" and "ls".
  */
-import { isWorkspaceCommand, isCommandAllowed } from "../server/commands.js";
+import { isWorkspaceCommand, isCommandAllowed, toWorkspaceCommand } from "../server/commands.js";
 
 const fromTheScreenshot = [
   'pwd && ls -la && echo "--- tree ---" && find . -maxdepth 3 -not -path "*/.pio/*" -not -path "*/.git/*" | head -50',
@@ -24,8 +24,16 @@ for (const cmd of fromTheScreenshot) {
 }
 
 console.log("  -- the workspace's own commands still work --");
-for (const cmd of ["help", "compile", "flash", "clear", "engine", "web3 status", "ret", "monitor", "Serial Monitor", "  Compile  "]) {
+for (const cmd of ["help", "compile", "flash", "clear", "engine", "web3 status", "ret", "monitor", "Serial Monitor", "serial log", "  Compile  "]) {
   check(isWorkspaceCommand(cmd), `agent may send: '${cmd.trim()}'`);
+}
+
+console.log("  -- reading the serial log is told apart from opening the monitor --");
+for (const cmd of ["serial log", "read the serial log", "check serial monitor output", "what has the serial monitor printed", "serial history"]) {
+  check(toWorkspaceCommand(cmd) === "serial log", `read intent: '${cmd}' -> serial log`, toWorkspaceCommand(cmd));
+}
+for (const cmd of ["monitor", "open the serial monitor", "activate serial monitor", "pio device monitor -b 9600"]) {
+  check(toWorkspaceCommand(cmd) === "monitor", `open intent: '${cmd}' -> monitor`, toWorkspaceCommand(cmd));
 }
 
 console.log("  -- the endpoint still allows real build commands --");

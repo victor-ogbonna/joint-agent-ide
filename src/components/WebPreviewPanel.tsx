@@ -41,6 +41,32 @@ export function extractHtml(code: string): string | null {
   return looksLikeHtml(joined) || /<\/html>/i.test(joined) ? joined : null;
 }
 
+/**
+ * The page a board serves usually isn't static: a value the board only
+ * knows at runtime is written into the HTML by a template token — most
+ * commonly `%LIKE_THIS%` (ESPAsyncWebServer's processor callback), or a
+ * printf-style conversion such as `%.1f` or `%d` (a value built with
+ * sprintf/snprintf before it's sent). Neither means anything until the
+ * board fills it in, so left as-is in a static preview they read as
+ * garbled text with no explanation. Rewritten here into a plain, named
+ * placeholder, so the preview reads as "this is live, not broken" rather
+ * than "something is wrong with this page".
+ */
+export function fillRuntimePlaceholders(html: string): string {
+  return html
+    // %.1f, %02d, %s, %x ... first: a single-letter name (%d%, %s%) would
+    // otherwise be read as a named token below, and "battery %d%%" is
+    // unambiguously sprintf, never a one-character placeholder name. No
+    // space in the flags: printf's own space-flag is real but, right after
+    // a percent sign, "50% full" is ordinary prose far more often than it's
+    // that flag — the one case this heuristic knowingly leaves alone.
+    .replace(/%[-+0#]*\d*(?:\.\d+)?[hlLqjzt]*[diouxXeEfFgGaAcs]/g, "⟨value⟩")
+    // %TEMPERATURE%, %humidity_pct% (ESPAsyncWebServer's processor) ...
+    .replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (_, name: string) => `⟨${name.toLowerCase().replace(/_/g, " ")}⟩`)
+    // %% is printf's own escape for a literal percent sign.
+    .replace(/%%/g, "%");
+}
+
 function detectAddresses(lines: string[]): string[] {
   const found: string[] = [];
   const push = (v: string) => { if (!found.includes(v)) found.push(v); };
@@ -61,6 +87,10 @@ function detectAddresses(lines: string[]): string[] {
 
 export default function WebPreviewPanel({ onClose, code, lines }: WebPreviewPanelProps) {
   const html = useMemo(() => extractHtml(code), [code]);
+  // What's actually rendered: the board's own fill-in-later tokens read as
+  // a named placeholder instead of raw, unexplained text. "Show the HTML"
+  // still shows the sketch exactly as it is.
+  const displayHtml = useMemo(() => (html === null ? null : fillRuntimePlaceholders(html)), [html]);
   const detected = useMemo(() => detectAddresses(lines), [lines]);
   const [width, setWidth] = useState<"phone" | "desktop">("phone");
   const [showSource, setShowSource] = useState(false);
@@ -121,7 +151,7 @@ export default function WebPreviewPanel({ onClose, code, lines }: WebPreviewPane
                   or the user's session. */}
               <iframe
                 title="Web preview"
-                srcDoc={html}
+                srcDoc={displayHtml ?? undefined}
                 sandbox="allow-scripts allow-forms"
                 className="bg-white rounded-lg border border-[var(--border-main)] w-full"
                 style={{ maxWidth: width === "phone" ? 390 : "100%", height: 460 }}
@@ -148,8 +178,9 @@ export default function WebPreviewPanel({ onClose, code, lines }: WebPreviewPane
           <p className="text-[10px] text-[var(--text-subtle)] leading-relaxed flex items-start gap-1.5">
             <Info size={11} className="mt-0.5 shrink-0" />
             <span>
-              This renders the HTML found in your sketch. Anything the page fetches from the board at
-              runtime won&rsquo;t respond until it is flashed and on your network.
+              This renders the HTML found in your sketch. A value shown as <code>⟨like this⟩</code> is filled
+              in by the board itself once it&rsquo;s running — it&rsquo;ll read correctly there. Anything the page
+              fetches from the board at runtime won&rsquo;t respond until it is flashed and on your network.
             </span>
           </p>
         </div>

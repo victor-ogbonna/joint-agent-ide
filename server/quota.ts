@@ -17,7 +17,7 @@ export const UNMETERED_STATUS = "unmetered";
  * the previous one closed, and refills in full when it ends.
  *
  * Free: FREE_WINDOW_TOKENS a window and at most FREE_DAILY_TOKENS a UTC day.
- * PRO: PRO_WINDOW_TOKENS a window (10x Free), and a subscriber at most
+ * PRO: PRO_WINDOW_TOKENS a window (25x Free), and a subscriber at most
  * PAID_TOKEN_CAP a billing cycle (reset by server/paystack.ts on each
  * successful charge). A granted PRO account has the window, not the cycle
  * cap: nothing would ever reset it. A team or school license's member
@@ -27,14 +27,14 @@ export const UNMETERED_STATUS = "unmetered";
  * Only what the model writes is counted, as before.
  */
 export const WINDOW_MS = 5 * 60 * 60 * 1000;
-export const FREE_WINDOW_TOKENS = 5000;
-export const FREE_DAILY_TOKENS = 10000;
-export const PRO_WINDOW_TOKENS = 50000;
-export const PAID_TOKEN_CAP = 600000;
+export const FREE_WINDOW_TOKENS = 10000;
+export const FREE_DAILY_TOKENS = 20000;
+export const PRO_WINDOW_TOKENS = 250000;
+export const PAID_TOKEN_CAP = 3000000;
 
 /** Free compiles. Only successful builds count: a failed one is handed back. */
-export const FREE_WINDOW_COMPILES = 8;
-export const FREE_DAILY_COMPILES = 25;
+export const FREE_WINDOW_COMPILES = 10;
+export const FREE_DAILY_COMPILES = 30;
 
 export type Tier = "unmetered" | "pro" | "free";
 
@@ -527,9 +527,10 @@ function pauseMessage(tier: Tier, a: Allowance, now = Date.now()): string {
   }
   const when = formatWait(a.resetAt, now);
   if (tier === "free") {
+    const more = `${PRO_WINDOW_TOKENS / FREE_WINDOW_TOKENS}x`;
     return a.reason === "day"
-      ? `You've used today's free AI tokens. They refill in ${when}. Get PRO for 10x more every 5 hours.`
-      : `You've used your free AI tokens for now. They refill in ${when}. Get PRO for 10x more every 5 hours.`;
+      ? `You've used today's free AI tokens. They refill in ${when}. Get PRO for ${more} more every 5 hours.`
+      : `You've used your free AI tokens for now. They refill in ${when}. Get PRO for ${more} more every 5 hours.`;
   }
   return `You've used this 5-hour window's AI tokens. They refill in ${when}.`;
 }

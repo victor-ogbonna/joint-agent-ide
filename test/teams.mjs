@@ -102,9 +102,9 @@ check(DEFAULT_SEAT_PRICE === 664300 && DEFAULT_TEAM_CURRENCY === "NGN" && MIN_SE
 check(Math.round(5 * 9300 / 7) * 100 === DEFAULT_SEAT_PRICE, "₦6,643 is $5 at ₦9,300 to $7 (PRO's own rate), to the naira");
 check(SEAT_PRICES.USD === 500 && normalSeatPrice("USD") === 500 && normalSeatPrice("GHS") === null && normalSeatPrice("toString") === null,
   "teams priced in dollars before keep $5; other currencies have no normal price");
-check(renewalPrice(5, 664300, "month") === 3321500 && renewalPrice(5, 664300, "year") === 36536500, "5 seats: ₦33,215 a month, ₦365,365 a year (12 months for 11)");
-check(Object.keys(PERIODS).join() === "month,year" && PERIODS.month.months === 1 && PERIODS.month.chargedMonths === 1 && PERIODS.year.months === 12 && PERIODS.year.chargedMonths === 11,
-  "a month, or a year charged as 11 months; no school term");
+check(renewalPrice(5, 664300, "month") === 3321500 && renewalPrice(5, 664300, "year") === 31886400, "5 seats: ₦33,215 a month, ₦318,864 a year (20% off)");
+check(Object.keys(PERIODS).join() === "month,year" && PERIODS.month.months === 1 && PERIODS.month.chargedMonths === 1 && PERIODS.year.months === 12 && PERIODS.year.chargedMonths === 9.6,
+  "a month, or a year charged as 9.6 months (20% off); no school term");
 check(isPeriod("month") && isPeriod("year") && !isPeriod("term") && !isPeriod(undefined), "a period is a month or a year");
 check(validSeats(5) === 5 && validSeats("30") === 30 && validSeats(4) === null && validSeats(MAX_SEATS + 1) === null && validSeats(5.5) === null && validSeats("x") === null,
   "seats: whole numbers from 5 to the most");
@@ -140,9 +140,9 @@ for (let seats = 5; seats <= 2000; seats++) for (const p of ["month", "year"]) {
   if (m.show(shownRenewalPrice(seats, 664300, p)) !== usd(shownRenewalPrice(seats, 500, p))) exact.push(`${seats}/${p}`);
 }
 check(m.seat === 500 && m.currency === "USD" && m.show(664300) === usd(500) && exact.length === 0,
-  "a team: $5 a seat, and every month or year total from 5 to 2,000 seats exactly $5 a seat (6 seats for a year: $330, not $330.01)", exact.slice(0, 5).join(" "));
-check(m.naira(shownRenewalPrice(6, 664300, "month")) === formatMoney(3985800, "NGN") && m.naira(shownRenewalPrice(6, 664300, "year")) === formatMoney(43843800, "NGN"),
-  "and what Paystack charges: ₦39,858 for 6 seats a month, ₦438,438 for a year");
+  "a team: $5 a seat, and every month or year total from 5 to 2,000 seats exactly $5 a seat (6 seats for a year: $288, not $288.01)", exact.slice(0, 5).join(" "));
+check(m.naira(shownRenewalPrice(6, 664300, "month")) === formatMoney(3985800, "NGN") && m.naira(shownRenewalPrice(6, 664300, "year")) === formatMoney(38263680, "NGN"),
+  "and what Paystack charges: ₦39,858 for 6 seats a month, ₦382,636.80 for a year");
 const extraNaira = shownAddSeatsPrice(2, 664300, NOW + 10 * DAY, NOW);
 check(m.show(extraNaira) === usd(Math.round((extraNaira * 500) / 664300)), "added seats for the days left: the naira price in proportion to the seat");
 const dollarTeam = teamMoney(500, "USD");
@@ -296,7 +296,7 @@ check(await throwsWith(() => quoteFor(db, "ben", { action: "renew", period: "mon
 check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "term" }, NOW), /a month or a year/), "a school term can't be bought (a page from before still open)");
 check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "week" }, NOW), /a month or a year/), "nor anything else");
 const yearQuote = await quoteFor(db, "ada", { action: "renew", period: "year", seats: 6 }, NOW);
-check(yearQuote.amount === 43843800 && yearQuote.currency === "NGN" && yearQuote.months === 12 && yearQuote.paidUntilAfter === addMonths(NOW, 12), "a year for 6 seats: ₦438,438 (11 months), paid for 12 months");
+check(yearQuote.amount === 38263680 && yearQuote.currency === "NGN" && yearQuote.months === 12 && yearQuote.paidUntilAfter === addMonths(NOW, 12), "a year for 6 seats: ₦382,636.80 (20% off), paid for 12 months");
 check(await throwsWith(() => quoteFor(db, "ada", { action: "renew", period: "month", seats: 2 }, NOW), /5 to 2000 seats/), "never fewer than 5 seats");
 check(await throwsWith(() => quoteFor(db, "ada", { action: "add_seats", extra: 2 }, NOW), /while the license is paid/), "seats are added to a paid license only");
 const quote = await quoteFor(db, "ada", { action: "renew", period: "month", seats: 6 }, NOW);
@@ -460,8 +460,8 @@ const yPaid = await applyTeamPayment(db, "yan", {
   customer: { email: "yan@school.ng" }, metadata: { uid: "yan", kind: TEAM_KIND, quoteId: yQuote.id },
 }, NOW);
 const yStatus = await teamForStatus(db, yan, { teamId: yTeam.id }, NOW);
-check(yQuote.amount === 36536500 && yPaid.paidUntil === addMonths(NOW, 12) && (await db.doc(`teams/${yTeam.id}`).get()).data().paidFor === "year" && yStatus?.graceUntil === yPaid.paidUntil + 30 * DAY,
-  "5 seats for a year, ₦365,365: PRO for 30 days after it ends");
+check(yQuote.amount === 31886400 && yPaid.paidUntil === addMonths(NOW, 12) && (await db.doc(`teams/${yTeam.id}`).get()).data().paidFor === "year" && yStatus?.graceUntil === yPaid.paidUntil + 30 * DAY,
+  "5 seats for a year, ₦318,864: PRO for 30 days after it ends");
 
 console.log("Other currencies need a special price");
 check(await throwsWith(() => createTeam(db, null, { name: "Accra Coders", seats: 5, currency: "GHS", ownerEmail: "a@coders.gh" }, NOW, random), /^A team at the normal price pays in NGN\. To charge it in GHS, set a special price for it\.$/), "a team in cedis without a price is refused");

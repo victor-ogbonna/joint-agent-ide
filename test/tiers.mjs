@@ -1,10 +1,11 @@
 /**
  * Who is on which plan, what each may use, and when a pause lifts.
  *
- * Every metered account works in 5-hour windows. Free: 5,000 tokens a window,
- * at most 10,000 a UTC day, 5,000-token replies, 8 compiles a window and 25 a
- * day. PRO: 50,000 a window (10x Free), a subscriber at most 600,000 a billing
- * cycle, 40,000-token replies, unlimited compiles. Both run on DeepSeek.
+ * Every metered account works in 5-hour windows. Free: 10,000 tokens a window,
+ * at most 20,000 a UTC day, 10,000-token replies, 10 compiles a window and 30
+ * a day. PRO: 250,000 a window (25x Free), a subscriber at most 3,000,000 a
+ * billing cycle, 40,000-token replies (the model's practical most), unlimited
+ * compiles. Both run on DeepSeek.
  */
 import {
   tierOf, allowanceFor, compileAllowance, formatWait, utcDay, WINDOW_MS,
@@ -36,11 +37,11 @@ const MIDNIGHT = Date.UTC(2026, 8, 29, 0, 0, 0);
 const HOUR = 60 * 60 * 1000;
 
 // The plans
-check(FREE_WINDOW_TOKENS === 5000 && FREE_DAILY_TOKENS === 10000, "Free: 5,000 a window, 10,000 a day");
-check(PRO_WINDOW_TOKENS === 10 * FREE_WINDOW_TOKENS, "PRO gets 10x Free every window");
-check(PAID_TOKEN_CAP === 600000, "PRO: up to 600,000 a billing cycle");
+check(FREE_WINDOW_TOKENS === 10000 && FREE_DAILY_TOKENS === 20000, "Free: 10,000 a window, 20,000 a day");
+check(PRO_WINDOW_TOKENS === 25 * FREE_WINDOW_TOKENS, "PRO gets 25x Free every window");
+check(PAID_TOKEN_CAP === 3000000, "PRO: up to 3,000,000 a billing cycle");
 check(WINDOW_MS === 5 * HOUR, "windows last 5 hours");
-check(FREE_WINDOW_COMPILES === 8 && FREE_DAILY_COMPILES === 25, "Free: 8 compiles a window, 25 a day");
+check(FREE_WINDOW_COMPILES === 10 && FREE_DAILY_COMPILES === 30, "Free: 10 compiles a window, 30 a day");
 
 // What the app shows must be what the server enforces.
 check(shown.WINDOW_HOURS * HOUR === WINDOW_MS && shown.FREE_WINDOW_TOKENS === FREE_WINDOW_TOKENS &&
@@ -67,53 +68,53 @@ check(tierOf(doc(), "unmetered") === "unmetered", "the owner is never metered");
         "a fresh account has the whole window and no window open yet");
 }
 {
-  const a = allowanceFor(doc({ windowStart: NOW - HOUR, windowTokens: 4999, tokenDay: TODAY, dayTokens: 4999 }), "free", NOW);
+  const a = allowanceFor(doc({ windowStart: NOW - HOUR, windowTokens: 9999, tokenDay: TODAY, dayTokens: 9999 }), "free", NOW);
   check(!a.blocked && a.windowResetAt === NOW - HOUR + WINDOW_MS, "one token short of the window: still going, refill time known");
 }
 {
-  const a = allowanceFor(doc({ windowStart: NOW - HOUR, windowTokens: 5000, tokenDay: TODAY, dayTokens: 5000 }), "free", NOW);
+  const a = allowanceFor(doc({ windowStart: NOW - HOUR, windowTokens: 10000, tokenDay: TODAY, dayTokens: 10000 }), "free", NOW);
   check(a.blocked && a.reason === "window" && a.resetAt === NOW + 4 * HOUR, "window used: paused until it refills", `resetAt +${(a.resetAt - NOW) / HOUR} h`);
 }
 {
-  const a = allowanceFor(doc({ windowStart: NOW - 5 * HOUR, windowTokens: 5000, tokenDay: TODAY, dayTokens: 5000 }), "free", NOW);
+  const a = allowanceFor(doc({ windowStart: NOW - 5 * HOUR, windowTokens: 10000, tokenDay: TODAY, dayTokens: 10000 }), "free", NOW);
   check(!a.blocked && a.windowUsed === 0, "five hours later the window has refilled");
 }
 {
-  const a = allowanceFor(doc({ windowStart: NOW + HOUR, windowTokens: 5000 }), "free", NOW);
+  const a = allowanceFor(doc({ windowStart: NOW + HOUR, windowTokens: 10000 }), "free", NOW);
   check(!a.blocked, "a window stamped in the future (clock change) does not pause anyone");
 }
 
 // Free day
 {
-  const a = allowanceFor(doc({ windowStart: NOW - HOUR, windowTokens: 100, tokenDay: TODAY, dayTokens: 10000 }), "free", NOW);
-  check(a.blocked && a.reason === "day" && a.resetAt === MIDNIGHT, "10,000 today: paused until midnight UTC");
+  const a = allowanceFor(doc({ windowStart: NOW - HOUR, windowTokens: 100, tokenDay: TODAY, dayTokens: 20000 }), "free", NOW);
+  check(a.blocked && a.reason === "day" && a.resetAt === MIDNIGHT, "20,000 today: paused until midnight UTC");
 }
 {
-  const a = allowanceFor(doc({ windowStart: NOW - HOUR, windowTokens: 100, tokenDay: "2026-09-27", dayTokens: 10000 }), "free", NOW);
+  const a = allowanceFor(doc({ windowStart: NOW - HOUR, windowTokens: 100, tokenDay: "2026-09-27", dayTokens: 20000 }), "free", NOW);
   check(!a.blocked && a.dayUsed === 0, "yesterday's tokens do not count today");
 }
 {
   const late = Date.UTC(2026, 8, 28, 22, 0, 0);
-  const a = allowanceFor(doc({ windowStart: late - HOUR, windowTokens: 5000, tokenDay: TODAY, dayTokens: 10000 }), "free", late);
+  const a = allowanceFor(doc({ windowStart: late - HOUR, windowTokens: 10000, tokenDay: TODAY, dayTokens: 20000 }), "free", late);
   check(a.blocked && a.resetAt === late + 4 * HOUR, "window and day both used: the later refill governs");
 }
 
 // PRO
 {
-  const a = allowanceFor(doc({ subscriptionStatus: "active", windowStart: NOW - HOUR, windowTokens: 49999, cycleTokensUsed: 100000 }), "pro", NOW);
-  check(!a.blocked && a.windowCap === PRO_WINDOW_TOKENS && a.dayCap === null, "PRO has no daily cap, a 50,000 window");
+  const a = allowanceFor(doc({ subscriptionStatus: "active", windowStart: NOW - HOUR, windowTokens: 249999, cycleTokensUsed: 100000 }), "pro", NOW);
+  check(!a.blocked && a.windowCap === PRO_WINDOW_TOKENS && a.dayCap === null, "PRO has no daily cap, a 250,000 window");
 }
 {
-  const a = allowanceFor(doc({ subscriptionStatus: "active", windowStart: NOW - HOUR, windowTokens: 50000, cycleTokensUsed: 100000 }), "pro", NOW);
+  const a = allowanceFor(doc({ subscriptionStatus: "active", windowStart: NOW - HOUR, windowTokens: 250000, cycleTokensUsed: 100000 }), "pro", NOW);
   check(a.blocked && a.reason === "window" && a.resetAt === NOW + 4 * HOUR, "PRO window used: paused until it refills");
 }
 {
   const end = NOW + 3 * 24 * HOUR;
-  const a = allowanceFor(doc({ subscriptionStatus: "active", cycleTokensUsed: 600000, currentPeriodEnd: { toMillis: () => end } }), "pro", NOW);
+  const a = allowanceFor(doc({ subscriptionStatus: "active", cycleTokensUsed: 3000000, currentPeriodEnd: { toMillis: () => end } }), "pro", NOW);
   check(a.blocked && a.reason === "cycle" && a.resetAt === end, "cycle used: paused until the next billing date");
 }
 {
-  const a = allowanceFor(doc({ subscriptionStatus: "active", cycleTokensUsed: 600000, currentPeriodEnd: { toMillis: () => NOW - HOUR } }), "pro", NOW);
+  const a = allowanceFor(doc({ subscriptionStatus: "active", cycleTokensUsed: 3000000, currentPeriodEnd: { toMillis: () => NOW - HOUR } }), "pro", NOW);
   check(a.blocked && a.resetAt === null, "a billing date already passed is not promised as the refill time");
 }
 {
@@ -126,22 +127,22 @@ check(!allowanceFor(doc({ windowStart: NOW, windowTokens: 1e9, tokenDay: TODAY, 
 // Compiles
 {
   const c = compileAllowance(doc(), NOW);
-  check(!c.blocked && c.left === FREE_WINDOW_COMPILES, "a fresh account has 8 compiles");
+  check(!c.blocked && c.left === FREE_WINDOW_COMPILES, "a fresh account has 10 compiles");
 }
 {
-  const c = compileAllowance(doc({ compileWindowStart: NOW - HOUR, compileWindowCount: 8, compileDay: TODAY, compileDayCount: 8 }), NOW);
-  check(c.blocked && c.left === 0 && c.resetAt === NOW + 4 * HOUR, "8 used this window: paused until it refills");
+  const c = compileAllowance(doc({ compileWindowStart: NOW - HOUR, compileWindowCount: 10, compileDay: TODAY, compileDayCount: 10 }), NOW);
+  check(c.blocked && c.left === 0 && c.resetAt === NOW + 4 * HOUR, "10 used this window: paused until it refills");
 }
 {
-  const c = compileAllowance(doc({ compileWindowStart: NOW - HOUR, compileWindowCount: 2, compileDay: TODAY, compileDayCount: 24 }), NOW);
-  check(!c.blocked && c.left === 1, "24 used today: one left, however much of the window remains");
+  const c = compileAllowance(doc({ compileWindowStart: NOW - HOUR, compileWindowCount: 2, compileDay: TODAY, compileDayCount: 29 }), NOW);
+  check(!c.blocked && c.left === 1, "29 used today: one left, however much of the window remains");
 }
 {
-  const c = compileAllowance(doc({ compileWindowStart: NOW - HOUR, compileWindowCount: 2, compileDay: TODAY, compileDayCount: 25 }), NOW);
-  check(c.blocked && c.resetAt === MIDNIGHT, "25 today: paused until midnight UTC");
+  const c = compileAllowance(doc({ compileWindowStart: NOW - HOUR, compileWindowCount: 2, compileDay: TODAY, compileDayCount: 30 }), NOW);
+  check(c.blocked && c.resetAt === MIDNIGHT, "30 today: paused until midnight UTC");
 }
 {
-  const c = compileAllowance(doc({ compileWindowStart: NOW - 6 * HOUR, compileWindowCount: 8, compileDay: "2026-09-27", compileDayCount: 25 }), NOW);
+  const c = compileAllowance(doc({ compileWindowStart: NOW - 6 * HOUR, compileWindowCount: 10, compileDay: "2026-09-27", compileDayCount: 30 }), NOW);
   check(!c.blocked && c.left === FREE_WINDOW_COMPILES, "an old window and yesterday's count do not carry over");
 }
 
@@ -158,7 +159,7 @@ check(!allowanceFor(doc({ windowStart: NOW, windowTokens: 1e9, tokenDay: TODAY, 
         "later replies add to the open window, the day and the lifetime total");
 }
 {
-  const p = tokenUsagePatch(doc({ windowStart: NOW - 6 * HOUR, windowTokens: 5000, tokenDay: "2026-09-27", dayTokens: 10000 }),
+  const p = tokenUsagePatch(doc({ windowStart: NOW - 6 * HOUR, windowTokens: 10000, tokenDay: "2026-09-27", dayTokens: 20000 }),
     { tier: "free", subscriptionStatus: "none" }, 200, NOW);
   check(p.windowStart === NOW && p.windowTokens === 200 && p.dayTokens === 200, "after a refill, a new window and a new day start from this reply");
 }
@@ -176,16 +177,16 @@ check(!allowanceFor(doc({ windowStart: NOW, windowTokens: 1e9, tokenDay: TODAY, 
 {
   const s1 = spendCompile(doc(), NOW);
   check(s1.allowed && s1.left === FREE_WINDOW_COMPILES - 1 && s1.patch.compileWindowStart === NOW && s1.patch.compileWindowCount === 1 && s1.patch.compileDayCount === 1,
-        "the first compile opens a compile window and leaves 7");
+        "the first compile opens a compile window and leaves 9");
   const after = doc(s1.patch);
   const r = refundPatch(after, s1.receipt);
   check(r && r.compileWindowCount === 0 && r.compileDayCount === 0, "a failed compile is handed back to its window and day");
 }
 {
-  const s8 = spendCompile(doc({ compileWindowStart: NOW - HOUR, compileWindowCount: 7, compileDay: TODAY, compileDayCount: 7 }), NOW);
-  check(s8.allowed && s8.left === 0, "the 8th compile of a window is allowed and leaves none");
-  const s9 = spendCompile(doc({ compileWindowStart: NOW - HOUR, compileWindowCount: 8, compileDay: TODAY, compileDayCount: 8 }), NOW);
-  check(!s9.allowed && s9.patch === null && s9.resetAt === NOW + 4 * HOUR, "the 9th is refused, with the refill time");
+  const s8 = spendCompile(doc({ compileWindowStart: NOW - HOUR, compileWindowCount: 9, compileDay: TODAY, compileDayCount: 9 }), NOW);
+  check(s8.allowed && s8.left === 0, "the 10th compile of a window is allowed and leaves none");
+  const s9 = spendCompile(doc({ compileWindowStart: NOW - HOUR, compileWindowCount: 10, compileDay: TODAY, compileDayCount: 10 }), NOW);
+  check(!s9.allowed && s9.patch === null && s9.resetAt === NOW + 4 * HOUR, "the 11th is refused, with the refill time");
 }
 {
   const r = refundPatch(doc({ compileWindowStart: NOW, compileWindowCount: 3, compileDay: TODAY, compileDayCount: 3 }),
@@ -235,8 +236,8 @@ check(formatWait(NOW + 20000, NOW) === "less than a minute", "less than a minute
 check(formatWait(null, NOW) === "your next billing date", "unknown refill: the next billing date");
 
 // Models
-check(PRO_MODEL.maxOutputTokens === 40000, "PRO replies may run to 40,000 tokens");
-check(FREE_MAX_OUTPUT_TOKENS === 5000 && FREE_MODEL.maxOutputTokens === 5000, "Free replies are capped at 5,000 tokens");
+check(PRO_MODEL.maxOutputTokens === 40000, "PRO replies may run to 40,000 tokens (more is refused by the model, and the fallback would cut replies to 8,192)");
+check(FREE_MAX_OUTPUT_TOKENS === 10000 && FREE_MODEL.maxOutputTokens === 10000, "Free replies are capped at 10,000 tokens");
 check(FREE_MODEL.model === PRO_MODEL.model && FREE_MODEL.baseUrl === PRO_MODEL.baseUrl, "Free runs on the same DeepSeek model as PRO");
 check(modelFor(false) === PRO_MODEL && modelFor(true) === FREE_MODEL, "each plan gets its own model profile");
 

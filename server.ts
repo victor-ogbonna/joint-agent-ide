@@ -513,6 +513,21 @@ app.post("/api/terminal/execute", requireFirebaseAuth, (_req, res) => {
 });
 
 
+/**
+ * The serial monitor's recent output, as the client captured it (it runs
+ * entirely in the browser over WebUSB/Web Serial; the server never sees the
+ * board directly). At most 200 lines and 6,000 characters — a tail, kept to
+ * what's recent — since only the "serial log" command ever reads this, and
+ * even then it should not crowd out the rest of the conversation.
+ */
+function recentSerialLines(raw: unknown): string {
+  if (!Array.isArray(raw)) return "";
+  const lines = raw.filter((l): l is string => typeof l === "string" && l.trim() !== "").slice(-200);
+  let text = lines.join("\n");
+  if (text.length > 6000) text = "…\n" + text.slice(text.length - 6000);
+  return text;
+}
+
 // The agent's system instruction for one board: `mcuDescription` is that
 // board's real specs, and mcuPowerPin is derived from its family.
 function buildChatSystemInstruction(mcuDescription: string, mcuPowerPin: string, chatMode: string): string {
@@ -552,6 +567,8 @@ Schematic wiring rules (CRITICAL for a correct, renderable circuit):
 
 CRITICAL: The code is compiled as a plain C++ file (src/main.cpp), not an Arduino IDE sketch, so you MUST ensure that every generated C++ code includes '#include <Arduino.h>' at the very top so that the code can be properly compiled and flashed.
 
+WIRING, WHEREVER YOU STATE IT (the project's description, or a chat reply): always a bullet list, one connection per line ("- MCU pin D4 -> resistor pin1", "- Resistor pin2 -> LED anode"), never a paragraph. It is read while someone's hands are on the actual wires; a sentence they have to re-read to find "D4" buried in it is the wrong shape for that.
+
 CODE QUALITY (the code IS the deliverable — the chat reply is not):
 - Comment the code properly, every time. Explain WHY a line exists, not what it literally does, and name each pin's role where it is configured. Beginners read this code to learn; uncommented code fails them.
 - If the user named a specific technique, API or style — millis() rather than delay(), interrupts rather than polling, a particular library — use EXACTLY that. Do not substitute something you consider better. If you think their choice is wrong, implement what they asked and note why you would differ in one short line.
@@ -559,8 +576,9 @@ CODE QUALITY (the code IS the deliverable — the chat reply is not):
 
 If the user asks you to write, modify, update code or create a project, use the 'generate_project' tool. DO NOT use 'execute_terminal_command' to edit code (e.g. no sed, echo, or cat).
 If the user asks to see, open, enable or activate the serial monitor (or to watch serial output), call 'execute_terminal_command' with the command 'monitor'. That is not a code change: do NOT call 'generate_project' for it, and do not rewrite or reflash their sketch.
-Use 'execute_terminal_command' ONLY to compile, to open the serial monitor, or to list the user's project files. NEVER use it to inspect the machine, hunt for config files, probe /dev, or report tool versions: that is infrastructure, not the user's project, and it is of no use to them.
-The serial monitor, board detection and flashing all run in the user's own browser over USB. They are NOT server-side and NOT shell commands. If asked to open the serial monitor or connect a board, point the user at the Serial Monitor and Detect Board controls and run nothing.
+If the user asks you to read, check or use the serial monitor's output (what it has already printed — a sensor reading, a debug line, why a reset keeps happening) rather than to open it, call 'execute_terminal_command' with the command 'serial log'. That hands you the monitor's recent output to actually read and reason about, where 'monitor' only opens the live view in the user's browser and gives you nothing back. Use what comes back to answer the question or decide the next step — don't just say you opened it.
+Use 'execute_terminal_command' ONLY to compile, to open or read the serial monitor, or to list the user's project files. NEVER use it to inspect the machine, hunt for config files, probe /dev, or report tool versions: that is infrastructure, not the user's project, and it is of no use to them.
+The serial monitor, board detection and flashing all run in the user's own browser over USB. They are NOT server-side and NOT shell commands. If asked to open the serial monitor or connect a board, point the user at the Serial Monitor and Detect Board controls and run nothing. Reading back its output (above) is the one exception: the browser sends you what it already captured.
 Never name the underlying build system, its config files or its directories, in the code comments or anywhere else. The toolchain is "the Joint-Agent Engine".
 If answering a general question, just respond conversationally.`;
   }
@@ -614,6 +632,11 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
   // so every change was written blind: asked to adjust one thing, it had no
   // way to know the pins and logic already there.
   const currentCode = typeof req.body?.currentCode === "string" ? req.body.currentCode.slice(0, 60000).trim() : "";
+  // What the serial monitor has shown so far (captured client-side over
+  // WebUSB/Web Serial — the server was never connected to the board). Rides
+  // along on every turn; only read when the agent asks for it (the "serial
+  // log" command below), so most turns cost nothing extra for it.
+  const serialLog = recentSerialLines(req.body?.serialLines);
   if (!messages) return res.status(400).json({ error: "Messages required." });
 
   // Reject an empty submit before it reaches the model. Without this, pressing
@@ -695,6 +718,16 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     const model = modelFor(free);
     // Keeps the browser's idea of the plan current: it gates auto-debug.
     send({ type: "tier", tier: free ? "free" : "full" });
+    // The first of the steps shown while it works. About the person's own
+    // project only: never the instructions, the model or the machinery.
+    const sketchLines = currentCode ? currentCode.split("\n").length : 0;
+    const lastHasImages = conversation.length > 0 && !!conversation[conversation.length - 1].images?.length;
+    send({
+      type: "tool_progress",
+      text: sketchLines
+        ? `Reading your sketch (${sketchLines} lines)${lastHasImages ? ", your image" : ""} and your message`
+        : lastHasImages ? "Looking at your image and your message" : "Reading your message",
+    });
 
     // Full at AUTOCOMPACT_AT: fold everything but the recent tail into a
     // summary, tell the browser which messages it replaced, and carry on.
@@ -819,13 +852,14 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     }
 
     // A call the model wrote out as markup instead of making is still the call
-    // it meant. Plan mode offers no tools, so there the only one honoured is
-    // opening the serial monitor, which changes nothing in the project.
+    // it meant. Plan mode offers no tools, so there the only ones honoured
+    // are opening or reading the serial monitor, neither of which changes
+    // anything in the project.
     let call = toolCall;
     if (!call && textToolCall) {
-      const opensMonitor = textToolCall.name === "execute_terminal_command" &&
-        toWorkspaceCommand(textToolCall.args?.command) === "monitor";
-      if (chatMode !== "plan" || opensMonitor) call = textToolCall;
+      const readsOrOpensMonitor = textToolCall.name === "execute_terminal_command" &&
+        ["monitor", "serial log"].includes(toWorkspaceCommand(textToolCall.args?.command) || "");
+      if (chatMode !== "plan" || readsOrOpensMonitor) call = textToolCall;
     }
     await incrementTokenUsage(req.uid!, req.quota, outputTokens);
     countStat("ai_chat");
@@ -852,7 +886,25 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
       // own commands, no command event is sent: the shell line never reaches
       // the browser, so it cannot be echoed into the chat or the terminal.
       const command = toWorkspaceCommand(call.args?.command);
-      if (command) {
+      if (command === "serial log") {
+        // A real answer grounded in what the board actually printed, not
+        // just a note that something happened — the model asked to see this
+        // on purpose, so it gets a turn to read it and reply.
+        send({ type: "tool_progress", text: "Reading the serial monitor…" });
+        const note = serialLog
+          ? `The serial monitor's recent output (most recent last; this already happened — it is not live):\n\`\`\`\n${serialLog}\n\`\`\``
+          : "The serial monitor has shown nothing yet this session: no board is connected, or nothing has printed. Say so, plainly.";
+        const follow = await runChat([...dsMessages, { role: "system", content: note }]);
+        outputTokens += follow.outputTokens;
+        await incrementTokenUsage(req.uid!, req.quota, follow.outputTokens);
+        // What it read may be reason enough to fix the code, not just
+        // explain it (a garbled baud rate, a value that's clearly wrong).
+        if (follow.toolCall?.name === "generate_project") {
+          send({ type: "project_update", text: "Code is ready.", projectUpdate: follow.toolCall.args });
+        } else if (!follow.sentText) {
+          send({ type: "text_delta", text: "I read the serial monitor but couldn't put an answer together just now. Ask me again and I'll take another look." });
+        }
+      } else if (command) {
         send({
           type: "command",
           text: command === "monitor" || command === "serial monitor"
@@ -954,6 +1006,8 @@ Microcontroller Pinout Reference: ${mcuDescription}
 
 CRITICAL: The code is compiled as a plain C++ file (src/main.cpp), not an Arduino IDE sketch, so you MUST ensure that every generated C++ code includes '#include <Arduino.h>' at the very top so that the code can be properly compiled and flashed.
 
+WIRING, WHEREVER YOU STATE IT (the description, or a chat reply): always a bullet list, one connection per line ("- MCU pin D4 -> resistor pin1", "- Resistor pin2 -> LED anode"), never a paragraph.
+
 CODE QUALITY (the code IS the deliverable — the chat reply is not):
 - Comment the code properly, every time. Explain WHY a line exists, not what it literally does, and name each pin's role where it is configured. Beginners read this code to learn; uncommented code fails them.
 - If the user named a specific technique, API or style — millis() rather than delay(), interrupts rather than polling, a particular library — use EXACTLY that. Do not substitute something you consider better. If you think their choice is wrong, implement what they asked and note why you would differ in one short line.
@@ -999,7 +1053,7 @@ Return your response in strict JSON matching the requested schema.`;
 Respond with a single JSON object and nothing else, in exactly this shape:
 {
   "code": "complete, production-ready, heavily commented C++ (.ino format)",
-  "description": "summary of what the code does, the component list, and step-by-step wiring guidance",
+  "description": "summary of what the code does, the component list, and wiring guidance as a bullet list (one connection per line)",
   "components": [
     { "id": "led1", "type": "led", "label": "Green LED", "value": "5mm" }
   ],

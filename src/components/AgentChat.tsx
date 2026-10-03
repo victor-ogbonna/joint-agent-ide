@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { motion } from "motion/react";
-import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Square, Code, X, Clock, RotateCcw} from "lucide-react";
+import { Send, MessageSquare, Cpu, Zap, Bot, Plus, Mic, Copy, PenTool, Check, Square, Code, X, Clock, RotateCcw, Loader2, ListChecks } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -775,6 +775,33 @@ export default function AgentChat({
                       ))}
                     </div>
                   )}
+                  {/* What it did on the project while it worked: the
+                      current step with a spinner, then folded away. */}
+                  {msg.role === "assistant" && msg.steps && msg.steps.length > 0 && (
+                    msg.working ? (
+                      <ul className="space-y-1 text-[11px] text-[var(--text-muted)]" data-agent-steps="working" aria-live="polite">
+                        {msg.steps.map((step, i) => (
+                          <li key={i} className="flex items-start gap-1.5">
+                            {i === msg.steps!.length - 1
+                              ? <Loader2 size={11} className="mt-0.5 shrink-0 animate-spin text-[var(--accent-primary)]" />
+                              : <Check size={11} className="mt-0.5 shrink-0 text-green-500" />}
+                            <span className={i === msg.steps!.length - 1 ? "text-[var(--text-main)]" : ""}>{step}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <details className="text-[11px] text-[var(--text-muted)]" data-agent-steps="done">
+                        <summary className="cursor-pointer select-none inline-flex items-center gap-1 hover:text-[var(--text-main)]">
+                          <ListChecks size={11} /> What I did ({msg.steps.length} step{msg.steps.length === 1 ? "" : "s"})
+                        </summary>
+                        <ul className="mt-1 space-y-1">
+                          {msg.steps.map((step, i) => (
+                            <li key={i} className="flex items-start gap-1.5"><Check size={11} className="mt-0.5 shrink-0 text-green-500" />{step}</li>
+                          ))}
+                        </ul>
+                      </details>
+                    )
+                  )}
                   {/* Normal Text Content */}
                   <div className="prose prose-sm dark:prose-invert max-w-none break-words chat-prose">
                     <MessageMarkdown
@@ -798,7 +825,8 @@ export default function AgentChat({
                     </div>
                   )}
 
-                  {chatMode === "plan" && index === messages.length - 1 && msg.role === "assistant" && msg.isPlanResponse && !msg.failed && (
+                  {/* Not while the plan is still being written: there's nothing to proceed with yet. */}
+                  {chatMode === "plan" && index === messages.length - 1 && msg.role === "assistant" && msg.isPlanResponse && !msg.failed && !msg.working && (
                     <div className="mt-4 pt-3 border-t border-[var(--border-main)] space-y-3">
                       <p className="text-xs text-[var(--text-muted)] font-medium">Use the comment icons above to answer any clarifying questions, then proceed when ready:</p>
                       <div className="flex gap-2">

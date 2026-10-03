@@ -80,7 +80,7 @@ export const PRO_MODEL: ModelProfile = {
 };
 
 /** A Free reply's cap: room for a complete sketch with its wiring, not a whole game. */
-export const FREE_MAX_OUTPUT_TOKENS = 5000;
+export const FREE_MAX_OUTPUT_TOKENS = 10000;
 export const FREE_MODEL: ModelProfile = { ...PRO_MODEL, id: "free", maxOutputTokens: FREE_MAX_OUTPUT_TOKENS };
 
 /** The model for a request. */
