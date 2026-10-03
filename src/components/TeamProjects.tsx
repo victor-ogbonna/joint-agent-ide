@@ -1,11 +1,12 @@
-import React, { useCallback, useEffect, useState } from "react";
-import { FolderOpen, Eye, EyeOff, Pencil, Copy, Trash2, Unlock, Share2, Loader2, X, ExternalLink, Cpu, Code, Cable } from "lucide-react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { FolderOpen, Eye, EyeOff, Pencil, Copy, Trash2, Unlock, Share2, Loader2, X, ExternalLink, Cpu, Code, Cable, MessageSquare, Send } from "lucide-react";
 import { formatDay } from "../lib/plans";
 
 /**
  * Working together on /team (server/teamProjects.ts), each only by the
- * person's own choice: the team's shared projects, the member's switch for
- * letting admins see their projects, and the read-only view of a project.
+ * person's own choice: the team's shared projects and their comments, the
+ * member's switch for letting admins see their projects, and the read-only
+ * view of a project.
  */
 
 export type Call = (path: string, body?: unknown) => Promise<{ ok: boolean; data: any }>;
@@ -200,6 +201,130 @@ interface TeamProjectRow {
   copyId: string | null;
   canRemove: boolean;
   canFree: boolean;
+  comments: number;
+  newComments: boolean;
+}
+
+// ---- Comments on a team project ----
+
+interface TeamComment {
+  id: string;
+  by: string | null;
+  at: number;
+  text: string;
+  mine: boolean;
+  canDelete: boolean;
+}
+
+/** As server/teamProjects.ts keeps it. */
+const MAX_COMMENT_LENGTH = 1000;
+
+const commentTime = (at: number) => new Date(at).toLocaleString([], { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+
+/**
+ * A team project's comments, oldest first, and a box to write one. Opening
+ * it marks them read. `onCount` tells the list how many there are now.
+ */
+function CommentsThread({ projectId, call, onCount }: { projectId: string; call: Call; onCount: (n: number) => void }) {
+  const [list, setList] = useState<TeamComment[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const path = `/api/team/projects/${encodeURIComponent(projectId)}/comments`;
+  const countRef = useRef(onCount);
+  countRef.current = onCount;
+
+  const load = useCallback(async () => {
+    try {
+      const r = await call(path);
+      if (!r.ok) { setError(r.data.error || "The comments couldn't be loaded."); return; }
+      const comments: TeamComment[] = r.data.comments || [];
+      setList(comments);
+      setError(null);
+      countRef.current(comments.length);
+    } catch {
+      setError("Couldn't reach the server. Try again.");
+    }
+  }, [call, path]);
+  useEffect(() => { void load(); }, [load]);
+
+  const length = text.trim().length;
+  const send = async () => {
+    if (!length || length > MAX_COMMENT_LENGTH || busy) return;
+    setBusy("send");
+    setError(null);
+    try {
+      const r = await call(path, { text });
+      // What they wrote stays in the box if it didn't go.
+      if (!r.ok) { setError(r.data.error || "Your comment couldn't be posted. Try again."); return; }
+      setText("");
+      await load();
+    } catch {
+      setError("Couldn't reach the server. Try again.");
+    } finally {
+      setBusy(null);
+    }
+  };
+  const remove = async (c: TeamComment) => {
+    if (busy || !window.confirm(c.mine ? "Delete your comment?" : `Delete ${c.by || "this person"}'s comment?`)) return;
+    setBusy(`rm:${c.id}`);
+    setError(null);
+    try {
+      const r = await call(`${path}/${encodeURIComponent(c.id)}/delete`, {});
+      if (!r.ok) setError(r.data.error || "It couldn't be deleted. Try again.");
+      await load();
+    } catch {
+      setError("Couldn't reach the server. Try again.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="mt-2 rounded-lg border border-[var(--border-main)] p-3" data-comments={projectId}>
+      {list === null && !error ? (
+        <p className={`flex items-center gap-2 ${small}`}><Loader2 size={13} className="animate-spin" /> Loading comments…</p>
+      ) : list && list.length === 0 ? (
+        <p className={small}>No comments yet. Leave a note, a question or feedback for the team.</p>
+      ) : list ? (
+        <ul className="space-y-2.5">
+          {list.map((c) => (
+            <li key={c.id} data-comment={c.id}>
+              <div className="flex flex-wrap items-baseline justify-between gap-x-2">
+                <p className="text-[11px] text-[var(--text-subtle)]">
+                  <span className="font-semibold text-[var(--text-muted)]">{c.mine ? "You" : c.by || "Someone"}</span> · {commentTime(c.at)}
+                </p>
+                {c.canDelete && (
+                  <button type="button" className="text-[11px] text-[var(--text-muted)] underline-offset-2 hover:text-red-500 hover:underline disabled:opacity-50" disabled={busy !== null} onClick={() => void remove(c)}>
+                    {busy === `rm:${c.id}` ? "Deleting…" : "Delete"}
+                  </button>
+                )}
+              </div>
+              <p className="whitespace-pre-wrap break-words text-[13px] text-[var(--text-main)]">{c.text}</p>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {error && <p role="alert" className="mt-2 text-[12px] text-red-500">{error}</p>}
+      <div className="mt-3">
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void send(); } }}
+          rows={2}
+          placeholder="Write a comment…"
+          aria-label="Write a comment"
+          className="w-full resize-y rounded-lg border border-[var(--border-main)] bg-[var(--bg-root)] px-3 py-2 text-[13px] text-[var(--text-main)] focus:border-[var(--accent-primary)] focus:outline-none"
+        />
+        <div className="mt-1.5 flex items-center justify-between gap-2">
+          <span className={`text-[11px] ${length > MAX_COMMENT_LENGTH ? "text-red-500" : "text-[var(--text-subtle)]"}`}>{length}/{MAX_COMMENT_LENGTH}</span>
+          <button type="button" className={button} disabled={busy !== null || !length || length > MAX_COMMENT_LENGTH} onClick={() => void send()}>
+            {busy === "send" ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />} Send
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /** Opens one of the person's own projects in the app. */
@@ -219,6 +344,11 @@ export function TeamProjectsCard({ teamName, call, locked = null }: {
   const [picking, setPicking] = useState(false);
   const [mine, setMine] = useState<{ id: string; name: string; mcu: string; boardId: string; shared: boolean }[] | null>(null);
   const [pickError, setPickError] = useState<string | null>(null);
+  // The one project whose comments are open.
+  const [thread, setThread] = useState<string | null>(null);
+  const counted = useCallback((id: string, n: number) => {
+    setRows((rs) => rs && rs.map((r) => (r.id === id ? { ...r, comments: n, newComments: false } : r)));
+  }, []);
 
   const reload = useCallback(async () => {
     try {
@@ -278,7 +408,7 @@ export function TeamProjectsCard({ teamName, call, locked = null }: {
     <section className={card} data-team-projects="">
       <h2 className={heading}><Share2 size={16} aria-hidden="true" /> Team projects</h2>
       <p className={`mt-1 ${small}`}>
-        Projects someone on the team chose to share. One person edits at a time: Edit opens your own working copy in the app, and Send there makes your version the team's. Passwords, keys and tokens in shared code are hidden.
+        Projects someone on the team chose to share. One person edits at a time: Edit opens your own working copy in the app, and Send there makes your version the team's. Everyone can comment on them. Passwords, keys and tokens in shared code are hidden.
       </p>
 
       {locked ? locked : rows === null && !error ? (
@@ -302,6 +432,10 @@ export function TeamProjectsCard({ teamName, call, locked = null }: {
                 )}
                 <div className="mt-2 flex flex-wrap gap-2">
                   <button type="button" className={button} onClick={() => setViewing({ id: p.id, name: p.name })}><Eye size={14} /> View</button>
+                  <button type="button" className={button} aria-expanded={thread === p.id} data-comments-button={p.id} onClick={() => setThread((t) => (t === p.id ? null : p.id))}>
+                    <MessageSquare size={14} /> Comments{p.comments ? ` (${p.comments})` : ""}
+                    {p.newComments && <span className="rounded-full bg-orange-500 px-1.5 py-px text-[10px] font-semibold text-white">New</span>}
+                  </button>
                   {p.editing?.you && p.copyId ? (
                     <>
                       <button type="button" className={button} onClick={() => openInApp(p.copyId as string)}><ExternalLink size={14} /> Open in the app</button>
@@ -336,6 +470,7 @@ export function TeamProjectsCard({ teamName, call, locked = null }: {
                     </button>
                   )}
                 </div>
+                {thread === p.id && <CommentsThread projectId={p.id} call={call} onCount={(n) => counted(p.id, n)} />}
               </li>
             );
           })}
