@@ -17,6 +17,7 @@ import { accessLevelFor } from './server/access';
 import { voiceNoteTooLong, MAX_VOICE_NOTE_SECONDS } from './server/voiceNote';
 import { registerPaystackRoutes, paystackSecretKey, paystackPublicKey } from './server/paystack';
 import { registerAdminStatsRoutes } from './server/adminStats';
+import { registerSimRoutes } from './server/simCompile';
 import { useBuildCache, readyBuildCache, startBuildCachePruning, damagedCacheFailure, reportDamagedCache, retireDamagedCache } from './server/buildCache';
 import { catchAsyncErrors, jsonErrorHandler } from './server/asyncErrors';
 import { runBuild, COMPILE_TIMEOUT_MS, fileSystemInclude } from './server/buildRun';
@@ -425,6 +426,8 @@ registerAdminStatsRoutes(app, requireAdmin, {
     feedbackEmail: !!(process.env.RESEND_API_KEY && process.env.FEEDBACK_TO_EMAIL),
   }),
 });
+// The circuit simulator's compiles (admin only for now): Uno, Nano and Mega.
+registerSimRoutes(app, requireAdmin, path.join(process.cwd(), ".platformio"));
 
 // Lets the frontend check where a signed-in user stands in their 5-hour
 // allowance — used both to seed the UI on load and by a paused user's
