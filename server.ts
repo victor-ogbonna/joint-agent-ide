@@ -32,8 +32,11 @@ import { canUseCode, firstMonthOfferUntil, firstMonthOfferOpensAt } from './serv
 import { registerGithubRoutes } from './server/github';
 import { registerFirebaseAuthProxy } from './server/firebaseAuthProxy';
 import { detectLibDeps, isSafeLibDep } from './server/libraryDeps';
+import { addAppHelper } from './server/appSupport';
+import { PHONE_APP_RULE, WIFI_SETUP_RULE, boardRules } from './server/agentRules';
+import { hideSecrets, HIDDEN } from './server/hideSecrets';
 import { registerLibraryRoutes, prepareLibraries, mergeLibDeps, missingLibraryHint, libraryNoteFor, NO_LIBRARIES } from './server/libraries';
-import { loadBoardCatalog, getBoardCatalog, getBoardById, boardFamily, resolveBoard, describeBoardForPrompt, BoardInfo } from './server/boards';
+import { loadBoardCatalog, getBoardCatalog, getBoardById, boardFamily, resolveBoard, describeBoardForPrompt, BoardInfo, BoardFamily } from './server/boards';
 import { streamChat, completeChat, isDeepSeekConfigured, DEEPSEEK_MODEL, ChatMessage, ToolSpec, modelFor, AiTimeoutError, AiServiceError } from './server/deepseek';
 import { CONTEXT_BUDGET_TOKENS, ConversationMessage, planCompaction, SUMMARY_INSTRUCTION, transcriptOf, KEEP_RECENT_MESSAGES, attachedImages } from './server/context';
 
@@ -513,9 +516,25 @@ app.post("/api/terminal/execute", requireFirebaseAuth, (_req, res) => {
 });
 
 
+/**
+ * The serial monitor's recent output, as the client captured it (it runs
+ * entirely in the browser over WebUSB/Web Serial; the server never sees the
+ * board directly). At most 200 lines and 6,000 characters — a tail, kept to
+ * what's recent — since only the "serial log" command ever reads this, and
+ * even then it should not crowd out the rest of the conversation.
+ */
+function recentSerialLines(raw: unknown): string {
+  if (!Array.isArray(raw)) return "";
+  const lines = raw.filter((l): l is string => typeof l === "string" && l.trim() !== "").slice(-200);
+  let text = lines.join("\n");
+  if (text.length > 6000) text = "…\n" + text.slice(text.length - 6000);
+  return text;
+}
+
 // The agent's system instruction for one board: `mcuDescription` is that
-// board's real specs, and mcuPowerPin is derived from its family.
-function buildChatSystemInstruction(mcuDescription: string, mcuPowerPin: string, chatMode: string): string {
+// board's real specs, and mcuPowerPin and the board rules (server/agentRules.ts)
+// are derived from its family.
+function buildChatSystemInstruction(mcuDescription: string, mcuPowerPin: string, chatMode: string, family: BoardFamily): string {
   let systemInstruction = `You are Joint-Agent, an expert embedded systems AI agent and circuit designer.
 You help users write code, debug hardware issues, design circuit schematics, manage their cloud IDE, and execute terminal commands.
 Microcontroller Reference: ${mcuDescription}
@@ -552,6 +571,10 @@ Schematic wiring rules (CRITICAL for a correct, renderable circuit):
 
 CRITICAL: The code is compiled as a plain C++ file (src/main.cpp), not an Arduino IDE sketch, so you MUST ensure that every generated C++ code includes '#include <Arduino.h>' at the very top so that the code can be properly compiled and flashed.
 
+WIRING, WHEREVER YOU STATE IT (the project's description, or a chat reply): always a bullet list, one connection per line ("- MCU pin D4 -> resistor pin1", "- Resistor pin2 -> LED anode"), never a paragraph. It is read while someone's hands are on the actual wires; a sentence they have to re-read to find "D4" buried in it is the wrong shape for that.
+
+${boardRules(family)}
+
 CODE QUALITY (the code IS the deliverable — the chat reply is not):
 - Comment the code properly, every time. Explain WHY a line exists, not what it literally does, and name each pin's role where it is configured. Beginners read this code to learn; uncommented code fails them.
 - If the user named a specific technique, API or style — millis() rather than delay(), interrupts rather than polling, a particular library — use EXACTLY that. Do not substitute something you consider better. If you think their choice is wrong, implement what they asked and note why you would differ in one short line.
@@ -559,8 +582,9 @@ CODE QUALITY (the code IS the deliverable — the chat reply is not):
 
 If the user asks you to write, modify, update code or create a project, use the 'generate_project' tool. DO NOT use 'execute_terminal_command' to edit code (e.g. no sed, echo, or cat).
 If the user asks to see, open, enable or activate the serial monitor (or to watch serial output), call 'execute_terminal_command' with the command 'monitor'. That is not a code change: do NOT call 'generate_project' for it, and do not rewrite or reflash their sketch.
-Use 'execute_terminal_command' ONLY to compile, to open the serial monitor, or to list the user's project files. NEVER use it to inspect the machine, hunt for config files, probe /dev, or report tool versions: that is infrastructure, not the user's project, and it is of no use to them.
-The serial monitor, board detection and flashing all run in the user's own browser over USB. They are NOT server-side and NOT shell commands. If asked to open the serial monitor or connect a board, point the user at the Serial Monitor and Detect Board controls and run nothing.
+If the user asks you to read, check or use the serial monitor's output (what it has already printed — a sensor reading, a debug line, why a reset keeps happening) rather than to open it, call 'execute_terminal_command' with the command 'serial log'. That hands you the monitor's recent output to actually read and reason about, where 'monitor' only opens the live view in the user's browser and gives you nothing back. Use what comes back to answer the question or decide the next step — don't just say you opened it.
+Use 'execute_terminal_command' ONLY to compile, to open or read the serial monitor, or to list the user's project files. NEVER use it to inspect the machine, hunt for config files, probe /dev, or report tool versions: that is infrastructure, not the user's project, and it is of no use to them.
+The serial monitor, board detection and flashing all run in the user's own browser over USB. They are NOT server-side and NOT shell commands. If asked to open the serial monitor or connect a board, point the user at the Serial Monitor and Detect Board controls and run nothing. Reading back its output (above) is the one exception: the browser sends you what it already captured.
 Never name the underlying build system, its config files or its directories, in the code comments or anywhere else. The toolchain is "the Joint-Agent Engine".
 If answering a general question, just respond conversationally.`;
   }
@@ -614,6 +638,11 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
   // so every change was written blind: asked to adjust one thing, it had no
   // way to know the pins and logic already there.
   const currentCode = typeof req.body?.currentCode === "string" ? req.body.currentCode.slice(0, 60000).trim() : "";
+  // What the serial monitor has shown so far (captured client-side over
+  // WebUSB/Web Serial — the server was never connected to the board). Rides
+  // along on every turn; only read when the agent asks for it (the "serial
+  // log" command below), so most turns cost nothing extra for it.
+  const serialLog = recentSerialLines(req.body?.serialLines);
   if (!messages) return res.status(400).json({ error: "Messages required." });
 
   // Reject an empty submit before it reaches the model. Without this, pressing
@@ -690,11 +719,21 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     // rather than a separate field, and it sits at the front of every request
     // unchanged — which is exactly the prefix DeepSeek caches automatically,
     // so the Gemini explicit-cache machinery has no equivalent to port.
-    const systemText = buildChatSystemInstruction(mcuDescription, mcuPowerPin, chatMode);
+    const systemText = buildChatSystemInstruction(mcuDescription, mcuPowerPin, chatMode, family);
     // Free replies are capped shorter; the model is the same.
     const model = modelFor(free);
     // Keeps the browser's idea of the plan current: it gates auto-debug.
     send({ type: "tier", tier: free ? "free" : "full" });
+    // The first of the steps shown while it works. About the person's own
+    // project only: never the instructions, the model or the machinery.
+    const sketchLines = currentCode ? currentCode.split("\n").length : 0;
+    const lastHasImages = conversation.length > 0 && !!conversation[conversation.length - 1].images?.length;
+    send({
+      type: "tool_progress",
+      text: sketchLines
+        ? `Reading your sketch (${sketchLines} lines)${lastHasImages ? ", your image" : ""} and your message`
+        : lastHasImages ? "Looking at your image and your message" : "Reading your message",
+    });
 
     // Full at AUTOCOMPACT_AT: fold everything but the recent tail into a
     // summary, tell the browser which messages it replaced, and carry on.
@@ -819,13 +858,14 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
     }
 
     // A call the model wrote out as markup instead of making is still the call
-    // it meant. Plan mode offers no tools, so there the only one honoured is
-    // opening the serial monitor, which changes nothing in the project.
+    // it meant. Plan mode offers no tools, so there the only ones honoured
+    // are opening or reading the serial monitor, neither of which changes
+    // anything in the project.
     let call = toolCall;
     if (!call && textToolCall) {
-      const opensMonitor = textToolCall.name === "execute_terminal_command" &&
-        toWorkspaceCommand(textToolCall.args?.command) === "monitor";
-      if (chatMode !== "plan" || opensMonitor) call = textToolCall;
+      const readsOrOpensMonitor = textToolCall.name === "execute_terminal_command" &&
+        ["monitor", "serial log"].includes(toWorkspaceCommand(textToolCall.args?.command) || "");
+      if (chatMode !== "plan" || readsOrOpensMonitor) call = textToolCall;
     }
     await incrementTokenUsage(req.uid!, req.quota, outputTokens);
     countStat("ai_chat");
@@ -852,7 +892,25 @@ app.post("/api/ai/chat", requireAuthAndQuota, async (req, res) => {
       // own commands, no command event is sent: the shell line never reaches
       // the browser, so it cannot be echoed into the chat or the terminal.
       const command = toWorkspaceCommand(call.args?.command);
-      if (command) {
+      if (command === "serial log") {
+        // A real answer grounded in what the board actually printed, not
+        // just a note that something happened — the model asked to see this
+        // on purpose, so it gets a turn to read it and reply.
+        send({ type: "tool_progress", text: "Reading the serial monitor…" });
+        const note = serialLog
+          ? `The serial monitor's recent output (most recent last; this already happened — it is not live):\n\`\`\`\n${serialLog}\n\`\`\``
+          : "The serial monitor has shown nothing yet this session: no board is connected, or nothing has printed. Say so, plainly.";
+        const follow = await runChat([...dsMessages, { role: "system", content: note }]);
+        outputTokens += follow.outputTokens;
+        await incrementTokenUsage(req.uid!, req.quota, follow.outputTokens);
+        // What it read may be reason enough to fix the code, not just
+        // explain it (a garbled baud rate, a value that's clearly wrong).
+        if (follow.toolCall?.name === "generate_project") {
+          send({ type: "project_update", text: "Code is ready.", projectUpdate: follow.toolCall.args });
+        } else if (!follow.sentText) {
+          send({ type: "text_delta", text: "I read the serial monitor but couldn't put an answer together just now. Ask me again and I'll take another look." });
+        }
+      } else if (command) {
         send({
           type: "command",
           text: command === "monitor" || command === "serial monitor"
@@ -946,7 +1004,7 @@ app.post("/api/ai/generate", requireAuthAndQuota, async (req, res) => {
     return res.status(400).json({ error: "Pick a board first." });
   }
 
-  const { description: mcuDescription } = describeBoardForPrompt(boardId, mcu);
+  const { description: mcuDescription, family } = describeBoardForPrompt(boardId, mcu);
 
   const systemPrompt = `You are an expert embedded systems AI agent and circuit designer.
 Generate microcontroller code (C++) and a full schematic diagram for a: ${mcu.toUpperCase()}.
@@ -954,6 +1012,8 @@ Microcontroller Pinout Reference: ${mcuDescription}
 
 CRITICAL: The code is compiled as a plain C++ file (src/main.cpp), not an Arduino IDE sketch, so you MUST ensure that every generated C++ code includes '#include <Arduino.h>' at the very top so that the code can be properly compiled and flashed.
 
+WIRING, WHEREVER YOU STATE IT (the description, or a chat reply): always a bullet list, one connection per line ("- MCU pin D4 -> resistor pin1", "- Resistor pin2 -> LED anode"), never a paragraph.
+${family === "esp32" ? `\n${WIFI_SETUP_RULE}\n` : ""}
 CODE QUALITY (the code IS the deliverable — the chat reply is not):
 - Comment the code properly, every time. Explain WHY a line exists, not what it literally does, and name each pin's role where it is configured. Beginners read this code to learn; uncommented code fails them.
 - If the user named a specific technique, API or style — millis() rather than delay(), interrupts rather than polling, a particular library — use EXACTLY that. Do not substitute something you consider better. If you think their choice is wrong, implement what they asked and note why you would differ in one short line.
@@ -999,7 +1059,7 @@ Return your response in strict JSON matching the requested schema.`;
 Respond with a single JSON object and nothing else, in exactly this shape:
 {
   "code": "complete, production-ready, heavily commented C++ (.ino format)",
-  "description": "summary of what the code does, the component list, and step-by-step wiring guidance",
+  "description": "summary of what the code does, the component list, and wiring guidance as a bullet list (one connection per line)",
   "components": [
     { "id": "led1", "type": "led", "label": "Green LED", "value": "5mm" }
   ],
@@ -1043,6 +1103,98 @@ All four top-level keys are required. Do not wrap the JSON in markdown fences.`,
   }
 });
 
+// "Build App (PWA)" for a Bluetooth or internet-connected project: the
+// agent writes the app's page; the app makes it installable and packs it
+// (src/lib/appPackage.ts). Counted against the AI allowance like a reply.
+app.post("/api/ai/app-page", requireAuthAndQuota, async (req, res) => {
+  holdOpen(res);
+  const clientGone = new AbortController();
+  res.on("close", () => { if (!res.writableEnded) clientGone.abort(); });
+  const body = req.body || {};
+  const code = typeof body.code === "string" ? body.code.slice(0, 60000).trim() : "";
+  const description = typeof body.description === "string" ? body.description.slice(0, 4000).trim() : "";
+  const name = typeof body.name === "string" ? body.name.replace(/[\u0000-\u001f]/g, " ").slice(0, 30).trim() : "";
+  const themeColor = typeof body.themeColor === "string" && /^#[0-9a-fA-F]{6}$/.test(body.themeColor) ? body.themeColor : "#0b0d12";
+  const kind = body.kind === "bluetooth" || body.kind === "classic" || body.kind === "internet" ? body.kind : null;
+  if (!code) return res.status(400).json({ error: "There's no code in this project yet." });
+  if (!name) return res.status(400).json({ error: "Give the app a name." });
+  if (!kind) return res.status(400).json({ error: "This project doesn't use Bluetooth or the internet." });
+  if (!isDeepSeekConfigured()) {
+    return res.status(503).json({ error: "The AI service isn't set up on this server.", code: "AI_UNAVAILABLE" });
+  }
+
+  const how = kind === "classic"
+    ? `HOW THE APP REACHES THE BOARD: Classic Bluetooth serial (an HC-05/HC-06 module, or the ESP32's BluetoothSerial), with the Web Serial API.
+- The board must already be paired in the phone's or computer's Bluetooth settings: say so on the connect screen (a PIN, if asked, is usually 1234 or 0000).
+- Connect only from a button the person taps: const port = await navigator.serial.requestPort({ allowedBluetoothServiceClassIds: ["00001101-0000-1000-8000-00805f9b34fb"], filters: [{ bluetoothServiceClassId: "00001101-0000-1000-8000-00805f9b34fb" }] }); then await port.open({ baudRate }) with the baud rate the sketch uses for the Bluetooth link (9600 if it isn't clear).
+- Read with port.readable.getReader() and a TextDecoder, split into lines; write with a TextEncoder through port.writable.getWriter(), in exactly the format the sketch reads (the same characters and line endings). Release the reader and writer and close the port on disconnect.
+- If navigator.serial is missing, show plainly: "This browser can't use Bluetooth serial. Open the app in Chrome on Android, or in Chrome or Edge on a computer. iPhone and iPad can't connect to this kind of Bluetooth."
+- Show the connection state, and a Reconnect button after a disconnect.`
+    : kind === "bluetooth"
+    ? `HOW THE APP REACHES THE BOARD: Bluetooth Low Energy, with the Web Bluetooth API.
+- Use exactly the service and characteristic UUIDs in the sketch, in lower case (for an HM-10-style module on a serial port: service 0000ffe0-0000-1000-8000-00805f9b34fb, characteristic 0000ffe1-0000-1000-8000-00805f9b34fb, which carries the serial text both ways). Ask for the device with navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE_UUID] }] }) (add the sketch's device name as a namePrefix filter too when it sets one), only from a button the person taps.
+- Read values the board sends (with notifications when the characteristic offers NOTIFY), and write what the board expects, in the format the sketch parses.
+- If navigator.bluetooth is missing, show plainly: "This browser can't use Bluetooth. Open the app in Chrome on Android, Windows, Mac or a Chromebook. iPhone and iPad browsers can't use Bluetooth."
+- Show the connection state, and a Reconnect button after a disconnect.`
+    : `HOW THE APP REACHES THE BOARD: through the same internet service the sketch uses (the same URLs, MQTT topics, database paths, channel IDs or bot), never the board's local address.
+- A browser can only use HTTPS requests (fetch) and secure WebSockets (wss://). For MQTT, connect to the broker's secure WebSocket address with mqtt.js, loaded with <script src="https://unpkg.com/mqtt@5/dist/mqtt.min.js"></script>, the only external file allowed.
+- If the service as the sketch uses it can't be reached from a browser (plain MQTT on port 1883, a server on the local network, a phone number for SMS), build what can work and say exactly what must change in "notes".`;
+
+  const system = `You write the phone app for a microcontroller project: ONE complete, self-contained HTML page.
+It will be put on an https website and installed on phones and computers as an app. The app's manifest, icon, offline support and install tags are added for you afterwards: don't add any.
+
+${how}
+
+SECRETS: values shown as ${HIDDEN} in the sketch are passwords, keys and tokens, hidden on purpose. Never put any secret in the page: it is public. If the app needs one, give it a Settings panel where the person types it once, kept in localStorage on that device, and say so in the page.
+
+THE PAGE:
+- Its <title> is exactly the app name.
+- Made for a phone first, fine on a computer: large tap targets, readable text, light and dark (prefers-color-scheme), the app colour for accents.
+- All CSS and JavaScript inline. No other external files, fonts, images or frameworks.
+- Plain, friendly words for people who aren't engineers. Show clearly when something fails and what to do.
+- Controls and readings that match what this project actually does.
+
+Never name the underlying build system or toolchain. Reply with one JSON object and nothing else:
+{"html": "<!DOCTYPE html>... the whole page ...", "notes": "one or two short sentences the person needs to know (what to set up first, what can't work and why), or an empty string"}`;
+
+  const user = `App name: ${name}
+App colour: ${themeColor}
+${description ? `\nWhat the project does:\n${description}\n` : ""}
+The sketch (main.cpp):
+\`\`\`cpp
+${hideSecrets(code)}
+\`\`\``;
+
+  try {
+    const response = await completeChat(
+      [{ role: "system", content: system }, { role: "user", content: user }],
+      { jsonMode: true, signal: clientGone.signal },
+      modelFor(req.quota!.tier === "free"),
+    );
+    await incrementTokenUsage(req.uid!, req.quota, response.outputTokens);
+    countStat("ai_generate");
+    countStat(req.quota?.tier === "free" ? "ai_free" : "ai_pro");
+    countStat("ai_tokens", response.outputTokens);
+    countForUser(req.uid, "aiMessagesTotal");
+
+    let data: any = null;
+    try { data = JSON.parse(String(response.text || "").trim()); } catch { /* checked below */ }
+    const html = typeof data?.html === "string" ? data.html : "";
+    if (!/<html[\s>]/i.test(html) || !/<\/html>/i.test(html) || html.length > 400_000) {
+      return res.status(502).json({ error: "The agent's app page didn't come through complete. Try again.", code: "AI_BAD_PAGE" });
+    }
+    const notes = typeof data?.notes === "string" ? data.notes.slice(0, 800).trim() : "";
+    return res.json({ html, notes });
+  } catch (error: any) {
+    if (clientGone.signal.aborted) return;
+    if (error instanceof AiTimeoutError) {
+      return res.status(503).json({ error: "The AI service is very busy right now. Try again in a minute.", code: "AI_BUSY" });
+    }
+    console.error("App page error:", error?.message || error);
+    return res.status(502).json({ error: "The app page couldn't be written right now. Try again in a minute.", code: "AI_FAILED" });
+  }
+});
+
 // Debug code
 app.post("/api/ai/debug", requireAuthAndQuota, async (req, res) => {
   // Kept alive while the AI writes the fix (server/holdOpen.ts); stopped if the person leaves.
@@ -1065,6 +1217,8 @@ Never name the underlying build system, its config files or its directories, in 
 Return your response as a JSON object containing:
 - "code": The corrected C++ code.
 - "explanation": Short, scannable bullet points explaining the bug, why it occurred, and how it was resolved.
+
+${PHONE_APP_RULE}
 
 ${libraryNoteFor(req.uid)}
 If the error is a missing header ("No such file or directory") for a library that isn't well known, fix the include only if it is misspelled. Otherwise keep the #include and the code that uses it, return the code unchanged, and say in the explanation that the library needs adding under Libraries.`;
@@ -1502,6 +1656,9 @@ app.post("/api/compile", requireFirebaseAuth, async (req, res) => {
     finalCode = "#include <Arduino.h>\n" + finalCode;
   }
   fs.writeFileSync(correctSketchPath, finalCode);
+  // A sketch made into a phone app ("Build App (PWA)") gets its helper's
+  // headers beside it (server/appSupport.ts); any other sketch, nothing.
+  addAppHelper(finalCode, tempDir);
 
   let platformioIni = `
 [env:${board.id}]

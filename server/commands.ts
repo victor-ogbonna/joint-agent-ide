@@ -15,6 +15,10 @@
 export const WORKSPACE_COMMANDS = [
   "help", "compile", "flash", "clear", "engine", "web3 status", "ret",
   "monitor", "serial monitor",
+  // Reads back what the serial monitor has already shown, for the agent to
+  // use as context — unlike "monitor", which only opens the live view and
+  // hands nothing back.
+  "serial log",
 ] as const;
 
 export function isWorkspaceCommand(command: string): boolean {
@@ -30,6 +34,11 @@ export function isWorkspaceCommand(command: string): boolean {
 export function toWorkspaceCommand(command: string): string | null {
   const c = String(command || "").trim().toLowerCase();
   if (isWorkspaceCommand(c)) return c;
+  // Reading back what's already shown ("check the serial log", "what has the
+  // serial monitor printed") is a different action from opening the live
+  // view, and both phrasings mention "monitor" — read intent is checked
+  // first, so it is never mistaken for "open".
+  if (/\bserial\b/.test(c) && /\b(read|check|show|log|history|output|printed|so far)\b/.test(c)) return "serial log";
   if (/\bmonitor\b/.test(c)) return "monitor";
   return null;
 }

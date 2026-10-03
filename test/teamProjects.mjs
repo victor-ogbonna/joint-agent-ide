@@ -12,6 +12,7 @@ import {
   setAdminsCanView, projectsToShare, shareProject, listTeamProjects, viewTeamProject, editTeamProject,
   sendTeamProject, stopEditingTeamProject, freeTeamProject, removeTeamProject, copyTeamProject, teamCopyOf,
   memberProjects, memberProject, EDIT_HOLD_MS, MAX_TEAM_PROJECTS, TEAM_PROJECTS,
+  listComments, postComment, deleteComment, commentText, MAX_COMMENT_LENGTH, MAX_COMMENTS_PER_PROJECT,
 } from "../server/teamProjects.ts";
 import { TeamError, teamPage } from "../server/teams.ts";
 
@@ -256,12 +257,62 @@ catch (e) { check(e instanceof TeamError && e.status === 413 && /too long to sha
 check(db.selects > 0, "lists ask for the row fields only (not every project's code)");
 check(read("teamMembers/chi")?.teamCopies?.[e1.copyId] === tp, "Edit records which team project a working copy is, so opening a project reads one document");
 
+console.log("Comments on a team project");
+{
+  const row = async (w, at = NOW) => (await listTeamProjects(db, w, at)).find((r) => r.id === tp);
+  check((await row(chi)).comments === 0 && (await row(chi)).newComments === false, "none yet: nothing new");
+  const c1 = await postComment(db, ada, tp, "  Check the resistor\r\n\r\n\r\n\r\non pin 4.  ", NOW + 10);
+  const stored = read(`${TEAM_PROJECTS}/${tp}/comments/${c1}`);
+  check(stored?.text === "Check the resistor\n\non pin 4." && stored.author?.uid === "ada" && stored.author?.email === "ada@school.ng" && stored.createdAt === NOW + 10,
+    "Ada (the teacher) comments: kept tidy (spaces trimmed, one blank line at most), with who and when", JSON.stringify(stored?.text));
+  check(read(`${TEAM_PROJECTS}/${tp}`).commentCount === 1 && read(`${TEAM_PROJECTS}/${tp}`).lastCommentBy === "ada", "the project counts it");
+  const benRow = await row(ben);
+  check(benRow.comments === 1 && benRow.newComments === true, "Ben sees 1 comment, marked new");
+  check((await row(ada)).newComments === false, "her own comment isn't new to Ada");
+  const seenByBen = await listComments(db, ben, tp, NOW + 20);
+  check(seenByBen.length === 1 && seenByBen[0].by === "ada@school.ng" && seenByBen[0].text === "Check the resistor\n\non pin 4." && seenByBen[0].mine === false && seenByBen[0].canDelete === false,
+    "Ben reads it: who wrote it, the text; he can't delete the teacher's comment");
+  check((await row(ben, NOW + 21)).newComments === false && (await row(chi)).newComments === true, "read: not new for Ben any more, still new for Chi");
+  const c2 = await postComment(db, ben, tp, "Moved it to pin 5, works now!", NOW + 30);
+  check((await row(ada, NOW + 31)).newComments === true && (await row(ben, NOW + 31)).newComments === false, "Ben replies: new for Ada, not for him");
+  const asAda = await listComments(db, ada, tp, NOW + 40);
+  check(asAda.map((c) => c.id).join() === `${c1},${c2}` && asAda.every((c) => c.canDelete) && asAda[0].mine && !asAda[1].mine, "oldest first; Ada (admin) may delete any comment");
+  check(commentText("a\u202Eevil\u0007b\u200F") === "aevilb" && commentText(42) === "", "invisible direction marks and control characters are dropped");
+  check(await throwsWith(() => postComment(db, chi, tp, "   \n\n  ", NOW), /Write a comment first/), "an empty comment is refused");
+  check(await throwsWith(() => postComment(db, chi, tp, "x".repeat(MAX_COMMENT_LENGTH + 1), NOW), /up to 1000 characters\. This one is 1001/), `over ${MAX_COMMENT_LENGTH} characters is refused, never cut short`);
+  check((await postComment(db, chi, tp, "y".repeat(MAX_COMMENT_LENGTH), NOW + 50)).length > 0, `exactly ${MAX_COMMENT_LENGTH} is fine`);
+  check(await throwsWith(() => listComments(db, dee, tp, NOW), /no longer shared with your team/) && await throwsWith(() => postComment(db, dee, tp, "hi", NOW), /no longer shared with your team/), "another team can't read or comment");
+  check(await throwsWith(() => listComments(db, eve, tp, NOW), /not on a team/), "nor can someone on no team");
+  check(await throwsWith(() => deleteComment(db, chi, tp, c1), /Only whoever wrote it, or an admin/), "Chi can't delete Ada's comment");
+  check(await throwsWith(() => deleteComment(db, ben, tp, "../x"), /No such comment/), "a made-up comment id is refused");
+  await deleteComment(db, ben, tp, c2);
+  check(read(`${TEAM_PROJECTS}/${tp}/comments/${c2}`) === undefined && read(`${TEAM_PROJECTS}/${tp}`).commentCount === 2, "Ben deletes his own; the count follows");
+  check(await throwsWith(() => deleteComment(db, ben, tp, c2), /isn't there any more/), "deleting it twice: said plainly");
+  const c3 = await postComment(db, ben, tp, "oops, wrong project", NOW + 60);
+  check((await row(chi, NOW + 61)).newComments === true, "Ben posts again: new for Chi");
+  await deleteComment(db, ben, tp, c3);
+  const afterOops = read(`${TEAM_PROJECTS}/${tp}`);
+  check((await row(chi, NOW + 62)).newComments === false && afterOops.commentCount === 2 && afterOops.lastCommentAt === NOW + 50 && afterOops.lastCommentBy === "chi",
+    "he deletes it at once: it never shows as new; the latest is Chi's own again", JSON.stringify([afterOops.commentCount, afterOops.lastCommentAt, afterOops.lastCommentBy]));
+  license(null, null);
+  check(await throwsWith(() => listComments(db, chi, tp, NOW), UNPAID_MEMBER) && await throwsWith(() => postComment(db, chi, tp, "hi", NOW), UNPAID_MEMBER), "unpaid: comments can't be read or written");
+  await deleteComment(db, ada, tp, c1);
+  check(read(`${TEAM_PROJECTS}/${tp}/comments/${c1}`) === undefined, "but deleting one always works");
+  license(paidT1, null);
+  db.doc(`${TEAM_PROJECTS}/${tp}`)._write({ commentCount: MAX_COMMENTS_PER_PROJECT }, { merge: true });
+  check(await throwsWith(() => postComment(db, chi, tp, "one more", NOW), /the most it can keep/), `at most ${MAX_COMMENTS_PER_PROJECT} comments a project`);
+  db.doc(`${TEAM_PROJECTS}/${tp}`)._write({ commentCount: 1 }, { merge: true });
+  const p = read(`${TEAM_PROJECTS}/${tp}`);
+  check(typeof p.code === "string" && p.version >= 1 && p.updatedBy, "commenting leaves the project itself as it was");
+}
+
 console.log("Copies, removing, and the limit");
 const mine = await copyTeamProject(db, chi, tp, NOW);
 check(read(`users/chi/projects/${mine}`).name === "Weather station (copy)" && await teamCopyOf(db, chi, mine, NOW) === null, "Copy to my projects: Chi's to keep, not linked to the team's");
 check(await throwsWith(() => removeTeamProject(db, chi, tp), /Only whoever shared it/), "Chi can't remove it");
 await removeTeamProject(db, ben, tp);
 check(read(`${TEAM_PROJECTS}/${tp}`) === undefined && read(`users/chi/projects/${e1.copyId}`) !== undefined, "Ben (who shared it) removes it; everyone's own copies stay theirs");
+check(![...db.store.keys()].some((k) => k.startsWith(`${TEAM_PROJECTS}/${tp}/comments/`)), "its comments go with it");
 check(await throwsWith(() => editTeamProject(db, chi, tp, NOW), /no longer shared/), "it can't be edited after that");
 for (let i = 0; i < MAX_TEAM_PROJECTS; i++) put(`${TEAM_PROJECTS}/fill${i}`, { teamId: "T1", name: `P${i}`, version: 1, sharedBy: { uid: "ada" }, updatedBy: { uid: "ada" } });
 check(await throwsWith(() => shareProject(db, ben, "p1", NOW), /the most it can have/), `at most ${MAX_TEAM_PROJECTS} shared projects a team`);

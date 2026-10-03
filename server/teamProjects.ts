@@ -14,6 +14,11 @@
  *     lets it go; Stop editing lets it go unchanged. While one person holds
  *     it, the others see who, and can view or copy it. The team's admins can
  *     free a hold and remove a team project; so can whoever shared it.
+ *   - Comments. Everyone on the team can comment on a team project (a
+ *     teacher's note on a student's project, and the reply), and sees
+ *     which projects have comments they haven't read. Whoever wrote a
+ *     comment, or an admin, can delete it; removing the project removes
+ *     its comments.
  *   - Admins seeing members' projects. Each member chooses whether the
  *     team's admins may see their projects (off until they turn it on).
  *     Admins then see them read-only, as a share link shows a project: the
@@ -28,11 +33,16 @@
  * Firestore, server-only (the browser can't read or write these):
  *   teamProjects/{id}            the team's copy, who shared it, who is
  *                                editing it, and each editor's working copy
- *                                (which version of the team's copy it is)
- *   teamMembers/{uid}            adminsCanView, the member's own choice, and
+ *                                (which version of the team's copy it is),
+ *                                and how many comments it has and when the
+ *                                latest was written
+ *   teamProjects/{id}/comments/{commentId}
+ *                                each comment: who wrote it, when, the text
+ *   teamMembers/{uid}            adminsCanView, the member's own choice,
  *                                teamCopies (each working copy's team project,
  *                                so opening a project reads one document, not
- *                                every team project)
+ *                                every team project), and commentsSeen (when
+ *                                they last read each project's comments)
  *   users/{uid}/projects/{id}    working copies are written here, among the
  *                                person's own projects, with only the fields
  *                                a project always has (so the Firestore rules
@@ -54,6 +64,10 @@ export const TEAM_PROJECTS = "teamProjects";
 export const MAX_TEAM_PROJECTS = 200;
 /** How long Edit holds a team project for one person, unless they send it or stop first. */
 export const EDIT_HOLD_MS = 24 * 60 * 60 * 1000;
+/** The longest comment, in characters. */
+export const MAX_COMMENT_LENGTH = 1000;
+/** Most comments one team project keeps: a thread, not a chat room. */
+export const MAX_COMMENTS_PER_PROJECT = 500;
 
 const PROJECT_ID = /^[A-Za-z0-9]{1,64}$/;
 const TEAM_PROJECT_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -68,6 +82,7 @@ const millis = (v: any): number | null => (v && typeof v.toMillis === "function"
 
 const memberRef = (db: Db, uid: string) => db.collection(MEMBERS).doc(uid);
 const teamProjectRef = (db: Db, id: string) => db.collection(TEAM_PROJECTS).doc(id);
+const commentsOf = (db: Db, teamProjectId: string) => db.collection(`${TEAM_PROJECTS}/${teamProjectId}/comments`);
 const ownProjects = (db: Db, uid: string) => db.collection(`users/${uid}/projects`);
 const ownProjectRef = (db: Db, uid: string, projectId: string) => db.doc(`users/${uid}/projects/${projectId}`);
 
@@ -139,6 +154,10 @@ export interface TeamProjectRecord {
   copies: Record<string, { copyId: string; version: number }>;
   /** The project it was shared from, so the same one isn't shared twice. */
   source: { uid: string; projectId: string } | null;
+  commentCount: number;
+  /** When the latest comment was written, and by whom: for "new comments". */
+  lastCommentAt: number;
+  lastCommentBy: string | null;
 }
 
 const personOf = (v: any): Person => ({ uid: typeof v?.uid === "string" ? v.uid : "", email: typeof v?.email === "string" && v.email ? v.email : null });
@@ -172,6 +191,9 @@ export function teamProjectOf(id: string, d: any): TeamProjectRecord {
     editor,
     copies,
     source: d.source && typeof d.source.uid === "string" && typeof d.source.projectId === "string" ? { uid: d.source.uid, projectId: d.source.projectId } : null,
+    commentCount: Math.max(0, Math.floor(num(d.commentCount))),
+    lastCommentAt: num(d.lastCommentAt),
+    lastCommentBy: typeof d.lastCommentBy === "string" ? d.lastCommentBy : null,
   };
 }
 
@@ -194,6 +216,10 @@ export interface TeamProjectRow {
   copyId: string | null;
   canRemove: boolean;
   canFree: boolean;
+  /** How many comments it has. */
+  comments: number;
+  /** Someone else commented since the person last read its comments. */
+  newComments: boolean;
 }
 
 /**
@@ -201,7 +227,7 @@ export interface TeamProjectRow {
  * (`onTeam`). A hold by someone who has left doesn't block anyone, as Edit
  * lets the next person take it over.
  */
-function rowOf(t: TeamProjectRecord, me: MemberRecord, now: number, onTeam: Set<string>): TeamProjectRow {
+function rowOf(t: TeamProjectRecord, me: MemberRecord, now: number, onTeam: Set<string>, seen: Record<string, number>): TeamProjectRow {
   const held = heldNow(t, now) && t.editor && (t.editor.uid === me.uid || onTeam.has(t.editor.uid)) ? t.editor : null;
   const mine = !!held && held.uid === me.uid;
   return {
@@ -217,7 +243,17 @@ function rowOf(t: TeamProjectRecord, me: MemberRecord, now: number, onTeam: Set<
     copyId: mine && held ? held.copyId : null,
     canRemove: me.role === "admin" || t.sharedBy.uid === me.uid,
     canFree: me.role === "admin" && !!held && !mine,
+    comments: t.commentCount,
+    newComments: t.commentCount > 0 && t.lastCommentBy !== me.uid && t.lastCommentAt > (seen[t.id] ?? 0),
   };
+}
+
+/** When the person last read each team project's comments, from their membership record. */
+function seenOf(memberSnap: any): Record<string, number> {
+  const raw = memberSnap?.exists ? memberSnap.get("commentsSeen") : null;
+  const seen: Record<string, number> = {};
+  if (raw && typeof raw === "object") for (const [k, v] of Object.entries(raw)) if (typeof v === "number" && Number.isFinite(v)) seen[k] = v;
+  return seen;
 }
 
 async function readTeamProject(get: (ref: any) => Promise<any>, db: Db, id: string, me: MemberRecord): Promise<TeamProjectRecord> {
@@ -239,7 +275,7 @@ async function holdersOnTeam(db: Db, records: TeamProjectRecord[], me: MemberRec
 }
 
 // Only the fields a list needs: never the code of every shared project.
-const ROW_FIELDS = ["teamId", "name", "mcu", "boardId", "sharedBy", "sharedAt", "updatedBy", "updatedAt", "version", "editor"];
+const ROW_FIELDS = ["teamId", "name", "mcu", "boardId", "sharedBy", "sharedAt", "updatedBy", "updatedAt", "version", "editor", "commentCount", "lastCommentAt", "lastCommentBy"];
 const OWN_ROW_FIELDS = ["name", "mcu", "boardId", "updatedAt", "deletedAt"];
 
 // ---- The member's choice: may the team's admins see my projects? ----
@@ -316,13 +352,15 @@ export async function shareProject(db: Db, who: Who, rawProjectId: unknown, now:
 
 /** Everything shared with the person's team, most recently changed first. */
 export async function listTeamProjects(db: Db, who: Who, now: number): Promise<TeamProjectRow[]> {
-  const me = await membership((r) => r.get(), db, who.uid);
+  const mine = await memberRef(db, who.uid).get();
+  const me = await membership(async () => mine, db, who.uid);
   await paidTeam((r) => r.get(), db, me, now);
   const snap = await db.collection(TEAM_PROJECTS).where("teamId", "==", me.teamId).select(...ROW_FIELDS).get();
   const records: TeamProjectRecord[] = snap.docs.map((d: any) => teamProjectOf(d.id, d.data()));
   const onTeam = await holdersOnTeam(db, records, me, now);
+  const seen = seenOf(mine);
   return records
-    .map((t) => rowOf(t, me, now, onTeam))
+    .map((t) => rowOf(t, me, now, onTeam, seen))
     .sort((a: TeamProjectRow, b: TeamProjectRow) => b.updatedAt - a.updatedAt);
 }
 
@@ -442,7 +480,7 @@ export async function freeTeamProject(db: Db, who: Who, rawId: unknown): Promise
   });
 }
 
-/** Whoever shared it, or an admin, takes it off the team. Everyone's own copies stay theirs. */
+/** Whoever shared it, or an admin, takes it off the team. Everyone's own copies stay theirs; its comments go with it. */
 export async function removeTeamProject(db: Db, who: Who, rawId: unknown): Promise<void> {
   const id = cleanId(rawId, TEAM_PROJECT_ID, "project");
   await db.runTransaction(async (tx: any) => {
@@ -451,6 +489,17 @@ export async function removeTeamProject(db: Db, who: Who, rawId: unknown): Promi
     if (me.role !== "admin" && t.sharedBy.uid !== who.uid) throw new TeamError("Only whoever shared it, or an admin, can remove it.", 403);
     tx.delete(teamProjectRef(db, id));
   });
+  // Afterwards, outside the transaction (a transaction can't list them).
+  // The project is gone, so nobody can read them meanwhile; one left behind
+  // by a failure here can't be reached either.
+  try {
+    const left = await commentsOf(db, id).get();
+    for (let i = 0; i < left.docs.length; i += 50) {
+      await Promise.all(left.docs.slice(i, i + 50).map((d: any) => d.ref.delete()));
+    }
+  } catch (err: any) {
+    console.error("[Team projects] Removing a removed project's comments failed:", err?.message || err);
+  }
 }
 
 /** A copy of a team project for the person to keep, not linked to the team's. */
@@ -489,6 +538,118 @@ export async function teamCopyOf(db: Db, who: Who, rawProjectId: unknown, now: n
     editing,
     editingBy: held && !editing ? held.email : null,
   };
+}
+
+// ---- Comments on a team project ----
+
+/** A comment as the person sees it. */
+export interface TeamComment {
+  id: string;
+  by: string | null;
+  at: number;
+  text: string;
+  mine: boolean;
+  canDelete: boolean;
+}
+
+/**
+ * What's kept of what someone typed: line breaks as \n, no control
+ * characters or invisible direction marks (which can make text read as
+ * something else), no more than one blank line in a row, no space around.
+ */
+export function commentText(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  return raw
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+const COMMENT_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** A team project's comments, oldest first. Opening them marks them read for the person. */
+export async function listComments(db: Db, who: Who, rawId: unknown, now: number): Promise<TeamComment[]> {
+  const id = cleanId(rawId, TEAM_PROJECT_ID, "project");
+  const me = await membership((r) => r.get(), db, who.uid);
+  await paidTeam((r) => r.get(), db, me, now);
+  await readTeamProject((r) => r.get(), db, id, me);
+  const snap = await commentsOf(db, id).get();
+  const comments: TeamComment[] = snap.docs
+    .map((d: any) => {
+      const c = d.data() || {};
+      const author = personOf(c.author);
+      return {
+        id: d.id,
+        by: author.email,
+        at: num(c.createdAt),
+        text: typeof c.text === "string" ? c.text : "",
+        mine: author.uid === who.uid,
+        canDelete: author.uid === who.uid || me.role === "admin",
+      };
+    })
+    .filter((c: TeamComment) => c.text)
+    .sort((a: TeamComment, b: TeamComment) => a.at - b.at || a.id.localeCompare(b.id));
+  // Read now: only the person's own record, and only while they're on the team.
+  await db.runTransaction(async (tx: any) => {
+    const still = await membership((r) => tx.get(r), db, who.uid);
+    if (still.teamId !== me.teamId) return;
+    tx.set(memberRef(db, who.uid), { commentsSeen: { [id]: now } }, { merge: true });
+  });
+  return comments;
+}
+
+/** Everyone on the team can comment on a team project while the license is paid. */
+export async function postComment(db: Db, who: Who, rawId: unknown, rawText: unknown, now: number): Promise<string> {
+  const id = cleanId(rawId, TEAM_PROJECT_ID, "project");
+  const body = commentText(rawText);
+  if (!body) throw new TeamError("Write a comment first.");
+  if (body.length > MAX_COMMENT_LENGTH) throw new TeamError(`A comment can be up to ${MAX_COMMENT_LENGTH} characters. This one is ${body.length}.`);
+  const ref = commentsOf(db, id).doc();
+  return db.runTransaction(async (tx: any) => {
+    const me = await membership((r) => tx.get(r), db, who.uid);
+    await paidTeam((r) => tx.get(r), db, me, now);
+    const t = await readTeamProject((r) => tx.get(r), db, id, me);
+    if (t.commentCount >= MAX_COMMENTS_PER_PROJECT) {
+      throw new TeamError(`This project has ${MAX_COMMENTS_PER_PROJECT} comments, the most it can keep. Delete some old ones first.`, 409);
+    }
+    tx.set(ref, { author: { uid: who.uid, email: who.email }, text: body, createdAt: now });
+    tx.set(teamProjectRef(db, id), { commentCount: t.commentCount + 1, lastCommentAt: now, lastCommentBy: who.uid }, { merge: true });
+    // Their own comment isn't news to them.
+    tx.set(memberRef(db, who.uid), { commentsSeen: { [id]: now } }, { merge: true });
+    return ref.id;
+  });
+}
+
+/**
+ * Whoever wrote it, or an admin, deletes a comment: always allowed, paid or
+ * not. The count and the latest comment are worked out again from what's
+ * left, so a deleted comment never shows as new.
+ */
+export async function deleteComment(db: Db, who: Who, rawId: unknown, rawCommentId: unknown): Promise<void> {
+  const id = cleanId(rawId, TEAM_PROJECT_ID, "project");
+  const commentId = cleanId(rawCommentId, COMMENT_ID, "comment");
+  await db.runTransaction(async (tx: any) => {
+    const me = await membership((r) => tx.get(r), db, who.uid);
+    await readTeamProject((r) => tx.get(r), db, id, me);
+    const ref = commentsOf(db, id).doc(commentId);
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new TeamError("That comment isn't there any more.", 404);
+    const author = personOf(snap.get("author"));
+    if (author.uid !== who.uid && me.role !== "admin") throw new TeamError("Only whoever wrote it, or an admin, can delete it.", 403);
+    const all = await tx.get(commentsOf(db, id));
+    const rest = all.docs
+      .filter((d: any) => d.id !== commentId)
+      .map((d: any) => ({ at: num(d.get("createdAt")), by: personOf(d.get("author")).uid || null }))
+      .sort((a: { at: number }, b: { at: number }) => b.at - a.at);
+    tx.delete(ref);
+    tx.set(teamProjectRef(db, id), {
+      commentCount: rest.length,
+      lastCommentAt: rest[0]?.at ?? 0,
+      lastCommentBy: rest[0]?.by ?? null,
+    }, { merge: true });
+  });
 }
 
 // ---- Admins seeing a member's projects, when the member allows it ----
@@ -595,6 +756,10 @@ export function registerTeamProjectRoutes(app: express.Express) {
   post("/api/team/projects/:id/free", "Freeing a team project", async (req) => { await freeTeamProject(adminDb, whoOf(req), req.params.id); return { ok: true }; });
   post("/api/team/projects/:id/remove", "Removing a team project", async (req) => { await removeTeamProject(adminDb, whoOf(req), req.params.id); return { ok: true }; });
   post("/api/team/projects/:id/copy", "Copying a team project", async (req) => ({ projectId: await copyTeamProject(adminDb, whoOf(req), req.params.id, Date.now()) }));
+
+  get("/api/team/projects/:id/comments", "Opening the comments", async (req) => ({ comments: await listComments(adminDb, whoOf(req), req.params.id, Date.now()) }));
+  post("/api/team/projects/:id/comments", "Posting a comment", async (req) => ({ id: await postComment(adminDb, whoOf(req), req.params.id, req.body?.text, Date.now()) }));
+  post("/api/team/projects/:id/comments/:commentId/delete", "Deleting a comment", async (req) => { await deleteComment(adminDb, whoOf(req), req.params.id, req.params.commentId); return { ok: true }; });
 
   get("/api/team/copy/:projectId", "Checking a working copy", async (req) => ({ copy: await teamCopyOf(adminDb, whoOf(req), req.params.projectId, Date.now()) }));
 

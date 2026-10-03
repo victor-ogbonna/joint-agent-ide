@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { X, Github, Loader2, Check, Plus, RefreshCw, Lock, Globe, Paperclip, ExternalLink } from "lucide-react";
 import { auth } from "../lib/firebase";
+import { appHelperFiles, usesAppHelper } from "../lib/appHeaders";
+import { fetchPng } from "../lib/appPackage";
 
 interface Repo { fullName: string; private: boolean; defaultBranch: string; updatedAt: string; }
 interface Status { configured: boolean; connected: boolean; login?: string; avatarUrl?: string; }
@@ -158,6 +160,12 @@ export default function GithubPanel({
         { path: "schematic.json", content: schematicJson },
         ...photos.map((p) => ({ path: `photos/${p.name}`, content: p.dataBase64, encoding: "base64" as const })),
       ];
+      // A sketch made into a phone app (Build App) needs its helper's
+      // headers beside it to build anywhere else (src/lib/appHeaders.ts).
+      if (usesAppHelper(code)) {
+        const icon = await fetchPng("/icons/icon-192.png");
+        for (const f of appHelperFiles(icon)) files.push({ path: `include/${f.name}`, content: f.content });
+      }
 
       const r = await api("/api/github/commit", {
         method: "POST",

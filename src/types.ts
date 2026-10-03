@@ -78,6 +78,11 @@ export interface ChatMessage {
   failed?: boolean;
   /** The mode the message it answers was sent in, for Try again. */
   retryMode?: "plan" | "implement";
+  /** What the agent did on the person's project while it worked ("Reading
+   *  your sketch", "Writing the firmware"): shown as it goes, then folded. */
+  steps?: string[];
+  /** Still working: the last step is the current one. */
+  working?: boolean;
   suggestedProjectUpdate?: {
     code?: string;
     description?: string;

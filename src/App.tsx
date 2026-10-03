@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, Suspense } from "react";
-import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass, Share2, Users} from "lucide-react";
+import { Cpu, Terminal as TerminalIcon, Sun, Moon, Layers, Code, Zap, FileCode, FolderOpen, ChevronDown, ChevronRight, Wallet, Shield, Check, Info, Settings, Bot, PenTool, X, Palette, Usb, MoreVertical, Plus, Activity, Monitor, Copy, Cloud, LogOut, Lock, Upload, MessageSquarePlus, Github, Trash2, Loader2, Globe, RefreshCw, Rocket, Puzzle, Download, Clock, Compass, Share2, Users, Smartphone} from "lucide-react";
 import { useAuth } from "./contexts/AuthContext";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import {
@@ -22,6 +22,7 @@ import WelcomeModal from "./components/WelcomeModal";
 import FeedbackWidget from "./components/FeedbackWidget";
 import GithubPanel from "./components/GithubPanel";
 import WebPreviewPanel from "./components/WebPreviewPanel";
+import BuildAppModal from "./components/BuildAppModal";
 import PlansModal, { type FirstMonthOffer, type PlanPriceView, type BillingPeriod } from "./components/PlansModal";
 import { storedRef, clearStoredRef } from "./lib/referral";
 import { loadPaystack } from "./lib/paystackScript";
@@ -40,7 +41,7 @@ import { readTeamStatus, readInvitation, stateLabel, type TeamStatusView, type T
 import TeamInviteBanner from "./components/TeamInviteBanner";
 import LibrariesModal from "./components/LibrariesModal";
 import OnboardingTour, { TourStep } from "./components/OnboardingTour";
-import { canInstallApp, installApp, isInstalledFullscreenApp, onInstallAvailabilityChange } from "./lib/installApp";
+import { installKind, installApp, isInstalledFullscreenApp, onInstallAvailabilityChange } from "./lib/installApp";
 import { WINDOW_HOURS, FREE_WINDOW_TOKENS, PRO_WINDOW_TOKENS, FREE_PROJECT_LIMIT, formatWait, formatWhen, formatDay, percentUsed } from "./lib/plans";
 import { ESPLoader, Transport } from "esptool-js";
 import { flashAvr } from "./lib/avrFlash";
@@ -441,8 +442,11 @@ export default function App() {
   const [profileMenuAt, setProfileMenuAt] = useState<{ left: number; top: number } | null>(null);
   // Whether Chrome will install the site as an app right now. Never true
   // inside the installed app itself.
-  const [canInstall, setCanInstall] = useState(canInstallApp);
-  useEffect(() => onInstallAvailabilityChange(() => setCanInstall(canInstallApp())), []);
+  // "prompt": Chrome's own install dialog. "ios": no such dialog exists on
+  // an iPhone or iPad, so the menu item shows the Safari steps instead.
+  const [installAs, setInstallAs] = useState(installKind);
+  useEffect(() => onInstallAvailabilityChange(() => setInstallAs(installKind())), []);
+  const [showIOSInstallHelp, setShowIOSInstallHelp] = useState(false);
   /**
    * The account's plan as the server reports it: "pro" (subscribed or
    * granted), "unmetered" or "free". Kept apart from `tier`, which the chat
@@ -817,6 +821,7 @@ export default function App() {
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [githubOpen, setGithubOpen] = useState(false);
   const [webPreviewOpen, setWebPreviewOpen] = useState(false);
+  const [buildAppOpen, setBuildAppOpen] = useState(false);
   /** The monitor was running when the board went away, so bring it back when
    *  the board returns. Unplugging previously ended the session silently and
    *  left no way to resume short of reloading. */
@@ -858,6 +863,10 @@ export default function App() {
 
   // Terminal & Chats
   const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
+  // For the agent's "read the serial monitor" tool, from closures older than
+  // the terminal's latest content.
+  const terminalLinesRef = useRef<TerminalLine[]>([]);
+  useEffect(() => { terminalLinesRef.current = terminalLines; }, [terminalLines]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   // The latest handleSendMessage, for sends started from older closures (the
   // agent's command handler); refreshed on every render below.
@@ -2835,6 +2844,8 @@ export default function App() {
     // The server couldn't write the reply ("failed"): it says why, and Try
     // again sends the message once more.
     let failed: boolean = false;
+    // The steps shown while it works (tool_progress, below).
+    const steps: string[] = [];
     let started = false;
     const ensureStarted = () => {
       if (started) return;
@@ -2856,6 +2867,23 @@ export default function App() {
     const updateAssistantMsg = (patch: Partial<ChatMessage>) => {
       setChatMessages((prev) => prev.map((m) => (m.id === assistantMsgId ? { ...m, ...patch } : m)));
     };
+    // text_delta can arrive many times a second — sometimes several in one
+    // frame — and re-rendering (which re-parses the whole reply as
+    // markdown; src/components/AgentChat.tsx) on every single one falls
+    // behind as the reply grows, then catches up in a lump: the jerky,
+    // forced-looking reveal. One flush a frame is as often as the screen
+    // can show anything new anyway, and nothing is ever dropped — each
+    // flush reads whatever has accumulated by then.
+    let flushScheduled = false;
+    const flushAssistantContent = () => {
+      flushScheduled = false;
+      updateAssistantMsg({ content: assistantContent });
+    };
+    const scheduleAssistantContentFlush = () => {
+      if (flushScheduled) return;
+      flushScheduled = true;
+      requestAnimationFrame(flushAssistantContent);
+    };
 
     try {
       const result = await streamChatEndpoint(
@@ -2865,12 +2893,19 @@ export default function App() {
         // The sketch in the editor goes along, so the agent changes it rather
         // than writing a new one blind.
         // Replies that didn't come through aren't part of the conversation.
-        { messages: newMessages.filter((m) => !m.compacted && !m.failed), mcu, boardId, chatMode: effectiveMode, currentCode: codeRef.current },
+        {
+          messages: newMessages.filter((m) => !m.compacted && !m.failed), mcu, boardId, chatMode: effectiveMode, currentCode: codeRef.current,
+          // What the serial monitor has shown so far, for the agent's "read
+          // the serial monitor" tool — rides along on every turn (it's
+          // small, and empty when nothing is connected), but is only ever
+          // read server-side when asked for.
+          serialLines: terminalLinesRef.current.filter((l) => l.type === "serial").slice(-200).map((l) => l.text),
+        },
         (event) => {
           if (event.type === "text_delta") {
             assistantContent += event.text;
             ensureStarted();
-            updateAssistantMsg({ content: assistantContent });
+            scheduleAssistantContentFlush();
           } else if (event.type === "tier") {
             setTier(event.tier);
           } else if (event.type === "context") {
@@ -2918,10 +2953,14 @@ export default function App() {
             ensureStarted();
             updateAssistantMsg({ content: assistantContent });
           } else if (event.type === "tool_progress") {
-            // Emitted while the model streams tool-call arguments. Without it
-            // the user stares at a spinner for the whole of code generation.
+            // What the agent is doing on the project, shown as a short list
+            // of steps while it works (the same step repeated while code is
+            // being written counts once). Without it the user stares at a
+            // spinner for the whole of code generation.
             ensureStarted();
-            if (!assistantContent) updateAssistantMsg({ content: event.text });
+            const step = String(event.text || "").trim();
+            if (step && steps[steps.length - 1] !== step) steps.push(step);
+            updateAssistantMsg({ steps: [...steps], working: true, ...(assistantContent ? {} : { content: "" }) });
           } else if (event.type === "failed") {
             failed = true;
           }
@@ -2948,6 +2987,12 @@ export default function App() {
       if (result.error) throw new Error(result.error);
 
       ensureStarted(); // defensive: stream completed with zero events
+      // The stream is done: show the whole reply now, not on whatever frame
+      // a throttled background tab next gets around to.
+      if (flushScheduled) flushAssistantContent();
+      // Steps and nothing else (it shouldn't happen: the server always says
+      // something): never leave an empty bubble.
+      if (!assistantContent) updateAssistantMsg({ content: "Done." });
 
       if (failed) {
         updateAssistantMsg({ failed: true, retryMode: effectiveMode });
@@ -3004,6 +3049,8 @@ export default function App() {
     } finally {
       setIsLoading(false);
       abortControllerRef.current = null;
+      // However it ended, it's no longer working: the steps fold away.
+      if (started) updateAssistantMsg({ working: false });
     }
   };
 
@@ -4013,6 +4060,9 @@ export default function App() {
                 <button onClick={() => setWebPreviewOpen(true)} className="w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]">
                   <Globe size={13} /> Web Preview
                 </button>
+                <button onClick={() => setBuildAppOpen(true)} className="w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]">
+                  <Smartphone size={13} /> Build App (PWA)
+                </button>
                 <button onClick={() => { setCompactDock(false); setIsSerialMonitorOpen(!isSerialMonitorOpen); if (isNarrow) { setMobilePane("editor"); if (!isSerialMonitorOpen) setMobileDockTab("serial"); } }} className={`w-full flex items-center gap-2 px-2 py-1.5 text-[11px] rounded-md transition ${isSerialMonitorOpen ? 'bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] font-medium' : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-main)]'}`}>
                   <Monitor size={13} /> Serial Monitor
                 </button>
@@ -4556,9 +4606,13 @@ export default function App() {
               <Users size={14} className="text-[var(--text-muted)]" />
               {teamStatus ? (teamStatus.role === "admin" ? "Manage your team" : "Your team") : "Team & school licenses"}
             </a>
-            {canInstall && (
+            {installAs && (
               <button
-                onClick={() => { setIsMenuOpen(false); installApp(); }}
+                onClick={() => {
+                  setIsMenuOpen(false);
+                  if (installAs === "ios") setShowIOSInstallHelp(true);
+                  else void installApp();
+                }}
                 className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition rounded-md mx-1"
               >
                 <Download size={14} className="text-[var(--text-muted)]" />
@@ -4605,6 +4659,50 @@ export default function App() {
       )}
 
       {isLibrariesOpen && <LibrariesModal onClose={() => setIsLibrariesOpen(false)} />}
+
+      {showIOSInstallHelp && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-black/70 backdrop-blur-sm" onClick={() => setShowIOSInstallHelp(false)}>
+          <div className="flex min-h-full items-end sm:items-center justify-center sm:p-4">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="ios-install-title"
+              onClick={(e) => e.stopPropagation()}
+              className="w-full sm:max-w-sm bg-[var(--bg-root)] border border-[var(--border-main)] sm:rounded-2xl rounded-t-2xl shadow-2xl px-5 pt-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] animate-slide-up"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <h2 id="ios-install-title" className="font-display font-bold text-base text-[var(--text-main)] leading-snug">
+                  Add Joint-Agent to your Home Screen
+                </h2>
+                <button
+                  onClick={() => setShowIOSInstallHelp(false)}
+                  aria-label="Close"
+                  className="w-9 h-9 -mr-2 -mt-1 flex items-center justify-center rounded-lg text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition shrink-0"
+                >
+                  <X size={17} />
+                </button>
+              </div>
+              <p className="mt-2 text-[13px] leading-relaxed text-[var(--text-muted)]">
+                Safari on iPhone and iPad has no install button to press — Apple's own choice, not ours — but Add to Home Screen does the same thing:
+              </p>
+              <ul className="mt-3 space-y-2 text-[13px] text-[var(--text-main)]">
+                <li className="flex items-start gap-2">
+                  <Share2 size={15} className="mt-0.5 shrink-0 text-[var(--accent-primary)]" />
+                  Tap the <strong>Share</strong> icon in Safari's toolbar.
+                </li>
+                <li className="flex items-start gap-2">
+                  <Plus size={15} className="mt-0.5 shrink-0 text-[var(--accent-primary)]" />
+                  Scroll down and tap <strong>Add to Home Screen</strong>.
+                </li>
+                <li className="flex items-start gap-2">
+                  <Check size={15} className="mt-0.5 shrink-0 text-[var(--accent-primary)]" />
+                  Tap <strong>Add</strong>. The Joint-Agent icon appears on your Home Screen, and opens full-screen from there.
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      )}
 
       {projectLimitOpen && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-black/70 backdrop-blur-sm" onClick={() => setProjectLimitOpen(false)}>
@@ -4762,7 +4860,7 @@ export default function App() {
                   className="w-full mt-2 py-2.5 rounded-lg text-white text-sm font-bold shadow-md flex items-center justify-center gap-2 transition"
                   style={{ background: 'var(--gradient-hero)' }}
                 >
-                  <Rocket size={15} /> Get PRO — 10× more
+                  <Rocket size={15} /> Get PRO — {PRO_WINDOW_TOKENS / FREE_WINDOW_TOKENS}× more
                 </button>
               )}
               <button
@@ -4818,6 +4916,18 @@ export default function App() {
           onClose={() => setWebPreviewOpen(false)}
           code={code}
           lines={terminalLines.map((l) => l.text)}
+        />
+      )}
+
+      {buildAppOpen && (
+        <BuildAppModal
+          onClose={() => setBuildAppOpen(false)}
+          code={code}
+          onCodeChange={setCode}
+          projectName={currentProjectName}
+          description={description}
+          signedIn={!!user}
+          onQuotaBlocked={setQuotaBlockInfo}
         />
       )}
 
